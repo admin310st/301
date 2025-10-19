@@ -11,7 +11,7 @@ jobs:
   update-wiki:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # нужно для пуша в wiki
+      contents: write
 
     steps:
       - name: Checkout main repository
@@ -27,7 +27,6 @@ jobs:
         id: branch
         run: |
           cd wiki_repo
-          # Проверяем, есть ли ветка main или master
           if git show-ref --verify --quiet refs/remotes/origin/main; then
             BRANCH="main"
           elif git show-ref --verify --quiet refs/remotes/origin/master; then
@@ -40,14 +39,12 @@ jobs:
 
       - name: Sync wiki content
         run: |
-          # Синхронизация без удаления .git
-          rsync -av --delete --exclude='.git/' wiki/ wiki_repo/
+          rsync -av --delete --exclude=.git wiki/ wiki_repo/
 
           cd wiki_repo
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Проверяем изменения
           git add .
           if git diff --staged --quiet; then
             echo "No changes to commit."
@@ -56,6 +53,6 @@ jobs:
             git commit -m "$COMMIT_MSG"
             echo "Committed: $COMMIT_MSG"
             git push origin ${{ steps.branch.outputs.branch }}
-            echo "Wiki updated successfully."
+            echo " Wiki updated successfully."
           fi
 
