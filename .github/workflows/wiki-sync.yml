@@ -53,6 +53,6 @@ jobs:
             git commit -m "$COMMIT_MSG"
             echo "Committed: $COMMIT_MSG"
             git push origin ${{ steps.branch.outputs.branch }}
-            echo " Wiki updated successfully."
+            echo "Wiki updated successfully."
           fi
 
