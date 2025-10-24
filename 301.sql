@@ -170,3 +170,165 @@ COMMENT ON COLUMN zone_settings.caching_level IS 'Режим кеширован�
 COMMENT ON COLUMN zone_settings.waf_mode IS 'Уровень защиты WAF (off, low, medium, high).';
 COMMENT ON COLUMN zone_settings.updated_at IS 'Дата последнего изменения настроек.';
 
+-- ======================================================
+-- IV. REDIRECTS AND TDS RULES
+-- ======================================================
+
+CREATE TABLE redirect_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    template_json TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE redirect_templates IS 'Системные шаблоны редиректов, доступные пользователям для копирования.';
+COMMENT ON COLUMN redirect_templates.id IS 'Уникальный идентификатор шаблона.';
+COMMENT ON COLUMN redirect_templates.name IS 'Название шаблона редиректа.';
+COMMENT ON COLUMN redirect_templates.description IS 'Описание назначения шаблона.';
+COMMENT ON COLUMN redirect_templates.template_json IS 'JSON-конфигурация шаблона правил.';
+COMMENT ON COLUMN redirect_templates.created_at IS 'Дата создания шаблона.';
+
+CREATE TABLE redirect_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    domain_id INTEGER NOT NULL,
+    source_url TEXT NOT NULL,
+    target_url TEXT NOT NULL,
+    status_code INTEGER DEFAULT 301,
+    conditions_json TEXT,
+    priority INTEGER DEFAULT 0,
+    is_active INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE redirect_rules IS 'Пользовательские правила редиректов (source → target, условия и приоритет).';
+COMMENT ON COLUMN redirect_rules.id IS 'Уникальный идентификатор правила редиректа.';
+COMMENT ON COLUMN redirect_rules.account_id IS 'Ссылка на аккаунт клиента (accounts.id).';
+COMMENT ON COLUMN redirect_rules.domain_id IS 'Ссылка на домен (domains.id).';
+COMMENT ON COLUMN redirect_rules.source_url IS 'Исходный URL для перенаправления.';
+COMMENT ON COLUMN redirect_rules.target_url IS 'Целевой URL для перенаправления.';
+COMMENT ON COLUMN redirect_rules.status_code IS 'HTTP-код ответа (301, 302).';
+COMMENT ON COLUMN redirect_rules.conditions_json IS 'JSON с условиями выполнения (geo, device, query и т.п.).';
+COMMENT ON COLUMN redirect_rules.priority IS 'Приоритет выполнения правила (0 — низкий, выше — раньше).';
+COMMENT ON COLUMN redirect_rules.is_active IS 'Флаг активности правила (1 — активно).';
+COMMENT ON COLUMN redirect_rules.created_at IS 'Дата создания правила.';
+
+CREATE TABLE tds_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    domain_id INTEGER NOT NULL,
+    rule_name TEXT NOT NULL,
+    logic_json TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE tds_rules IS 'Набор правил распределения трафика (Traffic Distribution System).';
+COMMENT ON COLUMN tds_rules.id IS 'Уникальный идентификатор TDS-правила.';
+COMMENT ON COLUMN tds_rules.account_id IS 'Ссылка на аккаунт (accounts.id).';
+COMMENT ON COLUMN tds_rules.domain_id IS 'Ссылка на домен (domains.id).';
+COMMENT ON COLUMN tds_rules.rule_name IS 'Название TDS-правила.';
+COMMENT ON COLUMN tds_rules.logic_json IS 'JSON-описание логики маршрутизации (geo, weight, utm и т.д.).';
+COMMENT ON COLUMN tds_rules.created_at IS 'Дата создания правила.';
+
+-- ======================================================
+-- V. WORKERS AND DEPLOY MANAGEMENT
+-- ======================================================
+
+CREATE TABLE worker_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    code_template TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE worker_templates IS 'Системные шаблоны воркеров (core, edge, client) для деплоя в CF.';
+COMMENT ON COLUMN worker_templates.id IS 'Уникальный идентификатор шаблона воркера.';
+COMMENT ON COLUMN worker_templates.name IS 'Название шаблона воркера.';
+COMMENT ON COLUMN worker_templates.description IS 'Описание назначения воркера.';
+COMMENT ON COLUMN worker_templates.code_template IS 'Исходный код шаблона (TypeScript/JS).';
+COMMENT ON COLUMN worker_templates.created_at IS 'Дата создания шаблона.';
+
+CREATE TABLE workers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    domain_id INTEGER,
+    template_id INTEGER,
+    version TEXT,
+    status TEXT DEFAULT 'active',
+    last_deploy TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE workers IS 'Экземпляры воркеров (развёрнутых у клиентов или в ядре 301.st).';
+COMMENT ON COLUMN workers.id IS 'Уникальный идентификатор воркера.';
+COMMENT ON COLUMN workers.account_id IS 'Ссылка на аккаунт (accounts.id).';
+COMMENT ON COLUMN workers.domain_id IS 'Ссылка на домен (domains.id).';
+COMMENT ON COLUMN workers.template_id IS 'Ссылка на шаблон воркера (worker_templates.id).';
+COMMENT ON COLUMN workers.version IS 'Версия кода воркера.';
+COMMENT ON COLUMN workers.status IS 'Текущий статус воркера (active, disabled, error).';
+COMMENT ON COLUMN workers.last_deploy IS 'Дата последнего деплоя воркера.';
+COMMENT ON COLUMN workers.created_at IS 'Дата создания воркера в системе.';
+
+-- ======================================================
+-- VI. ANALYTICS, AUDIT, TASKS
+-- ======================================================
+
+CREATE TABLE redirect_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain_id INTEGER NOT NULL,
+    source_url TEXT,
+    target_url TEXT,
+    status_code INTEGER,
+    ip TEXT,
+    country TEXT,
+    user_agent TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE redirect_logs IS 'Сырые логи переходов по редиректам (для аналитики и статистики).';
+COMMENT ON COLUMN redirect_logs.id IS 'Уникальный идентификатор записи лога.';
+COMMENT ON COLUMN redirect_logs.domain_id IS 'Ссылка на домен (domains.id).';
+COMMENT ON COLUMN redirect_logs.source_url IS 'URL источника запроса.';
+COMMENT ON COLUMN redirect_logs.target_url IS 'Целевой URL редиректа.';
+COMMENT ON COLUMN redirect_logs.status_code IS 'HTTP-код редиректа (301, 302).';
+COMMENT ON COLUMN redirect_logs.ip IS 'IP-адрес посетителя.';
+COMMENT ON COLUMN redirect_logs.country IS 'Страна посетителя (по GeoIP).';
+COMMENT ON COLUMN redirect_logs.user_agent IS 'User-Agent клиента (браузер, устройство).';
+COMMENT ON COLUMN redirect_logs.created_at IS 'Дата и время редиректа.';
+
+CREATE TABLE analytics_summary (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain_id INTEGER NOT NULL,
+    date DATE NOT NULL,
+    redirects_count INTEGER DEFAULT 0,
+    unique_visitors INTEGER DEFAULT 0,
+    top_country TEXT,
+    top_device TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE analytics_summary IS 'Агрегированные данные аналитики по доменам и дням.';
+COMMENT ON COLUMN analytics_summary.id IS 'Уникальный идентификатор записи статистики.';
+COMMENT ON COLUMN analytics_summary.domain_id IS 'Ссылка на домен (domains.id).';
+COMMENT ON COLUMN analytics_summary.date IS 'Дата сбора данных.';
+COMMENT ON COLUMN analytics_summary.redirects_count IS 'Количество редиректов за день.';
+COMMENT ON COLUMN analytics_summary.unique_visitors IS 'Количество уникальных посетителей.';
+COMMENT ON COLUMN analytics_summary.top_country IS 'Страна с наибольшим трафиком.';
+COMMENT ON COLUMN analytics_summary.top_device IS 'Тип устройства с наибольшей долей (desktop/mobile).';
+COMMENT ON COLUMN analytics_summary.created_at IS 'Дата формирования записи.';
+
+CREATE TABLE tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    task_type TEXT NOT NULL,
+    payload_json TEXT,
+    status TEXT DEFAULT 'pending',
+    approved_by INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE tasks IS 'Очередь задач и акцептов действий пользователей (деплои, обновления).';
+COMMENT ON COLUMN tasks.id IS 'Уникальный идентификатор задачи.';
+COMMENT ON COLUMN tasks.account_id IS 'Ссылка на аккаунт (accounts.id).';
+COMMENT ON COLUMN tasks.task_type IS 'Тип задачи (deploy, sync, revoke, backup).';
+COMMENT ON COLUMN tasks.payload_json IS 'JSON-полезная нагрузка (параметры операции).';
+COMMENT ON COLUMN tasks.status IS 'Статус выполнения задачи (pending, processing, completed, error).';
+COMMENT ON COLUMN tasks.approved_by IS 'ID пользователя, подтвердившего задачу.';
+COMMENT ON COLUMN tasks.created_at IS 'Дата создания задачи.';
+COMMENT ON COLUMN tasks.updated_at IS 'Дата последнего изменения записи.';
+
