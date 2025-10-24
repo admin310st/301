@@ -89,6 +89,22 @@ COMMENT ON COLUMN account_keys.expires_at IS 'Срок действия ключ
 COMMENT ON COLUMN account_keys.last_used IS 'Дата последнего использования ключа.';
 COMMENT ON COLUMN account_keys.created_at IS 'Дата добавления ключа в систему.';
 
+CREATE TABLE audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER,
+    user_id INTEGER,
+    action TEXT NOT NULL,
+    details TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE audit_log IS 'Журнал действий пользователей и системных событий.';
+COMMENT ON COLUMN audit_log.account_id IS 'Ссылка на аккаунт (accounts.id).';
+COMMENT ON COLUMN audit_log.user_id IS 'Ссылка на пользователя (users.id).';
+COMMENT ON COLUMN audit_log.action IS 'Тип действия (login, deploy, revoke, edit и т.п.).';
+COMMENT ON COLUMN audit_log.details IS 'Дополнительные сведения об операции.';
+COMMENT ON COLUMN audit_log.created_at IS 'Дата и время регистрации события.';
+
+
 -- ======================================================
 -- III. PROJECTS AND DOMAINS
 -- ======================================================
@@ -331,4 +347,19 @@ COMMENT ON COLUMN tasks.status IS 'Статус выполнения задач�
 COMMENT ON COLUMN tasks.approved_by IS 'ID пользователя, подтвердившего задачу.';
 COMMENT ON COLUMN tasks.created_at IS 'Дата создания задачи.';
 COMMENT ON COLUMN tasks.updated_at IS 'Дата последнего изменения записи.';
+
+CREATE TABLE backups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER,
+    backup_type TEXT DEFAULT 'full',
+    r2_path TEXT,
+    size_mb REAL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE backups IS 'Регистр резервных копий D1/KV/R2.';
+COMMENT ON COLUMN backups.account_id IS 'Ссылка на аккаунт (accounts.id).';
+COMMENT ON COLUMN backups.backup_type IS 'Тип резервной копии (full, kv, analytics).';
+COMMENT ON COLUMN backups.r2_path IS 'Путь к архиву в R2.';
+COMMENT ON COLUMN backups.size_mb IS 'Размер архива в мегабайтах.';
+COMMENT ON COLUMN backups.created_at IS 'Дата создания резервной копии.';
 
