@@ -13,17 +13,20 @@ CREATE TABLE users (
     google_sub TEXT,
     name TEXT,
     role TEXT DEFAULT 'user',
+    user_type TEXT DEFAULT 'client',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-COMMENT ON TABLE users IS 'Таблица учётных записей пользователей платформы 301.st (Classic и OAuth).';
+
+COMMENT ON TABLE users IS 'Учётные записи пользователей платформы 301.st: администраторы, операторы и клиенты.';
 COMMENT ON COLUMN users.id IS 'Уникальный идентификатор пользователя.';
 COMMENT ON COLUMN users.email IS 'Email пользователя, используется для входа.';
-COMMENT ON COLUMN users.password_hash IS 'Хэш пароля, если используется Classic Auth.';
-COMMENT ON COLUMN users.google_sub IS 'Идентификатор пользователя в Google OAuth (sub).';
-COMMENT ON COLUMN users.name IS 'Имя пользователя или название организации.';
-COMMENT ON COLUMN users.role IS 'Роль в системе (user, admin).';
-COMMENT ON COLUMN users.created_at IS 'Дата создания учётной записи.';
+COMMENT ON COLUMN users.password_hash IS 'Хэш пароля (bcrypt/scrypt).';
+COMMENT ON COLUMN users.google_sub IS 'Идентификатор пользователя в Google OAuth.';
+COMMENT ON COLUMN users.name IS 'Имя пользователя или организация.';
+COMMENT ON COLUMN users.role IS 'Роль (user, admin) — внутренняя системная категория.';
+COMMENT ON COLUMN users.user_type IS 'Тип пользователя: admin, operator, client.';
+COMMENT ON COLUMN users.created_at IS 'Дата создания записи.';
 COMMENT ON COLUMN users.updated_at IS 'Дата последнего обновления записи.';
 
 CREATE TABLE sessions (
@@ -55,22 +58,26 @@ CREATE TABLE accounts (
     account_name TEXT NOT NULL,
     cf_account_id TEXT,
     plan TEXT DEFAULT 'free',
+    status TEXT DEFAULT 'active',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-COMMENT ON TABLE accounts IS 'Учётные записи клиентов (тенанты) с параметрами и тарифным планом.';
+
+COMMENT ON TABLE accounts IS 'Аккаунты клиентов (тенанты) с параметрами, тарифом и текущим статусом.';
 COMMENT ON COLUMN accounts.id IS 'Уникальный идентификатор аккаунта.';
 COMMENT ON COLUMN accounts.user_id IS 'Ссылка на владельца аккаунта (users.id).';
 COMMENT ON COLUMN accounts.account_name IS 'Название клиента или организации.';
-COMMENT ON COLUMN accounts.cf_account_id IS 'ID аккаунта Cloudflare, связанного с этим клиентом.';
+COMMENT ON COLUMN accounts.cf_account_id IS 'ID аккаунта Cloudflare, связанного с клиентом.';
 COMMENT ON COLUMN accounts.plan IS 'Тарифный план (free, pro, enterprise).';
+COMMENT ON COLUMN accounts.status IS 'Статус аккаунта (active, suspended, overdue, deleted). Используется для блокировки при неуплате.';
 COMMENT ON COLUMN accounts.created_at IS 'Дата создания аккаунта.';
-COMMENT ON COLUMN accounts.updated_at IS 'Дата последнего обновления записи.';
+COMMENT ON COLUMN accounts.updated_at IS 'Дата последнего изменения записи.';
 
 CREATE TABLE account_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     provider TEXT NOT NULL,
+    provider_scope TEXT,
     key_alias TEXT,
     kv_key TEXT NOT NULL,
     status TEXT DEFAULT 'active',
@@ -78,16 +85,18 @@ CREATE TABLE account_keys (
     last_used TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-COMMENT ON TABLE account_keys IS 'API-ключи пользователей (Cloudflare, Namecheap, HostTracker и др.), зашифрованные и сохранённые в KV.';
+
+COMMENT ON TABLE account_keys IS 'Зашифрованные API-ключи внешних сервисов, хранящиеся в KV. Метаданные записаны в D1.';
 COMMENT ON COLUMN account_keys.id IS 'Уникальный идентификатор ключа.';
 COMMENT ON COLUMN account_keys.account_id IS 'Ссылка на аккаунт (accounts.id).';
-COMMENT ON COLUMN account_keys.provider IS 'Провайдер (cloudflare, namecheap, hosttracker и др.).';
-COMMENT ON COLUMN account_keys.key_alias IS 'Псевдоним ключа, заданный пользователем.';
-COMMENT ON COLUMN account_keys.kv_key IS 'Ключ записи в KV-хранилище с зашифрованным значением.';
+COMMENT ON COLUMN account_keys.provider IS 'Провайдер: cloudflare, namecheap, hosttracker, analytics.';
+COMMENT ON COLUMN account_keys.provider_scope IS 'Область действия ключа (zones, dns, workers и т.п.).';
+COMMENT ON COLUMN account_keys.key_alias IS 'Псевдоним ключа, указанный пользователем.';
+COMMENT ON COLUMN account_keys.kv_key IS 'Ключ записи в KV с зашифрованным значением.';
 COMMENT ON COLUMN account_keys.status IS 'Статус ключа (active, revoked).';
-COMMENT ON COLUMN account_keys.expires_at IS 'Срок действия ключа, если ограничен.';
+COMMENT ON COLUMN account_keys.expires_at IS 'Срок действия ключа.';
 COMMENT ON COLUMN account_keys.last_used IS 'Дата последнего использования ключа.';
-COMMENT ON COLUMN account_keys.created_at IS 'Дата добавления ключа в систему.';
+COMMENT ON COLUMN account_keys.created_at IS 'Дата добавления ключа.';
 
 CREATE TABLE audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,15 +104,18 @@ CREATE TABLE audit_log (
     user_id INTEGER,
     action TEXT NOT NULL,
     details TEXT,
+    role TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-COMMENT ON TABLE audit_log IS 'Журнал действий пользователей и системных событий.';
+
+COMMENT ON TABLE audit_log IS 'Журнал действий пользователей и администраторов системы.';
+COMMENT ON COLUMN audit_log.id IS 'Уникальный идентификатор записи аудита.';
 COMMENT ON COLUMN audit_log.account_id IS 'Ссылка на аккаунт (accounts.id).';
 COMMENT ON COLUMN audit_log.user_id IS 'Ссылка на пользователя (users.id).';
-COMMENT ON COLUMN audit_log.action IS 'Тип действия (login, deploy, revoke, edit и т.п.).';
-COMMENT ON COLUMN audit_log.details IS 'Дополнительные сведения об операции.';
-COMMENT ON COLUMN audit_log.created_at IS 'Дата и время регистрации события.';
-
+COMMENT ON COLUMN audit_log.action IS 'Тип действия (login, create, deploy, revoke, billing, etc).';
+COMMENT ON COLUMN audit_log.details IS 'Дополнительные данные о событии.';
+COMMENT ON COLUMN audit_log.role IS 'Роль пользователя в момент выполнения действия.';
+COMMENT ON COLUMN audit_log.created_at IS 'Дата и время фиксации события.';
 
 -- ======================================================
 -- III. PROJECTS AND DOMAINS
