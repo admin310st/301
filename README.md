@@ -1,5 +1,7 @@
 # Cтруктура проекта 301/
 
+
+```plaintext
 301/
 ├── README.md                    # Краткое описание, ссылки, инструкция запуска
 ├── wrangler.toml                # Основная конфигурация для Cloudflare Workers
@@ -81,7 +83,7 @@
         ├── deploy.yml           # CI/CD деплой через wrangler
         ├── backup.yml           # ежедневные бэкапы
         └── sync_wiki.yml        # синхронизация wiki
-
+```
 
 ## Логическая группировка
 
