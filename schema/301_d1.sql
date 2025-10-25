@@ -1,9 +1,7 @@
--- Cloudflare D1 schema for 301.st (converted 1:1 from 301.sql)
--- SQLite-compatible DDL
--- Порядок таблиц от независимых к зависимым для корректной инициализации внешних ключей
+-- Cloudflare D1 Safe Schema for 301.st (autonomous / re-apply friendly)
 
 -- 1. Базовые таблицы без внешних зависимостей
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT,
@@ -16,7 +14,7 @@ CREATE TABLE users (
 );
 
 -- 2. Таблица аккаунтов (ссылается на users)
-CREATE TABLE accounts (
+CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id TEXT NOT NULL UNIQUE,
     user_id INTEGER NOT NULL,
@@ -29,7 +27,7 @@ CREATE TABLE accounts (
 );
 
 -- 3. Таблицы, зависящие от users и accounts
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     access_token TEXT,
@@ -41,7 +39,7 @@ CREATE TABLE sessions (
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
-CREATE TABLE account_keys (
+CREATE TABLE IF NOT EXISTS account_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     provider TEXT NOT NULL,
@@ -52,7 +50,7 @@ CREATE TABLE account_keys (
 );
 
 -- 4. Проекты и домены (зависят от accounts)
-CREATE TABLE projects (
+CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     name TEXT NOT NULL,
@@ -62,7 +60,7 @@ CREATE TABLE projects (
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
 
-CREATE TABLE domains (
+CREATE TABLE IF NOT EXISTS domains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL,
     account_id INTEGER NOT NULL,
@@ -75,7 +73,7 @@ CREATE TABLE domains (
     FOREIGN KEY (project_id) REFERENCES projects(id)
 );
 
-CREATE TABLE zones (
+CREATE TABLE IF NOT EXISTS zones (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     domain_id INTEGER NOT NULL,
     zone_name TEXT NOT NULL,
@@ -87,7 +85,7 @@ CREATE TABLE zones (
 );
 
 -- 5. Таблицы логики редиректов и TDS (зависят от доменов)
-CREATE TABLE redirect_rules (
+CREATE TABLE IF NOT EXISTS redirect_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     domain_id INTEGER NOT NULL,
     rule_name TEXT,
@@ -99,7 +97,7 @@ CREATE TABLE redirect_rules (
     FOREIGN KEY (domain_id) REFERENCES domains(id)
 );
 
-CREATE TABLE redirect_templates (
+CREATE TABLE IF NOT EXISTS redirect_templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     name TEXT,
@@ -107,7 +105,7 @@ CREATE TABLE redirect_templates (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE tds_rules (
+CREATE TABLE IF NOT EXISTS tds_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     domain_id INTEGER NOT NULL,
     rule_json TEXT,
@@ -115,7 +113,7 @@ CREATE TABLE tds_rules (
 );
 
 -- 6. Воркеры и шаблоны (используют account_id и domain_id)
-CREATE TABLE workers (
+CREATE TABLE IF NOT EXISTS workers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     domain_id INTEGER,
@@ -126,7 +124,7 @@ CREATE TABLE workers (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE worker_templates (
+CREATE TABLE IF NOT EXISTS worker_templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
     description TEXT,
@@ -135,7 +133,7 @@ CREATE TABLE worker_templates (
 );
 
 -- 7. Аналитика и логи (зависят от доменов и аккаунтов)
-CREATE TABLE redirect_logs (
+CREATE TABLE IF NOT EXISTS redirect_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     domain_id INTEGER NOT NULL,
     url TEXT,
@@ -145,7 +143,7 @@ CREATE TABLE redirect_logs (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE analytics_summary (
+CREATE TABLE IF NOT EXISTS analytics_summary (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER,
     domain_id INTEGER,
@@ -156,7 +154,7 @@ CREATE TABLE analytics_summary (
 );
 
 -- 8. Служебные таблицы (tasks, audit, backups)
-CREATE TABLE tasks (
+CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER,
     type TEXT,
@@ -166,7 +164,7 @@ CREATE TABLE tasks (
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE audit_log (
+CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER,
     user_id INTEGER,
@@ -175,7 +173,7 @@ CREATE TABLE audit_log (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE backups (
+CREATE TABLE IF NOT EXISTS backups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER,
     type TEXT CHECK(type IN ('d1','kv','r2')),
@@ -183,3 +181,16 @@ CREATE TABLE backups (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 9. Индексы 
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_accounts_user_id ON accounts(user_id);
+CREATE INDEX IF NOT EXISTS idx_domains_account_id ON domains(account_id);
+CREATE INDEX IF NOT EXISTS idx_redirect_rules_domain_id ON redirect_rules(domain_id);
+CREATE INDEX IF NOT EXISTS idx_tds_rules_domain_id ON tds_rules(domain_id);
+CREATE INDEX IF NOT EXISTS idx_redirect_logs_domain_id ON redirect_logs(domain_id);
+
+
+
+-- Safe field updates (example):
+-- ALTER TABLE users ADD COLUMN phone TEXT; -- only if not exists
+-- Для миграций создавайте отдельные файлы schema/migrations/00X_add_field.sql

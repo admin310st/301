@@ -6,7 +6,7 @@
 -- ======================================================
 -- I. USERS AND AUTHENTICATION
 -- ======================================================
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT,
@@ -29,7 +29,7 @@ COMMENT ON COLUMN users.user_type IS 'Тип пользователя: admin, op
 COMMENT ON COLUMN users.created_at IS 'Дата создания записи.';
 COMMENT ON COLUMN users.updated_at IS 'Дата последнего обновления записи.';
 
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     refresh_id TEXT UNIQUE,
@@ -52,7 +52,7 @@ COMMENT ON COLUMN sessions.expires_at IS 'Дата окончания дейст
 -- ======================================================
 -- II. ACCOUNTS AND INTEGRATIONS
 -- ======================================================
-CREATE TABLE accounts (
+CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     account_name TEXT NOT NULL,
@@ -73,7 +73,7 @@ COMMENT ON COLUMN accounts.status IS 'Статус аккаунта (active, sus
 COMMENT ON COLUMN accounts.created_at IS 'Дата создания аккаунта.';
 COMMENT ON COLUMN accounts.updated_at IS 'Дата последнего изменения записи.';
 
-CREATE TABLE account_keys (
+CREATE TABLE IF NOT EXISTS account_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     provider TEXT NOT NULL,
@@ -98,7 +98,7 @@ COMMENT ON COLUMN account_keys.expires_at IS 'Срок действия ключ
 COMMENT ON COLUMN account_keys.last_used IS 'Дата последнего использования ключа.';
 COMMENT ON COLUMN account_keys.created_at IS 'Дата добавления ключа.';
 
-CREATE TABLE audit_log (
+CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER,
     user_id INTEGER,
@@ -120,7 +120,7 @@ COMMENT ON COLUMN audit_log.created_at IS 'Дата и время фиксаци
 -- ======================================================
 -- III. PROJECTS AND DOMAINS
 -- ======================================================
-CREATE TABLE projects (
+CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     project_name TEXT NOT NULL,
@@ -136,7 +136,7 @@ COMMENT ON COLUMN projects.description IS 'Описание проекта ил�
 COMMENT ON COLUMN projects.created_at IS 'Дата создания проекта.';
 COMMENT ON COLUMN projects.updated_at IS 'Дата последнего изменения.';
 
-CREATE TABLE domains (
+CREATE TABLE IF NOT EXISTS domains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     project_id INTEGER,
@@ -160,7 +160,7 @@ COMMENT ON COLUMN domains.ns_status IS 'Текущий статус NS-запи�
 COMMENT ON COLUMN domains.ns_verified_at IS 'Дата последней успешной проверки NS.';
 COMMENT ON COLUMN domains.created_at IS 'Дата добавления домена в систему.';
 
-CREATE TABLE zones (
+CREATE TABLE IF NOT EXISTS zones (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     domain_id INTEGER NOT NULL,
@@ -182,7 +182,7 @@ COMMENT ON COLUMN zones.plan IS 'Тариф Cloudflare для зоны.';
 COMMENT ON COLUMN zones.cf_status IS 'Текущий статус зоны в Cloudflare (active, pending и т.п.).';
 COMMENT ON COLUMN zones.created_at IS 'Дата создания записи зоны.';
 
-CREATE TABLE zone_settings (
+CREATE TABLE IF NOT EXISTS zone_settings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     zone_id INTEGER NOT NULL,
     auto_https INTEGER DEFAULT 1,
@@ -202,7 +202,7 @@ COMMENT ON COLUMN zone_settings.updated_at IS 'Дата последнего и�
 -- IV. REDIRECTS AND TDS RULES
 -- ======================================================
 
-CREATE TABLE redirect_templates (
+CREATE TABLE IF NOT EXISTS redirect_templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     description TEXT,
@@ -216,7 +216,7 @@ COMMENT ON COLUMN redirect_templates.description IS 'Описание назна
 COMMENT ON COLUMN redirect_templates.template_json IS 'JSON-конфигурация шаблона правил.';
 COMMENT ON COLUMN redirect_templates.created_at IS 'Дата создания шаблона.';
 
-CREATE TABLE redirect_rules (
+CREATE TABLE IF NOT EXISTS redirect_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     domain_id INTEGER NOT NULL,
@@ -240,7 +240,7 @@ COMMENT ON COLUMN redirect_rules.priority IS 'Приоритет выполне�
 COMMENT ON COLUMN redirect_rules.is_active IS 'Флаг активности правила (1 — активно).';
 COMMENT ON COLUMN redirect_rules.created_at IS 'Дата создания правила.';
 
-CREATE TABLE tds_rules (
+CREATE TABLE IF NOT EXISTS tds_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     domain_id INTEGER NOT NULL,
@@ -260,7 +260,7 @@ COMMENT ON COLUMN tds_rules.created_at IS 'Дата создания прави�
 -- V. WORKERS AND DEPLOY MANAGEMENT
 -- ======================================================
 
-CREATE TABLE worker_templates (
+CREATE TABLE IF NOT EXISTS worker_templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     description TEXT,
@@ -274,7 +274,7 @@ COMMENT ON COLUMN worker_templates.description IS 'Описание назнач
 COMMENT ON COLUMN worker_templates.code_template IS 'Исходный код шаблона (TypeScript/JS).';
 COMMENT ON COLUMN worker_templates.created_at IS 'Дата создания шаблона.';
 
-CREATE TABLE workers (
+CREATE TABLE IF NOT EXISTS workers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     domain_id INTEGER,
@@ -298,7 +298,7 @@ COMMENT ON COLUMN workers.created_at IS 'Дата создания воркер�
 -- VI. ANALYTICS, AUDIT, TASKS
 -- ======================================================
 
-CREATE TABLE redirect_logs (
+CREATE TABLE IF NOT EXISTS redirect_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     domain_id INTEGER NOT NULL,
     source_url TEXT,
@@ -320,7 +320,7 @@ COMMENT ON COLUMN redirect_logs.country IS 'Страна посетителя (�
 COMMENT ON COLUMN redirect_logs.user_agent IS 'User-Agent клиента (браузер, устройство).';
 COMMENT ON COLUMN redirect_logs.created_at IS 'Дата и время редиректа.';
 
-CREATE TABLE analytics_summary (
+CREATE TABLE IF NOT EXISTS analytics_summary (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     domain_id INTEGER NOT NULL,
     date DATE NOT NULL,
@@ -340,7 +340,7 @@ COMMENT ON COLUMN analytics_summary.top_country IS 'Страна с наибол
 COMMENT ON COLUMN analytics_summary.top_device IS 'Тип устройства с наибольшей долей (desktop/mobile).';
 COMMENT ON COLUMN analytics_summary.created_at IS 'Дата формирования записи.';
 
-CREATE TABLE tasks (
+CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     task_type TEXT NOT NULL,
@@ -360,7 +360,7 @@ COMMENT ON COLUMN tasks.approved_by IS 'ID пользователя, подтв�
 COMMENT ON COLUMN tasks.created_at IS 'Дата создания задачи.';
 COMMENT ON COLUMN tasks.updated_at IS 'Дата последнего изменения записи.';
 
-CREATE TABLE backups (
+CREATE TABLE IF NOT EXISTS backups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER,
     backup_type TEXT DEFAULT 'full',
