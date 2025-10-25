@@ -1,0 +1,28 @@
+name = "301"
+main = "index.ts"
+compatibility_date = "2025-10-25"
+
+# --- Production ---
+[[d1_databases]]
+binding = "DB301"
+database_name = "301"
+database_id = "8cb2011e-d8d8-4e92-8e6b-6b02961bc60e"
+
+[[kv_namespaces]]
+binding = "KV_SESSIONS"
+id = "ed063b4dbf5b4284b1ecb0b44ea13f7b"
+
+
+# --- Development environment ---
+[env.dev]
+# База D1 для локальных тестов
+[[env.dev.d1_databases]]
+binding = "DB301"
+database_name = "301-dev"
+database_id = "9f55a6f9-beef-4571-84ad-48c1ce5d4a16"
+
+# Можно при желании привязать отдельный KV для тестов
+[[env.dev.kv_namespaces]]
+binding = "KV_SESSIONS"
+id = "ed063b4dbf5b4284b1ecb0b44ea13f7b"
+
