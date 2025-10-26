@@ -3,3 +3,5 @@ node_modules/
 .wrangler/
 dist/
 .env
+wrangler.toml
+src/**/wrangler.toml
