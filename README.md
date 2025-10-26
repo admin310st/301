@@ -175,22 +175,22 @@ compatibility_date = "2025-10-25"
 [[d1_databases]]
 binding = "DB301"
 database_name = "301"
-database_id = "8cb2011e-****-****-****-6b02961bc60e"
+database_id = "********-****-****-****-************"
 
 [[kv_namespaces]]
 binding = "KV_SESSIONS"
-id = "ed063b***************0b44ea13f7b"
+id = "*******************************"
 
 # Development (локальное окружение)
 [env.dev]
 [[env.dev.d1_databases]]
 binding = "DB301"
 database_name = "301-dev"
-database_id = "1a2b3c4****************nopqrstuv"
+database_id = "******************************"
 
 [[env.dev.kv_namespaces]]
 binding = "KV_SESSIONS"
-id = "ed063b4d****************4ea13f7b"
+id = "********************************"
 ```
 
 > `main` должен указывать **на файл внутри текущего каталога** (`index.ts`), а не на `src/api/index.ts`.
