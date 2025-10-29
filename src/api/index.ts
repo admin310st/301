@@ -14,12 +14,18 @@ app.use("*", async (c, next) => {
   const origin = c.req.header("Origin") || "";
 
   // Разрешённые источники (точные и wildcard-домены)
-  const allowedOrigins = [
-    "https://301.st",
-    "https://dev.301.st",
-    /\.apps\.webstudio\.is$/,
-    /\.wstd\.io$/,
-  ];
+
+const allowedOrigins = [
+  "https://301.st",
+  "https://api.301.st",     // 🔓 временно открыт полный доступ к API-домену
+  "https://dev.301.st",
+  /\.apps\.webstudio\.is$/,
+  /\.wstd\.io$/,
+  "http://localhost",
+  "http://localhost:8787",
+  "http://127.0.0.1",
+  "http://127.0.0.1:8787",
+];
 
   // Проверка Origin по списку
   const isAllowed = allowedOrigins.some((pattern) =>
