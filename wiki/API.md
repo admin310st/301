@@ -8,27 +8,77 @@ https://api.301.st/auth
 
 ---
 
-## POST /auth/register — Регистрация пользователя
+# 📘 POST /auth/register — Регистрация пользователя (расширенная версия)
 
 **Описание:**
-Создаёт нового пользователя в D1, хэширует пароль (`bcrypt-ts`) и сохраняет refresh-токен в KV.
+Создаёт нового пользователя в D1, выполняет проверку Cloudflare Turnstile, хэширует пароль (`bcrypt-ts`), создаёт сессию и сохраняет refresh-токен в KV.
 
-### Параметры запроса
+---
 
-| Поле       | Тип    | Обязательно | Описание                           |
-| ---------- | ------ | ----------- | ---------------------------------- |
-| `email`    | string | ✅           | E-mail пользователя                |
-| `password` | string | ✅           | Пароль (plain, хэшируется на Edge) |
+## ⚙️ Алгоритм
 
-### Пример запроса
+1. **Проверка Cloudflare Turnstile** — антибот‑механизм от Cloudflare, аналог reCAPTCHA.
+   Проверяет, что запрос выполнен человеком. Отправляется `token` с фронтенда на API:
 
-```bash
-curl -X POST https://api.301.st/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"email":"user@site.com","password":"secret123"}'
-```
+   ```bash
+   curl -X POST https://api.301.st/auth/register \
+     -H "Content-Type: application/json" \
+     -d '{"email":"user@site.com","password":"secret123","turnstile_token":"..."}'
+   ```
 
-### Пример ответа (201 Created)
+   Воркер обращается к API Turnstile:
+
+   ```js
+   const verify = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+     method: 'POST',
+     body: new URLSearchParams({
+       secret: env.TURNSTILE_SECRET,
+       response: body.turnstile_token
+     })
+   });
+   ```
+
+   При неуспешной верификации возвращается `403 Forbidden`.
+
+2. **Валидация email и пароля** (`zod`):
+   Email должен быть корректным, пароль — длиной не менее 8 символов.
+
+3. **Проверка дубликата**:
+
+   ```sql
+   SELECT id FROM users WHERE email = ?;
+   ```
+
+   Если пользователь уже существует → `409 Conflict`.
+
+4. **Хэширование пароля:**
+
+   ```js
+   const hash = await bcrypt.hash(password, 10);
+   ```
+
+5. **Создание пользователя:**
+
+   ```sql
+   INSERT INTO users (email, password_hash) VALUES (?, ?);
+   ```
+
+6. **Создание сессии:**
+
+   ```sql
+   INSERT INTO sessions (user_id, ip_address, user_agent) VALUES (?, ?, ?);
+   ```
+
+7. **Сохранение refresh-токена в KV:**
+
+   ```js
+   await env.KV_SESSIONS.put(`refresh:${sessionId}`, userId, { expirationTtl: 604800 });
+   ```
+
+8. **Создание JWT:**
+   Access‑токен генерируется через `jose` (TTL 15 минут), добавляется `kid` для проверки подписи.
+
+9. **Ответ пользователю:**
 
 ```json
 {
@@ -47,6 +97,37 @@ curl -X POST https://api.301.st/auth/register \
 
 ```
 refresh_id=<uuid>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
+```
+
+---
+
+## 🔁 Поток регистрации (Mermaid)
+
+```mermaid
+sequenceDiagram
+    participant U as 👤 Пользователь (Webstudio)
+    participant A as ⚙️ API Worker (api.301.st)
+    participant D as 🗄️ D1 (users/sessions)
+    participant K as 🔑 KV (KV_SESSIONS)
+    participant T as 🧩 Turnstile API
+
+    U->>A: POST /auth/register (email, password, token)
+    A->>T: Verify Turnstile token
+    T-->>A: OK / Error
+    alt valid
+        A->>D: SELECT * FROM users WHERE email=?
+        alt not found
+            A->>A: bcrypt.hash(password)
+            A->>D: INSERT user(email, hash)
+            A->>D: INSERT session(user_id, ip, agent)
+            A->>K: PUT refresh:<sessionId>
+            A-->>U: JWT + cookie(refresh_id)
+        else exists
+            A-->>U: 409 Conflict (User exists)
+        end
+    else invalid
+        A-->>U: 403 Forbidden (Bot detected)
+    end
 ```
 
 ---
