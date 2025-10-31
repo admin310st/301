@@ -6,8 +6,15 @@
 PRAGMA foreign_keys = ON;
 
 -- ======================================================
--- I. USERS AND AUTHENTICATION
+-- 301.st — Cloudflare Redirect Management Platform
+-- 301.st — Cloudflare Redirect Management Platform
+-- SQLite / D1 schema (production order)
+-- Execute with:
+--   npx wrangler d1 execute 301 --remote --file=301.sql
 -- ======================================================
+
+-- 1. USERS ------------------------------------------------
+-- 1. USERS ------------------------------------------------
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
@@ -20,6 +27,8 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 2. SESSIONS ---------------------------------------------
+-- 2. SESSIONS ---------------------------------------------
 CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -33,9 +42,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 
--- ======================================================
--- II. ACCOUNTS AND INTEGRATIONS
--- ======================================================
+-- 3. ACCOUNTS ---------------------------------------------
+-- 3. ACCOUNTS ---------------------------------------------
 CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -49,6 +57,8 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 CREATE INDEX IF NOT EXISTS idx_accounts_user_id ON accounts(user_id);
 
+-- 4. ACCOUNT_KEYS -----------------------------------------
+-- 4. ACCOUNT_KEYS -----------------------------------------
 CREATE TABLE IF NOT EXISTS account_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
@@ -64,20 +74,8 @@ CREATE TABLE IF NOT EXISTS account_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_account_keys_account_id ON account_keys(account_id);
 
-CREATE TABLE IF NOT EXISTS audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id INTEGER,
-    user_id INTEGER,
-    action TEXT NOT NULL,
-    details TEXT,
-    role TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_audit_log_account_created ON audit_log(account_id, created_at DESC);
-
--- ======================================================
--- III-A. PROJECTS AND SITES
--- ======================================================
+-- 5. PROJECTS ---------------------------------------------
+-- 5. PROJECTS ---------------------------------------------
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
@@ -93,6 +91,8 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 CREATE INDEX IF NOT EXISTS idx_projects_account_id ON projects(account_id);
 
+-- 6. SITES -------------------------------------------------
+-- 6. SITES -------------------------------------------------
 CREATE TABLE IF NOT EXISTS sites (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL,
@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS sites (
 );
 CREATE INDEX IF NOT EXISTS idx_sites_project_id ON sites(project_id);
 
+-- 7. ZONES -------------------------------------------------
+-- 7. ZONES -------------------------------------------------
 CREATE TABLE IF NOT EXISTS zones (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
@@ -129,7 +131,10 @@ CREATE TABLE IF NOT EXISTS zones (
 );
 CREATE INDEX IF NOT EXISTS idx_zones_site_id ON zones(site_id);
 CREATE INDEX IF NOT EXISTS idx_zones_account_id ON zones(account_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_zones_cf_zone_id ON zones(cf_zone_id);
 
+-- 8. DOMAINS ----------------------------------------------
+-- 8. DOMAINS ----------------------------------------------
 CREATE TABLE IF NOT EXISTS domains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
@@ -145,9 +150,7 @@ CREATE TABLE IF NOT EXISTS domains (
     target_type TEXT CHECK(target_type IN ('ip','cname','worker','redirect')) DEFAULT 'redirect',
     target_value TEXT,
     status TEXT CHECK(status IN ('new','active','blocked')) DEFAULT 'new',
-    blocked_reason TEXT CHECK(blocked_reason IN (
-        'unavailable','ad_network','hosting_registrar','government','manual'
-    )),
+    blocked_reason TEXT,
     blocked_details TEXT,
     blocked_at TIMESTAMP,
     replaced_by INTEGER,
@@ -160,16 +163,12 @@ CREATE TABLE IF NOT EXISTS domains (
     FOREIGN KEY (zone_id) REFERENCES zones(id) ON DELETE CASCADE,
     FOREIGN KEY (replaced_by) REFERENCES domains(id) ON DELETE SET NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_domains_name ON domains(domain_name);
 CREATE INDEX IF NOT EXISTS idx_domains_account_id ON domains(account_id);
 CREATE INDEX IF NOT EXISTS idx_domains_site_id ON domains(site_id);
 CREATE INDEX IF NOT EXISTS idx_domains_zone_id ON domains(zone_id);
-CREATE INDEX IF NOT EXISTS idx_domains_status ON domains(status);
-CREATE INDEX IF NOT EXISTS idx_domains_role ON domains(domain_role);
 
--- ======================================================
--- IV. REDIRECTS AND TDS RULES
--- ======================================================
+-- 9. REDIRECT_TEMPLATES -----------------------------------
+-- 9. REDIRECT_TEMPLATES -----------------------------------
 CREATE TABLE IF NOT EXISTS redirect_templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -178,6 +177,8 @@ CREATE TABLE IF NOT EXISTS redirect_templates (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 10. REDIRECT_RULES --------------------------------------
+-- 10. REDIRECT_RULES --------------------------------------
 CREATE TABLE IF NOT EXISTS redirect_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
@@ -196,6 +197,8 @@ CREATE TABLE IF NOT EXISTS redirect_rules (
 CREATE INDEX IF NOT EXISTS idx_redirect_rules_account_id ON redirect_rules(account_id);
 CREATE INDEX IF NOT EXISTS idx_redirect_rules_site_id ON redirect_rules(site_id);
 
+-- 11. TDS_RULES -------------------------------------------
+-- 11. TDS_RULES -------------------------------------------
 CREATE TABLE IF NOT EXISTS tds_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
@@ -210,9 +213,8 @@ CREATE TABLE IF NOT EXISTS tds_rules (
 CREATE INDEX IF NOT EXISTS idx_tds_rules_account_id ON tds_rules(account_id);
 CREATE INDEX IF NOT EXISTS idx_tds_rules_site_id ON tds_rules(site_id);
 
--- ======================================================
--- V. WORKERS AND DEPLOY MANAGEMENT
--- ======================================================
+-- 12. WORKER_TEMPLATES ------------------------------------
+-- 12. WORKER_TEMPLATES ------------------------------------
 CREATE TABLE IF NOT EXISTS worker_templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -222,6 +224,8 @@ CREATE TABLE IF NOT EXISTS worker_templates (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 13. WORKERS ---------------------------------------------
+-- 13. WORKERS ---------------------------------------------
 CREATE TABLE IF NOT EXISTS workers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
@@ -238,11 +242,9 @@ CREATE TABLE IF NOT EXISTS workers (
 );
 CREATE INDEX IF NOT EXISTS idx_workers_account_id ON workers(account_id);
 CREATE INDEX IF NOT EXISTS idx_workers_site_id ON workers(site_id);
-CREATE INDEX IF NOT EXISTS idx_workers_template_id ON workers(template_id);
 
--- ======================================================
--- VI. ANALYTICS, LOGS, TASKS, BACKUPS
--- ======================================================
+-- 14. REDIRECT_LOGS ---------------------------------------
+-- 14. REDIRECT_LOGS ---------------------------------------
 CREATE TABLE IF NOT EXISTS redirect_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     site_id INTEGER NOT NULL,
@@ -258,6 +260,8 @@ CREATE TABLE IF NOT EXISTS redirect_logs (
 CREATE INDEX IF NOT EXISTS idx_redirect_logs_site_id ON redirect_logs(site_id);
 CREATE INDEX IF NOT EXISTS idx_redirect_logs_created_at ON redirect_logs(created_at);
 
+-- 15. ANALYTICS_SUMMARY -----------------------------------
+-- 15. ANALYTICS_SUMMARY -----------------------------------
 CREATE TABLE IF NOT EXISTS analytics_summary (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     site_id INTEGER NOT NULL,
@@ -272,6 +276,8 @@ CREATE TABLE IF NOT EXISTS analytics_summary (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_analytics_summary_site_date ON analytics_summary(site_id, date);
 
+-- 16. DOMAIN_REPLACEMENT_LOG ------------------------------
+-- 16. DOMAIN_REPLACEMENT_LOG ------------------------------
 CREATE TABLE IF NOT EXISTS domain_replacement_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     old_domain_id INTEGER NOT NULL,
@@ -285,10 +291,7 @@ CREATE TABLE IF NOT EXISTS domain_replacement_log (
     FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_domain_replacement_log_site_id ON domain_replacement_log(site_id);
-
-DROP TRIGGER IF EXISTS limit_domain_log;
-CREATE TRIGGER limit_domain_log
-AFTER INSERT ON domain_replacement_log
+CREATE TRIGGER limit_domain_log AFTER INSERT ON domain_replacement_log
 BEGIN
     DELETE FROM domain_replacement_log
     WHERE site_id = NEW.site_id
@@ -300,6 +303,39 @@ BEGIN
       );
 END;
 
+-- 17. AUDIT_LOG -------------------------------------------
+-- 17. AUDIT_LOG -------------------------------------------
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER,
+    user_id INTEGER,
+    event_type TEXT CHECK(event_type IN (
+        'register','login','logout','refresh',
+        'create','update','delete','deploy','revoke','billing'
+    )) NOT NULL,
+    ip_address TEXT,
+    user_agent TEXT,
+    details TEXT,
+    role TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE SET NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log(user_id);
+CREATE TRIGGER limit_audit_log AFTER INSERT ON audit_log
+BEGIN
+    DELETE FROM audit_log
+    WHERE user_id = NEW.user_id
+      AND id NOT IN (
+          SELECT id FROM audit_log
+          WHERE user_id = NEW.user_id
+          ORDER BY created_at DESC, id DESC
+          LIMIT 10
+      );
+END;
+
+-- 18. TASKS -----------------------------------------------
+-- 18. TASKS -----------------------------------------------
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
@@ -315,6 +351,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_account_id ON tasks(account_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 
+-- 19. BACKUPS ---------------------------------------------
+-- 19. BACKUPS ---------------------------------------------
 CREATE TABLE IF NOT EXISTS backups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER,
@@ -326,4 +364,18 @@ CREATE TABLE IF NOT EXISTS backups (
 CREATE INDEX IF NOT EXISTS idx_backups_account_id ON backups(account_id);
 CREATE INDEX IF NOT EXISTS idx_backups_created_at ON backups(created_at);
 
+-- 20. JWT_KEYS --------------------------------------------
+-- 20. JWT_KEYS --------------------------------------------
+CREATE TABLE IF NOT EXISTS jwt_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER,
+    kid TEXT UNIQUE NOT NULL,
+    secret_encrypted TEXT NOT NULL,
+    status TEXT CHECK(status IN ('active','deprecated','revoked')) DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_jwt_keys_account_id ON jwt_keys(account_id);
+CREATE INDEX IF NOT EXISTS idx_jwt_keys_status ON jwt_keys(status);
 

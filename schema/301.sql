@@ -108,28 +108,6 @@ COMMENT ON COLUMN account_keys.expires_at IS 'Срок действия ключ
 COMMENT ON COLUMN account_keys.last_used IS 'Дата последнего использования ключа.';
 COMMENT ON COLUMN account_keys.created_at IS 'Дата добавления ключа.';
 
-CREATE TABLE IF NOT EXISTS audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id INTEGER,
-    user_id INTEGER,
-    action TEXT NOT NULL,
-    details TEXT,
-    role TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_audit_log_account_created ON audit_log(account_id, created_at DESC);
-
-COMMENT ON TABLE audit_log IS 'Журнал действий пользователей и администраторов системы.';
-COMMENT ON COLUMN audit_log.id IS 'Уникальный идентификатор записи аудита.';
-COMMENT ON COLUMN audit_log.account_id IS 'Ссылка на аккаунт (accounts.id).';
-COMMENT ON COLUMN audit_log.user_id IS 'Ссылка на пользователя (users.id).';
-COMMENT ON COLUMN audit_log.action IS 'Тип действия (login, create, deploy, revoke, billing, etc).';
-COMMENT ON COLUMN audit_log.details IS 'Дополнительные данные о событии.';
-COMMENT ON COLUMN audit_log.role IS 'Роль пользователя в момент выполнения действия.';
-COMMENT ON COLUMN audit_log.created_at IS 'Дата и время фиксации события.';
-
-
 -- ======================================================
 -- III-A. PROJECTS
 -- ======================================================
@@ -503,7 +481,6 @@ COMMENT ON COLUMN domain_replacement_log.reason IS 'Причина замены 
 COMMENT ON COLUMN domain_replacement_log.initiated_by IS 'ID пользователя (users.id), инициировавшего действие.';
 COMMENT ON COLUMN domain_replacement_log.created_at IS 'Дата и время фиксации события.';
 
--- Удаляем старые записи, сохраняя максимум 10 последних для каждого site_id
 DROP TRIGGER IF EXISTS limit_domain_log;
 
 CREATE TRIGGER limit_domain_log
@@ -521,6 +498,54 @@ BEGIN
 END;
 
 COMMENT ON TRIGGER limit_domain_log IS 'Поддерживает не более 10 последних записей истории замен для каждого сайта.';
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER,
+    user_id INTEGER,
+    event_type TEXT CHECK(event_type IN (
+        'register', 'login', 'logout','refresh', 
+        'create', 'update', 'delete', 'deploy', 'revoke', 'billing' 
+    )) NOT NULL,
+    ip_address TEXT,
+    user_agent TEXT,
+    details TEXT,
+    role TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE SET NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log(user_id);
+
+COMMENT ON TABLE audit_log IS 'Единый журнал действий и авторизаций пользователей системы.';
+COMMENT ON COLUMN audit_log.id IS 'Уникальный идентификатор записи.';
+COMMENT ON COLUMN audit_log.account_id IS 'Ссылка на аккаунт (accounts.id).';
+COMMENT ON COLUMN audit_log.user_id IS 'Ссылка на пользователя (users.id).';
+COMMENT ON COLUMN audit_log.event_type IS 'Тип события: register, login, logout, refresh, create, update, delete, deploy, revoke, billing.';
+COMMENT ON COLUMN audit_log.ip_address IS 'IP-адрес клиента.';
+COMMENT ON COLUMN audit_log.user_agent IS 'User-Agent клиента.';
+COMMENT ON COLUMN audit_log.details IS 'Дополнительные сведения (JSON: параметры, контекст, ошибки).';
+COMMENT ON COLUMN audit_log.role IS 'Роль пользователя в момент выполнения действия.';
+COMMENT ON COLUMN audit_log.created_at IS 'Дата и время фиксации события.';
+
+DROP TRIGGER IF EXISTS limit_audit_log;
+
+CREATE TRIGGER limit_audit_log
+AFTER INSERT ON audit_log
+BEGIN
+    DELETE FROM audit_log
+    WHERE user_id = NEW.user_id
+      AND id NOT IN (
+          SELECT id
+          FROM audit_log
+          WHERE user_id = NEW.user_id
+          ORDER BY created_at DESC, id DESC
+          LIMIT 10
+      );
+END;
+
+COMMENT ON TRIGGER limit_audit_log IS 'Оставляет не более 10 последних событий на пользователя (включая вход, выход, деплой и операции).';
 
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -567,4 +592,31 @@ COMMENT ON COLUMN backups.backup_type IS 'Тип резервной копии (
 COMMENT ON COLUMN backups.r2_path IS 'Путь к архиву в R2.';
 COMMENT ON COLUMN backups.size_mb IS 'Размер архива в мегабайтах.';
 COMMENT ON COLUMN backups.created_at IS 'Дата создания резервной копии.';
+
+-- ======================================================
+-- VII. JWT KEYS AND VERSIONING
+-- ======================================================
+
+CREATE TABLE IF NOT EXISTS jwt_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER,                     -- tenant isolation
+    kid TEXT UNIQUE NOT NULL,               -- v1-2025-01
+    secret_encrypted TEXT NOT NULL,         -- AES-GCM(secret, MASTER_SECRET)
+    status TEXT CHECK(status IN ('active','deprecated','revoked')) DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_jwt_keys_account_id ON jwt_keys(account_id);
+CREATE INDEX IF NOT EXISTS idx_jwt_keys_status ON jwt_keys(status);
+
+COMMENT ON TABLE jwt_keys IS 'Версионированные JWT-ключи, привязанные к аккаунтам (tenant isolation).';
+COMMENT ON COLUMN jwt_keys.id IS 'Уникальный идентификатор записи ключа.';
+COMMENT ON COLUMN jwt_keys.account_id IS 'Ссылка на аккаунт (accounts.id), которому принадлежит ключ.';
+COMMENT ON COLUMN jwt_keys.kid IS 'Идентификатор ключа (например v1-2025-01).';
+COMMENT ON COLUMN jwt_keys.secret_encrypted IS 'Зашифрованный секрет JWT (AES-GCM с MASTER_SECRET).';
+COMMENT ON COLUMN jwt_keys.status IS 'Статус ключа (active, deprecated, revoked).';
+COMMENT ON COLUMN jwt_keys.created_at IS 'Дата создания ключа.';
+COMMENT ON COLUMN jwt_keys.expires_at IS 'Дата окончания срока действия ключа.';
 
