@@ -1,5 +1,4 @@
 -- ======================================================
--- 301.st — Cloudflare Redirect Management Platform
 -- Database Schema (Cloudflare D1 SQL version)
 -- ======================================================
 
@@ -192,7 +191,6 @@ CREATE TABLE IF NOT EXISTS zones (
 
 CREATE INDEX IF NOT EXISTS idx_zones_site_id ON zones(site_id);
 CREATE INDEX IF NOT EXISTS idx_zones_account_id ON zones(account_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_zones_cf_zone_id ON zones(cf_zone_id);
 
 COMMENT ON TABLE zones IS 'Зоны Cloudflare. Принцип: 1 зона = 1 сайт. При удалении сайта зона освобождается (site_id=NULL)';
 COMMENT ON COLUMN zones.id IS 'Уникальный идентификатор зоны.';
