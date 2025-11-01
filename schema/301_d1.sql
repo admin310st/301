@@ -325,14 +325,12 @@ CREATE INDEX IF NOT EXISTS idx_backups_created_at ON backups(created_at);
 
 CREATE TABLE IF NOT EXISTS jwt_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id INTEGER,
     kid TEXT UNIQUE NOT NULL,
     secret_encrypted TEXT NOT NULL,
     status TEXT CHECK(status IN ('active','deprecated','revoked')) DEFAULT 'active',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+    expires_at TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_jwt_keys_account_id ON jwt_keys(account_id);
+
 CREATE INDEX IF NOT EXISTS idx_jwt_keys_status ON jwt_keys(status);
 

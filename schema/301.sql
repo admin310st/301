@@ -597,24 +597,21 @@ COMMENT ON COLUMN backups.created_at IS 'Дата создания резерв�
 
 CREATE TABLE IF NOT EXISTS jwt_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id INTEGER,                     -- tenant isolation
-    kid TEXT UNIQUE NOT NULL,               -- v1-2025-01
-    secret_encrypted TEXT NOT NULL,         -- AES-GCM(secret, MASTER_SECRET)
+    kid TEXT UNIQUE NOT NULL,              -- v1-2025-01
+    secret_encrypted TEXT NOT NULL,        -- AES-GCM(secret, MASTER_SECRET)
     status TEXT CHECK(status IN ('active','deprecated','revoked')) DEFAULT 'active',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+    expires_at TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_jwt_keys_account_id ON jwt_keys(account_id);
 CREATE INDEX IF NOT EXISTS idx_jwt_keys_status ON jwt_keys(status);
 
-COMMENT ON TABLE jwt_keys IS 'Версионированные JWT-ключи, привязанные к аккаунтам (tenant isolation).';
+COMMENT ON TABLE jwt_keys IS 'Версионированные ключи подписи JWT, общие для всей платформы (глобальные).';
 COMMENT ON COLUMN jwt_keys.id IS 'Уникальный идентификатор записи ключа.';
-COMMENT ON COLUMN jwt_keys.account_id IS 'Ссылка на аккаунт (accounts.id), которому принадлежит ключ.';
-COMMENT ON COLUMN jwt_keys.kid IS 'Идентификатор ключа (например v1-2025-01).';
+COMMENT ON COLUMN jwt_keys.kid IS 'Идентификатор версии ключа (например v1-2025-01).';
 COMMENT ON COLUMN jwt_keys.secret_encrypted IS 'Зашифрованный секрет JWT (AES-GCM с MASTER_SECRET).';
-COMMENT ON COLUMN jwt_keys.status IS 'Статус ключа (active, deprecated, revoked).';
+COMMENT ON COLUMN jwt_keys.status IS 'Статус ключа: active, deprecated, revoked.';
 COMMENT ON COLUMN jwt_keys.created_at IS 'Дата создания ключа.';
 COMMENT ON COLUMN jwt_keys.expires_at IS 'Дата окончания срока действия ключа.';
+
 
