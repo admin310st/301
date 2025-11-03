@@ -1,44 +1,45 @@
 /**
- * Инициация GitHub OAuth flow
+ * Инициация GitHub OAuth 2.0 flow
  *
- * Аналогично Google, но с GitHub endpoints:
- * - Authorization: https://github.com/login/oauth/authorize
- * - Scopes: read:user user:email
+ * Endpoint:
+ * - GET /auth/oauth/github/start
+ *
+ * Flow:
+ * 1. Генерация state (CSRF protection)
+ * 2. Сохранение state в KV (TTL 5 минут)
+ * 3. Редирект на GitHub OAuth
  */
 
-import { generatePKCE, storeState, buildOAuthUrl } from '../../lib/oauth'
+import { Hono } from "hono";
+import { storeState } from "../../../lib/oauth";
 
-export async function GET(request: Request, env: Env): Promise<Response> {
-  const url = new URL(request.url)
-  const path = url.pathname
-  if (!(path.endsWith('/github/start') || path.endsWith('/oauth/github/start'))) {
-    return new Response('Not Found', { status: 404 })
+const app = new Hono();
+
+app.get("/", async (c) => {
+  const client_id = c.env.GITHUB_CLIENT_ID;
+  const redirect_base = c.env.OAUTH_REDIRECT_BASE || "https://api.301.st";
+
+  if (!client_id) {
+    return c.text("OAuth misconfigured: missing GITHUB_CLIENT_ID", 500);
   }
 
-  const client_id = env.GITHUB_CLIENT_ID
-  const redirect_base = env.OAUTH_REDIRECT_BASE
-  if (!client_id || !redirect_base) {
-    return new Response('GitHub OAuth misconfigured', { status: 500 })
-  }
+  // 1. Генерация state (CSRF)
+  const state = crypto.randomUUID();
 
-  // 1. Генерация state + PKCE
-  const state = crypto.randomUUID()
-  const { verifier, challenge } = await generatePKCE()
+  // 2. Сохраняем state в KV (TTL 5 мин)
+  await storeState(c.env, "github", state, "");
 
-  // 2. Сохранение state в KV
-  await storeState(env, 'github', state, verifier)
+  // 3. Формируем URL для авторизации GitHub
+  const redirect_uri = `${redirect_base}/auth/oauth/github/callback`;
+  const authUrl = new URL("https://github.com/login/oauth/authorize");
+  authUrl.searchParams.set("client_id", client_id);
+  authUrl.searchParams.set("redirect_uri", redirect_uri);
+  authUrl.searchParams.set("state", state);
+  authUrl.searchParams.set("scope", "read:user user:email");
 
-  // 3. Редирект на GitHub OAuth
-  const redirect_uri = `${redirect_base}/auth/github/callback`
-  const authUrl = buildOAuthUrl('https://github.com/login/oauth/authorize', {
-    client_id,
-    redirect_uri,
-    scope: 'read:user user:email',
-    state,
-    code_challenge: challenge,
-    code_challenge_method: 'S256'
-  })
+  // 4. Редирект на GitHub
+  return Response.redirect(authUrl.toString(), 302);
+});
 
-  return Response.redirect(authUrl, 302)
-}
+export default app;
 
