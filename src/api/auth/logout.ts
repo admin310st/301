@@ -1,59 +1,62 @@
 // src/api/auth/logout.ts
-import type { Context } from "hono";
+/**
+ * Production endpoint: POST /auth/logout
+ * Завершает сессию пользователя.
+ * - Проверяет и удаляет refresh_id из KV
+ * - Использует rateLimit, JWT-аудит и безопасное удаление cookie
+ */
+
+import type { Context } from 'hono'
+import { refreshGuard } from '../lib/ratelimit'
+import { logAuth } from '../lib/logger'
 
 export async function logout(c: Context<{ Bindings: Env }>) {
-  const env = c.env;
+  try {
+    const env = c.env
+    const ip = c.req.header('CF-Connecting-IP') || '0.0.0.0'
+    const ua = c.req.header('User-Agent') || 'unknown'
 
-  const cookies = c.req.header("Cookie") || "";
-  const match = cookies.match(/refresh_id=([^;]+)/);
-  
-  let user_id = null;
-  let account_id = null;
-  
-  if (match) {
-    const refresh_id = match[1];
+    // --- 1. Проверка лимита по IP ---
+    const blocked = await refreshGuard(c)
+    if (blocked) return blocked
 
-    // Получаем user_id ДО удаления для аудита
-    const user_id_str = await env.KV_SESSIONS.get(`refresh:${refresh_id}`);
-    if (user_id_str) {
-      user_id = parseInt(user_id_str, 10);
-      
-      // Получаем account_id для полного аудита
-      const account = await env.DB301.prepare(
-        "SELECT id FROM accounts WHERE user_id=? LIMIT 1"
-      ).bind(user_id).first();
-      
-      if (account) {
-        account_id = Number(account.id);
-      }
+    // --- 2. Извлечение refresh_id из cookie ---
+    const cookieHeader = c.req.header('Cookie') || ''
+    const refreshMatch = cookieHeader.match(/refresh_id=([^;]+)/)
+    if (!refreshMatch) {
+      return c.json({ error: 'missing_refresh_cookie' }, 400)
     }
+    const refresh_id = refreshMatch[1]
 
-    // Удаляем токен из KV и помечаем сессию как отозванную
-    await env.KV_SESSIONS.delete(`refresh:${refresh_id}`);
-
-    await env.DB301.prepare(
-      "UPDATE sessions SET revoked=1, updated_at=CURRENT_TIMESTAMP WHERE refresh_id=?"
-    ).bind(refresh_id).run();
-
-    // Логируем событие logout
-    if (user_id && account_id) {
-      await env.DB301.prepare(
-        "INSERT INTO audit_log (account_id, user_id, action, details, role) VALUES (?, ?, ?, ?, ?)"
-      ).bind(
-        account_id,
-        user_id,
-        "logout",
-        JSON.stringify({
-          ip: c.req.header("CF-Connecting-IP") || "unknown",
-          ua: c.req.header("User-Agent") || "unknown"
-        }),
-        "user"
-      ).run();
+    // --- 3. Проверка refresh_id в KV ---
+    const userIdStr = await env.KV_SESSIONS.get(`refresh:${refresh_id}`)
+    if (!userIdStr) {
+      return c.json({ error: 'invalid_refresh' }, 400)
     }
+    const user_id = Number(userIdStr)
+
+    // --- 4. Удаление refresh-токена из KV ---
+    await env.KV_SESSIONS.delete(`refresh:${refresh_id}`)
+
+    // --- 5. Получаем account_id (если есть) ---
+    const account = await env.DB301
+      .prepare('SELECT id FROM accounts WHERE user_id=? AND status="active" LIMIT 1')
+      .bind(user_id)
+      .first()
+    const account_id = account ? Number(account.id) : null
+
+    // --- 6. Аудит выхода ---
+    await logAuth(env, 'logout', user_id, account_id ?? undefined, ip, ua)
+
+    // --- 7. Удаление cookie (Set-Cookie c истёкшим временем) ---
+    const cookie = `refresh_id=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`
+    c.header('Set-Cookie', cookie)
+
+    // --- 8. Ответ клиенту ---
+    return c.json({ success: true, message: 'Logged out successfully.' }, 200)
+  } catch (err) {
+    console.error('[LOGOUT ERROR]', err)
+    return c.json({ error: 'internal_error' }, 500)
   }
-
-  const cookie = "refresh_id=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0";
-  c.header("Set-Cookie", cookie);
-
-  return c.json({ message: "logged_out" });
 }
+

@@ -1,74 +1,76 @@
 // src/api/auth/me.ts
-import type { Context } from "hono";
-import { verifyJWT } from "../lib/jwt";
+/**
+ * Production endpoint: GET /auth/me
+ * Проверка текущего пользователя по JWT access token.
+ * - Rate limiting (по IP)
+ * - Проверка JWT через lib/jwt.verifyJWT()
+ * - Получение пользователя из D1
+ * - Аудит запроса (event_type = 'refresh')
+ */
+
+import type { Context } from 'hono'
+import { refreshGuard } from '../lib/ratelimit'
+import { verifyJWT } from '../lib/jwt'
+import { logAuth } from '../lib/logger'
 
 export async function me(c: Context<{ Bindings: Env }>) {
-  const env = c.env;
-
-  // Проверка секретов в production
-  const isProduction = env.ENVIRONMENT === 'production';
-
-  if (isProduction && !env.JWT_SECRET) {
-    throw new Error('JWT_SECRET is required in production. Run: wrangler secret put JWT_SECRET');
-  }
-
-  if (isProduction && !env.MASTER_SECRET) {
-    throw new Error('MASTER_SECRET is required in production. Run: wrangler secret put MASTER_SECRET');
-  }
-
-  const authHeader = c.req.header("Authorization");
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return c.json({ error: "unauthorized" }, 401);
-  }
-
-  const token = authHeader.substring(7);
-
   try {
-    // Разделение ключей - JWT_SECRET для токенов, MASTER_SECRET для шифрования данных
-    const jwtSecret = env.JWT_SECRET || "dev-jwt-secret-min-32-chars-for-local-development-only";
+    const env = c.env
+    const ip = c.req.header('CF-Connecting-IP') || '0.0.0.0'
+    const ua = c.req.header('User-Agent') || 'unknown'
 
-    if (!env.JWT_SECRET) {
-      console.warn("JWT_SECRET not set! Using dev fallback. Run: wrangler secret put JWT_SECRET");
+    const blocked = await refreshGuard(c)
+    if (blocked) return blocked
+
+    const authHeader = c.req.header('Authorization')
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ error: 'missing_token' }, 401)
+    }
+    const token = authHeader.split(' ')[1]
+
+    const payload = await verifyJWT(token, env)
+    if (!payload) {
+      await logAuth(env, 'revoke', 0, undefined, ip, ua)
+      return c.json({ error: 'invalid_token' }, 401)
     }
 
-    const payload = await verifyJWT(token, jwtSecret);
-    const { user_id, account_id } = payload;
+    const user_id = payload.user_id
+    const account_id = payload.account_id
 
-    // Строгая валидация JWT - требуем обязательное наличие account_id
-    if (!user_id || !account_id) {
-      return c.json({ error: "invalid_token_payload" }, 401);
-    }
-
-    const user = await env.DB301.prepare(
-      "SELECT id, email, name, role FROM users WHERE id=?"
-    ).bind(user_id).first();
+    const user = await env.DB301
+      .prepare('SELECT email, name, role FROM users WHERE id=?')
+      .bind(user_id)
+      .first()
 
     if (!user) {
-      return c.json({ error: "user_not_found" }, 404);
+      return c.json({ error: 'user_not_found' }, 404)
     }
 
-    //  Убран fallback - только прямой запрос по account_id из JWT
-    const account = await env.DB301.prepare(
-      "SELECT id, account_name, plan, status FROM accounts WHERE id=?"
-    ).bind(account_id).first();
+    const account = await env.DB301
+      .prepare('SELECT status FROM accounts WHERE id=? LIMIT 1')
+      .bind(account_id)
+      .first()
 
-    if (!account) {
-      return c.json({ error: "account_not_found" }, 404);
+    if (account && account.status !== 'active') {
+      return c.json({ error: 'account_inactive' }, 403)
     }
 
-    return c.json({
-      user: {
-        id: Number(user.id),
-        email: user.email,
-        name: user.name ?? null,
-        role: user.role || "user",
-        account_id: Number(account.id),
-        account_name: account.account_name,
-        plan: account.plan,
-        status: account.status,
+    await logAuth(env, 'refresh', user_id, account_id ?? undefined, ip, ua)
+
+    return c.json(
+      {
+        user: {
+          id: user_id,
+          email: user.email,
+          name: user.name ?? null,
+          account_id,
+          role: user.role ?? 'user'
+        }
       },
-    });
-  } catch (error: any) {
-    return c.json({ error: "invalid_or_expired_token", details: error.message }, 401);
+      200
+    )
+  } catch (err) {
+    console.error('[ME ERROR]', err)
+    return c.json({ error: 'internal_error' }, 500)
   }
 }
