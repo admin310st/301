@@ -9,7 +9,9 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT,
-    google_sub TEXT,
+    oauth_provider TEXT,  -- 'google', 'github', 'apple', 'facebook'
+    oauth_id TEXT,        -- универсальный идентификатор пользователя в OAuth
+    tg_id TEXT,           -- Telegram ID для уведомлений и рассылок
     name TEXT,
     role TEXT DEFAULT 'user',
     user_type TEXT DEFAULT 'client',
@@ -21,7 +23,9 @@ COMMENT ON TABLE users IS 'Учётные записи пользователе�
 COMMENT ON COLUMN users.id IS 'Уникальный идентификатор пользователя.';
 COMMENT ON COLUMN users.email IS 'Email пользователя, используется для входа.';
 COMMENT ON COLUMN users.password_hash IS 'Хэш пароля (bcrypt/scrypt).';
-COMMENT ON COLUMN users.google_sub IS 'Идентификатор пользователя в Google OAuth.';
+COMMENT ON COLUMN users.oauth_provider IS 'Провайдер OAuth (google, github, apple, facebook).';
+COMMENT ON COLUMN users.oauth_id IS 'Универсальный идентификатор пользователя в OAuth.';
+COMMENT ON COLUMN users.tg_id IS 'Telegram ID пользователя для подписки и рассылок.';
 COMMENT ON COLUMN users.name IS 'Имя пользователя или организация.';
 COMMENT ON COLUMN users.role IS 'Роль (user, admin) — внутренняя системная категория.';
 COMMENT ON COLUMN users.user_type IS 'Тип пользователя: admin, operator, client.';
