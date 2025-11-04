@@ -23,13 +23,11 @@ app.get("/", async (c) => {
     return c.text("OAuth misconfigured: missing GITHUB_CLIENT_ID", 500);
   }
 
-  // 1. Генерация state (CSRF)
   const state = crypto.randomUUID();
 
-  // 2. Сохраняем state в KV (TTL 5 мин)
-  await storeState(c.env, "github", state, "");
+  // GitHub не использует PKCE, сохраняем метку валидности
+  await storeState(c.env, "github", state, "verified");
 
-  // 3. Формируем URL для авторизации GitHub
   const redirect_uri = `${redirect_base}/auth/oauth/github/callback`;
   const authUrl = new URL("https://github.com/login/oauth/authorize");
   authUrl.searchParams.set("client_id", client_id);
@@ -37,7 +35,6 @@ app.get("/", async (c) => {
   authUrl.searchParams.set("state", state);
   authUrl.searchParams.set("scope", "read:user user:email");
 
-  // 4. Редирект на GitHub
   return Response.redirect(authUrl.toString(), 302);
 });
 
