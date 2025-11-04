@@ -24,7 +24,7 @@
 2. Redirect URI:
 
    ```
-   https://api.301.st/auth/google/callback
+   https://api.301.st/auth/oauth/google/callback
    ```
 3. Сохранить параметры в **Workers Secrets**:
 
@@ -80,6 +80,10 @@
 Cloudflare Turnstile применяется в проекте **301.st** для защиты всех публичных форм регистрации, логина и восстановления доступа от автоматических ботов без необходимости показа капчи пользователю.
 
 Turnstile работает полностью на стороне Cloudflare и не требует визуальных тестов — проверка проходит в фоновом режиме, не влияя на UX.
+
+> Все публичные эндпоинты защищены Cloudflare Turnstile и CORS-политикой.  
+> Разрешённые источники: `api.301.st`, `301.st`, `301st.pages.dev`, `localhost`.
+
 
 ---
 
@@ -208,7 +212,7 @@ if (!data.success) return new Response("Bot verification failed", { status: 403 
 Фронт вызывает:
 
 ```js
-window.location.href = "https://api.301.st/auth/google/start";
+window.location.href = "https://api.301.st/auth/oauth/google/start";
 ```
 
 ### Шаг 2. Перенаправление на Google
@@ -219,7 +223,7 @@ Worker:
 const redirect = new URL("https://accounts.google.com/o/oauth2/v2/auth");
 redirect.search = new URLSearchParams({
   client_id: env.GOOGLE_CLIENT_ID,
-  redirect_uri: "https://api.301.st/auth/google/callback",
+  redirect_uri: "https://api.301.st/auth/oauth/google/callback",
   response_type: "code",
   scope: "openid email profile",
   state: crypto.randomUUID(),
@@ -231,7 +235,7 @@ return Response.redirect(redirect.toString(), 302);
 ### Шаг 3. Callback от Google
 
 ```
-GET /auth/google/callback?code=...&state=...
+GET /auth/google/oauth/callback?code=...&state=...
 ```
 
 Worker:
@@ -244,17 +248,33 @@ Worker:
    ```
 3. декодирует `id_token` → получает `email`, `name`, `sub`.
 
+> Callback вызывается автоматически браузером пользователя после редиректа от Google.
+> Фронтенд 301.st вызывает только `/auth/oauth/google/start`, а `/callback` обрабатывается воркером.
+
+
 ### Шаг 4. Проверка / создание пользователя
+
+
+Проверка или создание пользователя Google OAuth
 
 ```js
 const user = await env.DB301.prepare(
-  "SELECT * FROM users WHERE google_sub=? OR email=?"
+  "SELECT * FROM users WHERE (oauth_provider='google' AND oauth_id=?) OR email=?"
 ).bind(sub, email).first();
 
 if (!user) {
   await env.DB301.prepare(
-    "INSERT INTO users (email, google_sub, name) VALUES (?, ?, ?)"
+    "INSERT INTO users (email, oauth_provider, oauth_id, name) VALUES (?, 'google', ?, ?);"
   ).bind(email, sub, name).run();
+} else if (!user.oauth_id) {
+```
+
+Если пользователь был создан ранее без OAuth — обновляем
+
+```js
+  await env.DB301.prepare(
+    "UPDATE users SET oauth_provider='google', oauth_id=? WHERE id=?;"
+  ).bind(sub, user.id).run();
 }
 ```
 
@@ -319,6 +339,12 @@ if (!user) {
 * Rate-limit на `/auth/login` и `/auth/refresh`.
 * Верификация пользователя через Cloudflare Turnstile.
 * Логирование всех событий аутентификации (D1 + R2).
+* JWT  подписывается через модуль `lib/jwt.ts` с использованием ключей из таблицы `jwt_keys` (D1).  
+* Активный ключ выбирается по `status='active'`, шифруется `MASTER_SECRET` и содержит `kid` для верификации.
+* поддерживается версияция и отзыв (`status=revoked`);
+* фоновой задачей `jobs/rotate_keys.ts` выполняется ротация ключей.
+
+Это обеспечивает централизованное управление безопасностью и возможность ротации без перезапуска воркеров.
 
 ---
 
@@ -342,10 +368,10 @@ sequenceDiagram
     W->>K: PUT refresh:sessionId
     W-->>U: access_token + cookie(refresh_id)
 
-    U->>W: GET /auth/google/start
+    U->>W: GET /auth/oauth/google/start
     W-->>U: Redirect to Google OAuth
     U->>G: Google Login
-    G-->>W: /auth/google/callback (code)
+    G-->>W: /auth/oauth/google/callback (code)
     W->>G: Exchange code→token
     W->>D: upsert user
     W->>K: PUT refresh:sessionId
@@ -402,7 +428,7 @@ sequenceDiagram
     A->>A: encryptAES(apiKey, MASTER_SECRET)
     A->>K: PUT cred:cloudflare:UUID (encrypted)
     A->>D: INSERT account_keys(provider, kv_key)
-    A-->>U: ✅ "Ключ сохранён"
+    A-->>U: "Ключ сохранён"
 ```
 
 ---
@@ -469,7 +495,7 @@ sequenceDiagram
 
 ---
 
-## ✅ Итоговые принципы
+## Итоговые принципы
 
 * Пользовательские API-ключи **никогда не хранятся в Secrets**.
 * Хранятся в **KV** только в зашифрованном виде.
