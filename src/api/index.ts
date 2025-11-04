@@ -6,6 +6,8 @@ import { refresh } from "./auth/refresh";
 import { logout } from "./auth/logout";
 import { me } from "./auth/me";
 import { keysRouter } from "./integrations/keys/index";
+import googleStart from "./auth/oauth/google/start";
+import googleCallback from "./auth/oauth/google/callback";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -17,6 +19,8 @@ app.post("/auth/login", login);
 app.post("/auth/refresh", refresh);
 app.post("/auth/logout", logout);
 app.get("/auth/me", me);
+app.route("/auth/oauth/google/start", googleStart);
+app.route("/auth/oauth/google/callback", googleCallback);
 
 // --- Key endpoint ---
 app.route("/integrations/keys", keysRouter);
