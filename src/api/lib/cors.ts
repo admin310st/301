@@ -14,8 +14,11 @@ export const corsMiddleware = cors({
       "http://127.0.0.1:8787",  // альтернатива
     ];
 
-    //  *.webstudio.is
-    if (origin.endsWith(".webstudio.is")) return true;
+    // все поддомены *.webstudio.is
+    if (origin.endsWith(".webstudio.is")) return origin;
+
+    // сам origin из списка
+    if (allowed.includes(origin)) return origin;
 
     return allowed.includes(origin);
   },
