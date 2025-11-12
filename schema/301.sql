@@ -9,26 +9,24 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT,
-    oauth_provider TEXT,  -- 'google', 'github', 'apple', 'facebook'
-    oauth_id TEXT,        -- универсальный идентификатор пользователя в OAuth
-    tg_id TEXT,           -- Telegram ID для уведомлений и рассылок
+    oauth_provider TEXT,
+    oauth_id TEXT,
+    tg_id TEXT,
     name TEXT,
-    role TEXT DEFAULT 'user',
-    user_type TEXT DEFAULT 'client',
+    user_type TEXT DEFAULT 'client' CHECK(user_type IN ('admin', 'client')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-COMMENT ON TABLE users IS 'Учётные записи пользователей платформы 301.st: администраторы, операторы и клиенты.';
+COMMENT ON TABLE users IS 'Учётные записи пользователей платформы 301.st.';
 COMMENT ON COLUMN users.id IS 'Уникальный идентификатор пользователя.';
 COMMENT ON COLUMN users.email IS 'Email пользователя, используется для входа.';
-COMMENT ON COLUMN users.password_hash IS 'Хэш пароля (bcrypt/scrypt).';
-COMMENT ON COLUMN users.oauth_provider IS 'Провайдер OAuth (google, github, apple, facebook).';
-COMMENT ON COLUMN users.oauth_id IS 'Универсальный идентификатор пользователя в OAuth.';
-COMMENT ON COLUMN users.tg_id IS 'Telegram ID пользователя для подписки и рассылок.';
+COMMENT ON COLUMN users.password_hash IS 'Хеш пароля (bcrypt/scrypt). NULL для OAuth-пользователей.';
+COMMENT ON COLUMN users.oauth_provider IS 'Провайдер OAuth (google, github).';
+COMMENT ON COLUMN users.oauth_id IS 'Уникальный идентификатор пользователя от OAuth-провайдера. Используется для поиска существующего пользователя при повторном логине.';
+COMMENT ON COLUMN users.tg_id IS 'Telegram ID пользователя для уведомлений и рассылок.';
 COMMENT ON COLUMN users.name IS 'Имя пользователя или организация.';
-COMMENT ON COLUMN users.role IS 'Роль (user, admin) — внутренняя системная категория.';
-COMMENT ON COLUMN users.user_type IS 'Тип пользователя: admin, operator, client.';
+COMMENT ON COLUMN users.user_type IS 'Системная роль: admin (администратор платформы 301.st с доступом ко всем аккаунтам), client (обычный пользователь). Роли owner/editor/viewer определяются через связи с аккаунтами.';
 COMMENT ON COLUMN users.created_at IS 'Дата создания записи.';
 COMMENT ON COLUMN users.updated_at IS 'Дата последнего обновления записи.';
 
@@ -41,14 +39,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     revoked INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     expires_at TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 
 COMMENT ON TABLE sessions IS 'Активные сессии пользователей, применяемые для обновления токенов.';
 COMMENT ON COLUMN sessions.id IS 'Уникальный идентификатор сессии.';
-COMMENT ON COLUMN sessions.user_id IS 'Ссылка на пользователя (users.id).';
+COMMENT ON COLUMN sessions.user_id IS 'Ссылка на пользователя (users.id). При мягком удалении пользователя сессии остаются для целей аудита.';
 COMMENT ON COLUMN sessions.refresh_id IS 'Идентификатор refresh-токена, хранящегося в KV.';
 COMMENT ON COLUMN sessions.ip_address IS 'IP-адрес, с которого произведён вход.';
 COMMENT ON COLUMN sessions.user_agent IS 'User-Agent клиента (браузер, устройство).';
@@ -57,31 +55,189 @@ COMMENT ON COLUMN sessions.created_at IS 'Дата создания сессии
 COMMENT ON COLUMN sessions.expires_at IS 'Дата окончания действия токена.';
 
 -- ======================================================
--- II. ACCOUNTS AND INTEGRATIONS
+-- II. ACCOUNTS, PLANS AND INTEGRATIONS
 -- ======================================================
 CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     account_name TEXT NOT NULL,
-    cf_account_id TEXT,
-    plan TEXT DEFAULT 'free',
-    status TEXT DEFAULT 'active',
+    plan_tier TEXT DEFAULT 'free' CHECK(plan_tier IN ('free', 'pro', 'buss')),
+    billing_status TEXT DEFAULT 'active' CHECK(billing_status IN ('active', 'suspended', 'cancelled')),
+    timezone TEXT DEFAULT 'UTC',
+    country_code TEXT,
+    status TEXT DEFAULT 'active' CHECK(status IN ('active', 'suspended', 'deleted')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_accounts_user_id ON accounts(user_id);
 
 COMMENT ON TABLE accounts IS 'Аккаунты клиентов (тенанты) с параметрами, тарифом и текущим статусом.';
 COMMENT ON COLUMN accounts.id IS 'Уникальный идентификатор аккаунта.';
-COMMENT ON COLUMN accounts.user_id IS 'Ссылка на владельца аккаунта (users.id).';
+COMMENT ON COLUMN accounts.user_id IS 'Ссылка на владельца аккаунта (users.id). При удалении пользователя аккаунт сохраняется, но статус может быть изменён на deleted.';
 COMMENT ON COLUMN accounts.account_name IS 'Название клиента или организации.';
-COMMENT ON COLUMN accounts.cf_account_id IS 'ID аккаунта Cloudflare, связанного с клиентом.';
-COMMENT ON COLUMN accounts.plan IS 'Тарифный план (free, pro, enterprise).';
-COMMENT ON COLUMN accounts.status IS 'Статус аккаунта (active, suspended, overdue, deleted). Используется для блокировки при неуплате.';
+COMMENT ON COLUMN accounts.plan_tier IS 'Тарифный план: free (бесплатный), pro (профессиональный), buss (бизнес).';
+COMMENT ON COLUMN accounts.billing_status IS 'Статус биллинга: active, suspended, cancelled.';
+COMMENT ON COLUMN accounts.timezone IS 'Часовой пояс аккаунта.';
+COMMENT ON COLUMN accounts.country_code IS 'Код страны ISO 3166-1 alpha-2 (RU, US, DE).';
+COMMENT ON COLUMN accounts.status IS 'Статус аккаунта: active, suspended, deleted (мягкое удаление без физического удаления данных).';
 COMMENT ON COLUMN accounts.created_at IS 'Дата создания аккаунта.';
 COMMENT ON COLUMN accounts.updated_at IS 'Дата последнего изменения записи.';
+
+CREATE TABLE IF NOT EXISTS invitations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    role TEXT CHECK(role IN ('admin', 'editor', 'viewer')) NOT NULL,
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'accepted', 'expired', 'revoked')),
+    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_invitations_account_id ON invitations(account_id);
+CREATE INDEX IF NOT EXISTS idx_invitations_status ON invitations(status);
+
+COMMENT ON TABLE invitations IS 'Приглашения пользователей в аккаунты. Содержат краткоживущие токены для активации членства.';
+COMMENT ON COLUMN invitations.id IS 'Уникальный идентификатор приглашения.';
+COMMENT ON COLUMN invitations.account_id IS 'Ссылка на аккаунт, в который осуществляется приглашение.';
+COMMENT ON COLUMN invitations.token IS 'Уникальный токен приглашения (UUID, передаётся в ссылке join).';
+COMMENT ON COLUMN invitations.role IS 'Роль, которую получит приглашённый пользователь: admin, editor, viewer.';
+COMMENT ON COLUMN invitations.status IS 'Текущее состояние приглашения: pending (ожидает), accepted (принято), expired (просрочено), revoked (отозвано).';
+COMMENT ON COLUMN invitations.expires_at IS 'Срок действия приглашения (обычно 10–15 минут).';
+COMMENT ON COLUMN invitations.created_at IS 'Дата создания приглашения.';
+
+CREATE TABLE IF NOT EXISTS account_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    role TEXT DEFAULT 'editor' CHECK(role IN ('editor', 'viewer')),
+    status TEXT DEFAULT 'active' CHECK(status IN ('active', 'suspended', 'removed')),
+    invited_by INTEGER,  -- ID пользователя, пригласившего участника (не FK)
+    invited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    accepted_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE RESTRICT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    UNIQUE (account_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_members_account_id ON account_members(account_id);
+CREATE INDEX IF NOT EXISTS idx_account_members_user_id ON account_members(user_id);
+
+COMMENT ON TABLE account_members IS 'Связь пользователей с аккаунтами (членство, роль, статус).';
+COMMENT ON COLUMN account_members.id IS 'Уникальный идентификатор записи членства.';
+COMMENT ON COLUMN account_members.account_id IS 'Ссылка на аккаунт (accounts.id).';
+COMMENT ON COLUMN account_members.user_id IS 'Ссылка на пользователя (users.id).';
+COMMENT ON COLUMN account_members.role IS 'Роль пользователя в аккаунте: owner, admin, editor, viewer.';
+COMMENT ON COLUMN account_members.status IS 'Статус участия: active, suspended, removed.';
+COMMENT ON COLUMN account_members.invited_by IS 'ID пользователя, который отправил приглашение. Хранится только для справки, без связи с users.';
+COMMENT ON COLUMN account_members.invited_at IS 'Дата создания приглашения.';
+COMMENT ON COLUMN account_members.accepted_at IS 'Дата принятия приглашения.';
+COMMENT ON COLUMN account_members.created_at IS 'Дата создания записи.';
+COMMENT ON COLUMN account_members.updated_at IS 'Дата последнего изменения.';
+
+CREATE TABLE IF NOT EXISTS plan_tiers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_tier TEXT NOT NULL UNIQUE CHECK(plan_tier IN ('free','pro','buss')),
+    name TEXT NOT NULL,
+    description TEXT,
+    price_usd REAL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+COMMENT ON TABLE plan_tiers IS 'Справочник тарифных планов платформы 301.st.';
+COMMENT ON COLUMN plan_tiers.id IS 'Уникальный идентификатор тарифа.';
+COMMENT ON COLUMN plan_tiers.plan_tier IS 'Код тарифа: free, pro, buss.';
+COMMENT ON COLUMN plan_tiers.name IS 'Название тарифа (для отображения пользователю).';
+COMMENT ON COLUMN plan_tiers.description IS 'Описание, ограничения и преимущества тарифа.';
+COMMENT ON COLUMN plan_tiers.price_usd IS 'Стоимость тарифа в долларах США.';
+COMMENT ON COLUMN plan_tiers.created_at IS 'Дата создания записи.';
+
+INSERT OR IGNORE INTO plan_tiers (plan_tier, name, description, price_usd) VALUES
+('free', 'Free', 'Базовый бесплатный тариф. Только владелец аккаунта.', 0),
+('pro', 'Pro', 'Профессиональный тариф для команд до 10 участников.', 29),
+('buss', 'Business', 'Бизнес-тариф для крупных команд и организаций.', 99);
+
+CREATE TABLE IF NOT EXISTS quota_limits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_tier TEXT NOT NULL UNIQUE CHECK(plan_tier IN ('free','pro','buss')),
+    max_projects INTEGER DEFAULT 1,
+    max_sites INTEGER DEFAULT 3,
+    max_domains INTEGER DEFAULT 10,
+    max_zones INTEGER DEFAULT 10,
+    max_redirect_rules INTEGER DEFAULT 100,
+    max_tds_rules INTEGER DEFAULT 10,
+    max_team_members INTEGER DEFAULT 1,
+    analytics_retention_days INTEGER DEFAULT 30,
+    backup_retention_days INTEGER DEFAULT 7,
+    api_rate_limit INTEGER DEFAULT 100,
+    support_level TEXT DEFAULT 'community',  -- community, email, priority
+    custom_workers INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (plan_tier) REFERENCES plan_tiers(plan_tier) ON DELETE CASCADE
+);
+
+COMMENT ON TABLE quota_limits IS 'Технические ограничения и лимиты для каждого тарифного плана.';
+COMMENT ON COLUMN quota_limits.id IS 'Уникальный идентификатор записи (служебный ключ).';
+COMMENT ON COLUMN quota_limits.plan_tier IS 'Код тарифа: free, pro, buss. Используется для связи с plan_tiers и accounts.';
+COMMENT ON COLUMN quota_limits.max_projects IS 'Максимальное количество проектов, которые может создать аккаунт.';
+COMMENT ON COLUMN quota_limits.max_sites IS 'Максимальное количество сайтов, доступных в тарифе.';
+COMMENT ON COLUMN quota_limits.max_domains IS 'Максимальное количество доменов, которые можно добавить.';
+COMMENT ON COLUMN quota_limits.max_zones IS 'Максимальное количество DNS-зон (Cloudflare-зон).';
+COMMENT ON COLUMN quota_limits.max_redirect_rules IS 'Максимальное количество правил редиректов (301, TDS и т.п.).';
+COMMENT ON COLUMN quota_limits.max_tds_rules IS 'Максимальное количество TDS-правил маршрутизации.';
+COMMENT ON COLUMN quota_limits.max_team_members IS 'Максимальное количество участников команды, кроме владельца.';
+COMMENT ON COLUMN quota_limits.analytics_retention_days IS 'Количество дней хранения аналитики (логи, статистика, отчёты).';
+COMMENT ON COLUMN quota_limits.backup_retention_days IS 'Количество дней хранения резервных копий (в R2/Nextcloud).';
+COMMENT ON COLUMN quota_limits.api_rate_limit IS 'Ограничение по числу API-запросов в минуту.';
+COMMENT ON COLUMN quota_limits.support_level IS 'Уровень поддержки: community (форум), email (почта), priority (приоритетная).';
+COMMENT ON COLUMN quota_limits.custom_workers IS 'Количество пользовательских воркеров Cloudflare, доступных аккаунту.';
+COMMENT ON COLUMN quota_limits.created_at IS 'Дата создания записи лимитов.';
+
+-- Предзаполнение тарифов
+INSERT OR IGNORE INTO quota_limits 
+(plan_tier, max_projects, max_sites, max_domains, max_team_members, analytics_retention_days, backup_retention_days, api_rate_limit, support_level)
+VALUES
+('free', 1, 2, 5, 1, 30, 7, 100, 'community'),
+('pro', 10, 50, 200, 10, 180, 14, 1000, 'email'),
+('buss', 50, 200, 1000, 25, 365, 30, 5000, 'priority');
+
+CREATE TABLE IF NOT EXISTS quota_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    plan_tier TEXT NOT NULL CHECK(plan_tier IN ('free','pro','buss')),
+    projects_used INTEGER DEFAULT 0,
+    sites_used INTEGER DEFAULT 0,
+    domains_used INTEGER DEFAULT 0,
+    zones_used INTEGER DEFAULT 0,
+    redirect_rules_used INTEGER DEFAULT 0,
+    tds_rules_used INTEGER DEFAULT 0,
+    team_members_used INTEGER DEFAULT 0,
+    api_calls_minute INTEGER DEFAULT 0,
+    last_reset TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_quota_usage_account_id ON quota_usage(account_id);
+
+COMMENT ON TABLE quota_usage IS 'Учёт текущего использования квот и лимитов по каждому аккаунту.';
+COMMENT ON COLUMN quota_usage.id IS 'Уникальный идентификатор записи (служебный ключ).';
+COMMENT ON COLUMN quota_usage.account_id IS 'Ссылка на аккаунт (accounts.id), для которого ведётся учёт ресурсов.';
+COMMENT ON COLUMN quota_usage.plan_tier IS 'Код активного тарифа аккаунта: free, pro, buss. Копируется из accounts.plan_tier.';
+COMMENT ON COLUMN quota_usage.projects_used IS 'Количество созданных проектов в рамках аккаунта.';
+COMMENT ON COLUMN quota_usage.sites_used IS 'Количество сайтов, зарегистрированных в аккаунте.';
+COMMENT ON COLUMN quota_usage.domains_used IS 'Количество доменов, подключённых к аккаунту.';
+COMMENT ON COLUMN quota_usage.zones_used IS 'Количество DNS-зон (Cloudflare-зон), привязанных к аккаунту.';
+COMMENT ON COLUMN quota_usage.redirect_rules_used IS 'Количество активных правил редиректов, созданных аккаунтом.';
+COMMENT ON COLUMN quota_usage.tds_rules_used IS 'Количество активных TDS-правил маршрутизации.';
+COMMENT ON COLUMN quota_usage.team_members_used IS 'Количество участников команды (из account_members).';
+COMMENT ON COLUMN quota_usage.api_calls_minute IS 'Количество API-запросов, выполненных в текущую минуту. Используется для rate limiting.';
+COMMENT ON COLUMN quota_usage.last_reset IS 'Время последнего сброса счётчиков использования (API и лимитов).';
+COMMENT ON COLUMN quota_usage.updated_at IS 'Дата и время последнего обновления записи.';
 
 CREATE TABLE IF NOT EXISTS account_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,7 +268,7 @@ COMMENT ON COLUMN account_keys.last_used IS 'Дата последнего ис�
 COMMENT ON COLUMN account_keys.created_at IS 'Дата добавления ключа.';
 
 -- ======================================================
--- III-A. PROJECTS
+-- III. PROJECTS
 -- ======================================================
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -143,17 +299,33 @@ COMMENT ON COLUMN projects.end_date IS 'Дата окончания или ре�
 COMMENT ON COLUMN projects.created_at IS 'Дата создания записи.';
 COMMENT ON COLUMN projects.updated_at IS 'Дата последнего изменения.';
 
+CREATE TABLE IF NOT EXISTS project_integrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    account_key_id INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (account_key_id) REFERENCES account_keys(id) ON DELETE CASCADE,
+    UNIQUE (project_id, account_key_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_proj_integrations_project_id ON project_integrations(project_id);
+CREATE INDEX IF NOT EXISTS idx_proj_integrations_key_id ON project_integrations(account_key_id);
+
+COMMENT ON TABLE project_integrations IS 'Связи проектов с ключами интеграций (account_keys).'; 
+COMMENT ON COLUMN project_integrations.id IS 'Уникальный идентификатор записи связи.';
+COMMENT ON COLUMN project_integrations.project_id IS 'Ссылка на проект (projects.id), к которому подключён ключ.';
+COMMENT ON COLUMN project_integrations.account_key_id IS 'Ссылка на ключ интеграции (account_keys.id). Провайдер и статус берутся из account_keys.';
+COMMENT ON COLUMN project_integrations.created_at IS 'Дата создания связи проекта с ключом.';
+COMMENT ON COLUMN project_integrations.updated_at IS 'Дата последнего изменения связи.';
+
 CREATE TABLE IF NOT EXISTS sites (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL,
     site_name TEXT NOT NULL,
-    lang_code TEXT,
-    primary_zone_id INTEGER,
-    primary_domain_id INTEGER,
+    site_tag TEXT,
     status TEXT CHECK(status IN ('active','paused','archived')) DEFAULT 'active',
-    tds_enabled INTEGER DEFAULT 1,
-    monitoring_enabled INTEGER DEFAULT 1,
-    integrations_json TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -161,353 +333,298 @@ CREATE TABLE IF NOT EXISTS sites (
 
 CREATE INDEX IF NOT EXISTS idx_sites_project_id ON sites(project_id);
 
-COMMENT ON TABLE sites IS 'Сайты — функциональные точки приёма трафика. Объединяют активный домен, TDS и мониторинг.';
+COMMENT ON TABLE sites IS 'Сайты проекта — функциональные единицы приёма трафика.';
 COMMENT ON COLUMN sites.id IS 'Уникальный идентификатор сайта.';
 COMMENT ON COLUMN sites.project_id IS 'Ссылка на проект (projects.id).';
-COMMENT ON COLUMN sites.site_name IS 'Название сайта (например, brand_ru, brand_en).';
-COMMENT ON COLUMN sites.lang_code IS 'Язык версии сайта (ISO-639, например ru, en, fr).';
-COMMENT ON COLUMN sites.primary_zone_id IS 'Ссылка на основную зону Cloudflare (для быстрого доступа).';
-COMMENT ON COLUMN sites.primary_domain_id IS 'Ссылка на основной домен сайта (денормализация для быстрого доступа).';
-COMMENT ON COLUMN sites.status IS 'Текущее состояние сайта (active, paused, archived).';
-COMMENT ON COLUMN sites.tds_enabled IS 'Флаг активности TDS-правил.';
-COMMENT ON COLUMN sites.monitoring_enabled IS 'Флаг активности мониторинга сайта.';
-COMMENT ON COLUMN sites.integrations_json IS 'JSON-список подключённых интеграций (GA, YM, HostTracker и др.).';
-COMMENT ON COLUMN sites.created_at IS 'Дата создания сайта.';
+COMMENT ON COLUMN sites.site_name IS 'Имя сайта (внутреннее обозначение или кампания).';
+COMMENT ON COLUMN sites.site_tag IS 'Краткий тег для внутренней идентификации сайта.';
+COMMENT ON COLUMN sites.status IS 'Статус сайта: active, paused, archived.';
+COMMENT ON COLUMN sites.created_at IS 'Дата создания записи.';
 COMMENT ON COLUMN sites.updated_at IS 'Дата последнего изменения записи.';
 
 CREATE TABLE IF NOT EXISTS zones (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
-    site_id INTEGER,
-    cf_zone_id TEXT NOT NULL UNIQUE,
+    key_id INTEGER NOT NULL,
+    cf_zone_id TEXT UNIQUE,
+    status TEXT CHECK(status IN ('active','pending','error','deleted')) DEFAULT 'pending',
+    plan TEXT CHECK(plan IN ('free','pro','business','enterprise')) DEFAULT 'free',
+    ns_expected TEXT,
+    verified INTEGER DEFAULT 0,
+    ssl_status TEXT CHECK(ssl_status IN ('none','valid','expired','error')) DEFAULT 'none',
     ssl_mode TEXT CHECK(ssl_mode IN ('off','flexible','full','strict')) DEFAULT 'full',
-    proxied INTEGER DEFAULT 1,
-    plan TEXT,
-    cf_status TEXT,
+    ssl_last_checked TIMESTAMP,
     auto_https INTEGER DEFAULT 1,
-    caching_level TEXT DEFAULT 'standard',
-    waf_mode TEXT DEFAULT 'medium',
+    caching_level TEXT CHECK(caching_level IN ('off','basic','simplified','standard','aggressive')) DEFAULT 'standard',
+    waf_mode TEXT CHECK(waf_mode IN ('off','low','medium','high')) DEFAULT 'medium',
+    dns_records TEXT,
+    last_sync_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
-    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE SET NULL
+    FOREIGN KEY (key_id) REFERENCES account_keys(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_zones_site_id ON zones(site_id);
 CREATE INDEX IF NOT EXISTS idx_zones_account_id ON zones(account_id);
+CREATE INDEX IF NOT EXISTS idx_zones_key_id ON zones(key_id);
 
-COMMENT ON TABLE zones IS 'Зоны Cloudflare. Принцип: 1 зона = 1 сайт. При удалении сайта зона освобождается (site_id=NULL)';
+COMMENT ON TABLE zones IS 'Служебные DNS-зоны Cloudflare, создаваемые автоматически при добавлении доменов 2-го уровня.';
 COMMENT ON COLUMN zones.id IS 'Уникальный идентификатор зоны.';
-COMMENT ON COLUMN zones.account_id IS 'Ссылка на аккаунт (accounts.id).';
-COMMENT ON COLUMN zones.site_id IS 'Ссылка на сайт (sites.id). NULL = осиротевшая зона (можно переиспользовать).';
-COMMENT ON COLUMN zones.cf_zone_id IS 'Идентификатор зоны в Cloudflare API (уникальный).';
-COMMENT ON COLUMN zones.ssl_mode IS 'Режим SSL (off, flexible, full, strict).';
-COMMENT ON COLUMN zones.proxied IS 'Флаг использования Cloudflare Proxy (1=включено).';
-COMMENT ON COLUMN zones.plan IS 'Тариф Cloudflare для зоны.';
-COMMENT ON COLUMN zones.cf_status IS 'Текущий статус зоны в Cloudflare (active, pending и т.п.).';
-COMMENT ON COLUMN zones.auto_https IS 'Флаг включения автоматического HTTPS (Always Use HTTPS).';
-COMMENT ON COLUMN zones.caching_level IS 'Режим кеширования (basic, standard, aggressive).';
-COMMENT ON COLUMN zones.waf_mode IS 'Уровень защиты WAF (off, low, medium, high).';
-COMMENT ON COLUMN zones.created_at IS 'Дата создания записи зоны.';
-COMMENT ON COLUMN zones.updated_at IS 'Дата последнего обновления записи зоны.';
+COMMENT ON COLUMN zones.account_id IS 'Ссылка на аккаунт (accounts.id), которому принадлежит зона.';
+COMMENT ON COLUMN zones.key_id IS 'Ссылка на ключ интеграции Cloudflare (account_keys.id).';
+COMMENT ON COLUMN zones.cf_zone_id IS 'Уникальный идентификатор зоны в Cloudflare (UUID).';
+COMMENT ON COLUMN zones.status IS 'Состояние зоны: active, pending, error, deleted.';
+COMMENT ON COLUMN zones.plan IS 'Тарифный план зоны в Cloudflare: free, pro, business, enterprise.';
+COMMENT ON COLUMN zones.ns_expected IS 'Ожидаемые NS-записи, выданные Cloudflare.';
+COMMENT ON COLUMN zones.verified IS 'Флаг подтверждения делегирования зоны (1 — NS совпадают).';
+COMMENT ON COLUMN zones.ssl_status IS 'Текущее состояние SSL-сертификата зоны: none, valid, expired, error.';
+COMMENT ON COLUMN zones.ssl_mode IS 'Режим SSL в Cloudflare: off, flexible, full, strict.';
+COMMENT ON COLUMN zones.ssl_last_checked IS 'Дата последней проверки SSL-состояния зоны.';
+COMMENT ON COLUMN zones.auto_https IS 'Автоматическое перенаправление HTTP → HTTPS (1 — включено).';
+COMMENT ON COLUMN zones.caching_level IS 'Уровень кэширования контента Cloudflare: off, basic, simplified, standard, aggressive.';
+COMMENT ON COLUMN zones.waf_mode IS 'Режим WAF (Web Application Firewall): off, low, medium, high.';
+COMMENT ON COLUMN zones.dns_records IS 'JSON-кеш DNS-записей зоны (служебное хранение).';
+COMMENT ON COLUMN zones.last_sync_at IS 'Дата последней синхронизации с Cloudflare API.';
+COMMENT ON COLUMN zones.created_at IS 'Дата создания записи.';
+COMMENT ON COLUMN zones.updated_at IS 'Дата последнего обновления.';
 
 CREATE TABLE IF NOT EXISTS domains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id INTEGER NOT NULL,
-    project_id INTEGER,
-    site_id INTEGER,
-    zone_id INTEGER NOT NULL,
-    domain_name TEXT NOT NULL UNIQUE,
-    registrar TEXT,
-    ns_required TEXT,
-    ns_status TEXT CHECK(ns_status IN ('pending','verified','error')) DEFAULT 'pending',
-    ns_verified_at TIMESTAMP,
-    domain_role TEXT CHECK(domain_role IN ('primary','donor')) DEFAULT 'donor',
-    target_type TEXT CHECK(target_type IN ('ip','cname','worker','redirect')) DEFAULT 'redirect',
-    target_value TEXT,
-    status TEXT CHECK(status IN ('new','active','blocked')) DEFAULT 'new',
-    blocked_reason TEXT CHECK(blocked_reason IN (
-        'unavailable',      -- технически недоступен
-        'ad_network',       -- бан рекламной сети
-        'hosting_registrar',-- проблемы с хостингом/регистратором
-        'government',       -- государственная блокировка
-        'manual'            -- ручное управление
+    account_id INTEGER NOT NULL,                         -- владелец домена (tenant)
+    site_id INTEGER,                                     -- ссылка на сайт, если домен используется
+    zone_id INTEGER,                                     -- служебная зона (Cloudflare)
+    key_id INTEGER,                                      -- ссылка на ключ интеграции (account_keys.id)
+    parent_id INTEGER,                                   -- родительский домен (2-го или 3-го уровня)
+    domain_name TEXT NOT NULL UNIQUE,                    -- полное доменное имя (FQDN)
+    role TEXT CHECK(role IN ('acceptor','donor','reserve')) DEFAULT 'reserve',  -- назначение домена
+    ns TEXT,                                             -- фактические NS-записи (через запятую или JSON)
+    ns_verified INTEGER DEFAULT 0,                       -- 1 — делегирование подтверждено
+    proxied INTEGER DEFAULT 1,
+    blocked INTEGER DEFAULT 0 CHECK(blocked IN (0,1)),   -- флаг блокировки домена
+    blocked_reason TEXT CHECK(blocked_reason IN (        -- причина блокировки
+        'unavailable', 'ad_network', 'hosting_registrar', 'government', 'manual'
     )),
-    blocked_details TEXT,
-    blocked_at TIMESTAMP,
-    replaced_by INTEGER,
-    tds_allowed INTEGER DEFAULT 0,
+    ssl_status TEXT CHECK(ssl_status IN ('none','valid','expired','error')) DEFAULT 'none',
+    expired_at TIMESTAMP,                                -- дата окончания регистрации у регистратора
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
-    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
     FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE SET NULL,
-    FOREIGN KEY (zone_id) REFERENCES zones(id) ON DELETE CASCADE,
-    FOREIGN KEY (replaced_by) REFERENCES domains(id) ON DELETE SET NULL
+    FOREIGN KEY (zone_id) REFERENCES zones(id) ON DELETE SET NULL,
+    FOREIGN KEY (key_id) REFERENCES account_keys(id) ON DELETE SET NULL,
+    FOREIGN KEY (parent_id) REFERENCES domains(id) ON DELETE SET NULL
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_domains_name ON domains(domain_name);
 CREATE INDEX IF NOT EXISTS idx_domains_account_id ON domains(account_id);
 CREATE INDEX IF NOT EXISTS idx_domains_site_id ON domains(site_id);
 CREATE INDEX IF NOT EXISTS idx_domains_zone_id ON domains(zone_id);
-CREATE INDEX IF NOT EXISTS idx_domains_status ON domains(status);
-CREATE INDEX IF NOT EXISTS idx_domains_role ON domains(domain_role);
+CREATE INDEX IF NOT EXISTS idx_domains_key_id ON domains(key_id);
+CREATE INDEX IF NOT EXISTS idx_domains_parent_id ON domains(parent_id);
+CREATE INDEX IF NOT EXISTS idx_domains_blocked ON domains(blocked);
 
-COMMENT ON TABLE domains IS 'Доменные имена клиента — технические активы. При удалении сайта домены освобождаются (site_id=NULL) для переиспользования. При удалении зоны домены удаляются безвозвратно.';
+COMMENT ON TABLE domains IS 'Домены всех уровней в системе 301.st: акцепторы (acceptor), доноры (donor) и свободные (reserve).';
 COMMENT ON COLUMN domains.id IS 'Уникальный идентификатор домена.';
-COMMENT ON COLUMN domains.account_id IS 'Ссылка на аккаунт (accounts.id).';
-COMMENT ON COLUMN domains.project_id IS 'Ссылка на проект (projects.id). NULL = осиротевший домен.';
-COMMENT ON COLUMN domains.site_id IS 'Ссылка на сайт (sites.id). NULL = осиротевший домен (можно переиспользовать).';
-COMMENT ON COLUMN domains.zone_id IS 'Ссылка на зону Cloudflare (zones.id). Обязательно для работы домена.';
-COMMENT ON COLUMN domains.domain_name IS 'Полное доменное имя (FQDN). Уникально в системе.';
-COMMENT ON COLUMN domains.registrar IS 'Регистратор, у которого приобретён домен.';
-COMMENT ON COLUMN domains.ns_required IS 'NS-серверы CF (JSON или через запятую), требуемые Cloudflare.';
-COMMENT ON COLUMN domains.ns_status IS 'Текущий статус NS-записей (pending, verified, error).';
-COMMENT ON COLUMN domains.ns_verified_at IS 'Дата последней успешной проверки NS.';
-COMMENT ON COLUMN domains.domain_role IS 'Роль домена: primary (основной с TDS) или donor (донор для рекламы с редиректом).';
-COMMENT ON COLUMN domains.target_type IS 'Тип маршрутизации: ip (A-запись), cname (CNAME), worker (CF Worker), redirect (301/302).';
-COMMENT ON COLUMN domains.target_value IS 'Адрес назначения: IP-адрес, CNAME, имя воркера или URL редиректа.';
-COMMENT ON COLUMN domains.status IS 'Статус домена: new, active или blocked.';
-COMMENT ON COLUMN domains.blocked_reason IS 'Причина блокировки (опционально, если доступна).';
-COMMENT ON COLUMN domains.blocked_details IS 'Детальное описание блокировки: текст жалобы, ID кабинета, ссылка на уведомление (не хранить пароли!).';
-COMMENT ON COLUMN domains.blocked_at IS 'Дата блокировки домена.';
-COMMENT ON COLUMN domains.replaced_by IS 'Ссылка на новый домен, если выполнена замена.';
-COMMENT ON COLUMN domains.tds_allowed IS 'Флаг разрешения TDS при soft-block.';
+COMMENT ON COLUMN domains.account_id IS 'Ссылка на аккаунт (accounts.id), которому принадлежит домен.';
+COMMENT ON COLUMN domains.site_id IS 'Ссылка на сайт (sites.id), если домен используется сайтом.';
+COMMENT ON COLUMN domains.zone_id IS 'Ссылка на служебную зону Cloudflare (zones.id), скрытую от пользователя.';
+COMMENT ON COLUMN domains.key_id IS 'Ссылка на ключ интеграции (account_keys.id), через который управляется домен.';
+COMMENT ON COLUMN domains.parent_id IS 'Родительский домен (для 3-го и 4-го уровней). Позволяет формировать иерархию.';
+COMMENT ON COLUMN domains.domain_name IS 'Полное доменное имя (FQDN), включая поддомены.';
+COMMENT ON COLUMN domains.role IS 'Роль домена: acceptor (акцептор, принимает трафик), donor (редирект), reserve (свободный).';
+COMMENT ON COLUMN domains.ns IS 'Фактические NS-записи, полученные при последней проверке (WHOIS/API).';
+COMMENT ON COLUMN domains.ns_verified IS 'Флаг подтверждения делегирования NS (1 — подтверждено).';
+COMMENT ON COLUMN domains.proxied IS 'Флаг проксирования через Cloudflare (1 — включено, 0 — только DNS).';
+COMMENT ON COLUMN domains.blocked IS 'Флаг блокировки домена (1 — домен заблокирован системой или вручную).';
+COMMENT ON COLUMN domains.blocked_reason IS 'Причина блокировки: unavailable, ad_network, hosting_registrar, government, manual.';
+COMMENT ON COLUMN domains.ssl_status IS 'Статус SSL-сертификата: none, valid, expired, error.';
+COMMENT ON COLUMN domains.expired_at IS 'Дата окончания регистрации домена у регистратора.';
 COMMENT ON COLUMN domains.created_at IS 'Дата добавления домена в систему.';
-COMMENT ON COLUMN domains.updated_at IS 'Дата последнего изменения записи.';
+COMMENT ON COLUMN domains.updated_at IS 'Дата последнего обновления записи.';
+
 
 -- ======================================================
 -- IV. REDIRECTS AND TDS RULES
 -- ======================================================
 
-CREATE TABLE IF NOT EXISTS redirect_templates (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    description TEXT,
-    template_json TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-COMMENT ON TABLE redirect_templates IS 'Системные шаблоны редиректов, доступные пользователям для копирования.';
-COMMENT ON COLUMN redirect_templates.id IS 'Уникальный идентификатор шаблона.';
-COMMENT ON COLUMN redirect_templates.name IS 'Название шаблона редиректа.';
-COMMENT ON COLUMN redirect_templates.description IS 'Описание назначения шаблона.';
-COMMENT ON COLUMN redirect_templates.template_json IS 'JSON-конфигурация шаблона правил.';
-COMMENT ON COLUMN redirect_templates.created_at IS 'Дата создания шаблона.';
-
 CREATE TABLE IF NOT EXISTS redirect_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
-    site_id INTEGER NOT NULL,
-    source_url TEXT NOT NULL,
-    target_url TEXT NOT NULL,
-    status_code INTEGER DEFAULT 301,
-    conditions_json TEXT,
-    priority INTEGER DEFAULT 0,
-    is_active INTEGER DEFAULT 1,
+    rule_name TEXT NOT NULL,
+    redirect_type TEXT CHECK(redirect_type IN (
+        'domain_to_domain',
+        'all_to_root',
+        'path_to_path',
+        'wildcard_path',
+        'zone_to_root',
+        'conditional'
+    )) DEFAULT 'domain_to_domain',
+    rule_json TEXT NOT NULL,
+    status_code INTEGER CHECK(status_code IN (301,302,307)) DEFAULT 301,
+    priority INTEGER DEFAULT 100,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
-    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_redirect_rules_account_id ON redirect_rules(account_id);
-CREATE INDEX IF NOT EXISTS idx_redirect_rules_site_id ON redirect_rules(site_id);
+CREATE INDEX IF NOT EXISTS idx_redirect_rules_account ON redirect_rules(account_id, priority);
+CREATE INDEX IF NOT EXISTS idx_redirect_rules_name ON redirect_rules(rule_name);
 
-COMMENT ON TABLE redirect_rules IS 'Пользовательские правила редиректов (source → target, условия и приоритет) на уровне сайта.';
+COMMENT ON TABLE redirect_rules IS 'Универсальные правила редиректов, хранящиеся в виде единого JSON. Определяют тип и логику перенаправления.';
 COMMENT ON COLUMN redirect_rules.id IS 'Уникальный идентификатор правила редиректа.';
-COMMENT ON COLUMN redirect_rules.account_id IS 'Ссылка на аккаунт клиента (accounts.id).';
-COMMENT ON COLUMN redirect_rules.site_id IS 'Ссылка на сайт (sites.id), для которого применяется правило.';
-COMMENT ON COLUMN redirect_rules.source_url IS 'Исходный URL для перенаправления.';
-COMMENT ON COLUMN redirect_rules.target_url IS 'Целевой URL для перенаправления.';
-COMMENT ON COLUMN redirect_rules.status_code IS 'HTTP-код ответа (301, 302).';
-COMMENT ON COLUMN redirect_rules.conditions_json IS 'JSON с условиями выполнения (geo, device, query и т.п.).';
-COMMENT ON COLUMN redirect_rules.priority IS 'Приоритет выполнения правила (0 — низкий, выше — раньше).';
-COMMENT ON COLUMN redirect_rules.is_active IS 'Флаг активности правила (1 — активно).';
-COMMENT ON COLUMN redirect_rules.created_at IS 'Дата создания правила.';
-COMMENT ON COLUMN redirect_rules.updated_at IS 'Дата последнего изменения правила.';
+COMMENT ON COLUMN redirect_rules.account_id IS 'Ссылка на аккаунт клиента (accounts.id), владелец правила.';
+COMMENT ON COLUMN redirect_rules.rule_name IS 'Человекочитаемое имя правила для интерфейса и API.';
+COMMENT ON COLUMN redirect_rules.redirect_type IS 'Тип редиректа: domain_to_domain (домен→домен), all_to_root (все пути на корень), path_to_path (путь→путь), wildcard_path (шаблон пути), zone_to_root (зона→домен), conditional (условный редирект по GEO, device, utm и т.п.).';
+COMMENT ON COLUMN redirect_rules.rule_json IS 'JSON-конфигурация редиректа: source/target, preserve_path, preserve_query, conditions и другие параметры.';
+COMMENT ON COLUMN redirect_rules.status_code IS 'HTTP-код перенаправления: 301 (Permanent), 302 или 307 (Temporary).';
+COMMENT ON COLUMN redirect_rules.priority IS 'Приоритет применения. Меньшее значение — более высокий приоритет.';
+COMMENT ON COLUMN redirect_rules.created_at IS 'Дата и время создания правила.';
+COMMENT ON COLUMN redirect_rules.updated_at IS 'Дата и время последнего обновления записи.';
+
+CREATE TABLE IF NOT EXISTS tds_params (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    param_key TEXT NOT NULL UNIQUE,
+    category TEXT CHECK(category IN (
+        'utm_standard',     -- стандартный UTM (Google)
+        'utm_extended',     -- арбитражные utm/sub*
+        'click_id',         -- идентификаторы кликов (fbclid, gclid, ttclid, yclid)
+        'partner_custom'    -- партнёрские или внутренние ID
+    )) DEFAULT 'utm_standard',
+    description TEXT,                          -- человекочитаемое описание
+    is_active INTEGER DEFAULT 1,               -- возможность использовать в правилах
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_tds_params_category ON tds_params(category);
+
+COMMENT ON TABLE tds_params IS 'Справочник поддерживаемых параметров (UTM, SUB, CLICK_ID, partner) для построения логики TDS.';
+COMMENT ON COLUMN tds_params.id IS 'Уникальный идентификатор записи.';
+COMMENT ON COLUMN tds_params.param_key IS 'Ключ параметра, который может использоваться в логике маршрутизации (например, utm_source, sub1, fbclid).';
+COMMENT ON COLUMN tds_params.category IS 'Категория параметра: utm_standard, utm_extended, click_id, partner_custom.';
+COMMENT ON COLUMN tds_params.description IS 'Описание назначения параметра (источник, ключевое слово, ID клика и т.д.).';
+COMMENT ON COLUMN tds_params.is_active IS 'Флаг активности: 1 — параметр доступен для использования в логике, 0 — исключён.';
+COMMENT ON COLUMN tds_params.created_at IS 'Дата добавления параметра в систему.';
+
+INSERT INTO tds_params (param_key, category, description) VALUES
+('utm_source',   'utm_standard',  'Источник трафика (google, facebook, tiktok)'),
+('utm_medium',   'utm_standard',  'Канал трафика (cpc, email, social)'),
+('utm_campaign', 'utm_standard',  'Название кампании (summer_sale, black_friday)'),
+('utm_term',     'utm_standard',  'Ключевое слово'),
+('utm_content',  'utm_standard',  'Вариант контента (баннер, кнопка и т.п.)'),
+('utm_id',       'utm_extended',  'ID кампании в трекере'),
+('click_id',     'utm_extended',  'ID клика от трекера'),
+('clickid',      'utm_extended',  'ID клика (альтернативное написание)'),
+('sub_id',       'utm_extended',  'Sub-ID от трекера'),
+('subid',        'utm_extended',  'Sub-ID (альтернативное написание)'),
+('sub1',         'utm_extended',  'Дополнительный Sub параметр 1'),
+('sub2',         'utm_extended',  'Дополнительный Sub параметр 2'),
+('sub3',         'utm_extended',  'Дополнительный Sub параметр 3'),
+('sub4',         'utm_extended',  'Дополнительный Sub параметр 4'),
+('sub5',         'utm_extended',  'Дополнительный Sub параметр 5'),
+('fbclid',       'click_id',      'Facebook Click ID'),
+('gclid',        'click_id',      'Google Click ID'),
+('ttclid',       'click_id',      'TikTok Click ID'),
+('yclid',        'click_id',      'Yandex Click ID');
 
 CREATE TABLE IF NOT EXISTS tds_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
-    site_id INTEGER NOT NULL,
     rule_name TEXT NOT NULL,
+    tds_type TEXT CHECK(tds_type IN (
+        'smartlink',
+        'traffic_shield'
+    )) DEFAULT 'smartlink',
     logic_json TEXT NOT NULL,
+    priority INTEGER DEFAULT 100,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
-    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_tds_rules_account_id ON tds_rules(account_id);
-CREATE INDEX IF NOT EXISTS idx_tds_rules_site_id ON tds_rules(site_id);
+CREATE INDEX IF NOT EXISTS idx_tds_rules_account ON tds_rules(account_id, priority);
+CREATE INDEX IF NOT EXISTS idx_tds_rules_name ON tds_rules(rule_name);
 
-COMMENT ON TABLE tds_rules IS 'Набор правил распределения трафика (Traffic Distribution System) на уровне сайта.';
+COMMENT ON TABLE tds_rules IS 'Правила Traffic Distribution System (TDS): SmartLink и Traffic Shield. Хранятся в виде единого JSON, используемого при сборке воркера.';
 COMMENT ON COLUMN tds_rules.id IS 'Уникальный идентификатор TDS-правила.';
-COMMENT ON COLUMN tds_rules.account_id IS 'Ссылка на аккаунт (accounts.id).';
-COMMENT ON COLUMN tds_rules.site_id IS 'Ссылка на сайт (sites.id), к которому относится правило.';
-COMMENT ON COLUMN tds_rules.rule_name IS 'Название TDS-правила.';
-COMMENT ON COLUMN tds_rules.logic_json IS 'JSON-описание логики маршрутизации (geo, weight, utm и т.д.).';
-COMMENT ON COLUMN tds_rules.created_at IS 'Дата создания правила.';
-COMMENT ON COLUMN tds_rules.updated_at IS 'Дата последнего изменения правила.';
+COMMENT ON COLUMN tds_rules.account_id IS 'Ссылка на аккаунт клиента (accounts.id), владелец сценария.';
+COMMENT ON COLUMN tds_rules.rule_name IS 'Название сценария TDS для отображения в интерфейсе.';
+COMMENT ON COLUMN tds_rules.tds_type IS 'Тип логики: smartlink — параметрический (UTM/Sub), traffic_shield — защитный (метаданные Cloudflare).';
+COMMENT ON COLUMN tds_rules.logic_json IS 'Полная JSON-конфигурация сценария: условия (utm, geo, device, asn и др.), распределение (split), fallback и действия (redirect, block, cloak).';
+COMMENT ON COLUMN tds_rules.priority IS 'Приоритет выполнения правила. Меньшее значение — более высокий приоритет.';
+COMMENT ON COLUMN tds_rules.created_at IS 'Дата и время создания записи.';
+COMMENT ON COLUMN tds_rules.updated_at IS 'Дата и время последнего изменения записи.';
 
 -- ======================================================
--- V. WORKERS AND DEPLOY MANAGEMENT
+-- V. RULES, WORKERS AND DEPLOY MANAGEMENT
 -- ======================================================
-
-CREATE TABLE IF NOT EXISTS worker_templates (
+CREATE TABLE IF NOT EXISTS rule_domain_map (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    description TEXT,
-    code_template TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
 
-COMMENT ON TABLE worker_templates IS 'Системные шаблоны воркеров (core, edge, client) для деплоя в CF.';
-COMMENT ON COLUMN worker_templates.id IS 'Уникальный идентификатор шаблона воркера.';
-COMMENT ON COLUMN worker_templates.name IS 'Название шаблона воркера.';
-COMMENT ON COLUMN worker_templates.description IS 'Описание назначения воркера.';
-COMMENT ON COLUMN worker_templates.code_template IS 'Исходный код шаблона (TypeScript/JS).';
-COMMENT ON COLUMN worker_templates.created_at IS 'Дата создания шаблона.';
-COMMENT ON COLUMN worker_templates.updated_at IS 'Дата последнего изменения шаблона.';
+    account_id INTEGER NOT NULL,                 -- владелец (tenant)
+    redirect_rule_id INTEGER,                    -- ссылка на redirect_rules.id
+    tds_rule_id INTEGER,                         -- ссылка на tds_rules.id
+    domain_id INTEGER NOT NULL,                  -- домен, к которому применяется правило
 
-CREATE TABLE IF NOT EXISTS workers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id INTEGER NOT NULL,
-    site_id INTEGER,
-    template_id INTEGER,
-    version TEXT,
-    status TEXT CHECK(status IN ('active','disabled','error')) DEFAULT 'active',
-    last_deploy TIMESTAMP,
+    enabled INTEGER DEFAULT 1,                   -- 1=активно, 0=отключено
+    binding_status TEXT CHECK(binding_status IN (
+        'pending','applying','applied','failed','retired','removed'
+    )) DEFAULT 'pending',
+
+    schedule_start TIMESTAMP,                    -- плановое включение
+    schedule_end   TIMESTAMP,                    -- плановое отключение
+
+    last_synced_at TIMESTAMP,                    -- последняя успешная синхронизация
+    last_error TEXT,                             -- последняя ошибка при деплое
+    replaced_by INTEGER,                         -- id новой привязки (при миграции на новый домен)
+
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
-    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE SET NULL,
-    FOREIGN KEY (template_id) REFERENCES worker_templates(id) ON DELETE SET NULL
+
+    FOREIGN KEY (account_id)       REFERENCES accounts(id)        ON DELETE CASCADE,
+    FOREIGN KEY (redirect_rule_id) REFERENCES redirect_rules(id)  ON DELETE CASCADE,
+    FOREIGN KEY (tds_rule_id)      REFERENCES tds_rules(id)       ON DELETE CASCADE,
+    FOREIGN KEY (domain_id)        REFERENCES domains(id)         ON DELETE CASCADE,
+    FOREIGN KEY (replaced_by)      REFERENCES rule_domain_map(id) ON DELETE SET NULL,
+
+    CHECK (
+      (redirect_rule_id IS NOT NULL AND tds_rule_id IS NULL)
+      OR
+      (tds_rule_id IS NOT NULL AND redirect_rule_id IS NULL)
+    )
 );
 
-CREATE INDEX IF NOT EXISTS idx_workers_account_id ON workers(account_id);
-CREATE INDEX IF NOT EXISTS idx_workers_site_id ON workers(site_id);
-CREATE INDEX IF NOT EXISTS idx_workers_template_id ON workers(template_id);
+CREATE INDEX IF NOT EXISTS idx_rdm_account_status ON rule_domain_map(account_id, binding_status);
+CREATE INDEX IF NOT EXISTS idx_rdm_domain_enabled ON rule_domain_map(domain_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_rdm_redirect ON rule_domain_map(redirect_rule_id);
+CREATE INDEX IF NOT EXISTS idx_rdm_tds ON rule_domain_map(tds_rule_id);
 
-COMMENT ON TABLE workers IS 'Экземпляры воркеров (развёрнутых у клиентов или в ядре 301.st), связанных с конкретным сайтом.';
-COMMENT ON COLUMN workers.id IS 'Уникальный идентификатор воркера.';
-COMMENT ON COLUMN workers.account_id IS 'Ссылка на аккаунт (accounts.id).';
-COMMENT ON COLUMN workers.site_id IS 'Ссылка на сайт (sites.id), для которого развёрнут воркер.';
-COMMENT ON COLUMN workers.template_id IS 'Ссылка на шаблон воркера (worker_templates.id).';
-COMMENT ON COLUMN workers.version IS 'Версия кода воркера.';
-COMMENT ON COLUMN workers.status IS 'Текущий статус воркера (active, disabled, error).';
-COMMENT ON COLUMN workers.last_deploy IS 'Дата последнего деплоя воркера.';
-COMMENT ON COLUMN workers.created_at IS 'Дата создания воркера.';
-COMMENT ON COLUMN workers.updated_at IS 'Дата последнего изменения записи.';
+COMMENT ON TABLE rule_domain_map IS 'Привязки redirect_rules и tds_rules к доменам. Отражает текущее состояние связей и миграции без логов действий.';
+COMMENT ON COLUMN rule_domain_map.id IS 'Уникальный идентификатор привязки.';
+COMMENT ON COLUMN rule_domain_map.account_id IS 'Tenant (владелец привязки), совпадает с аккаунтом правила и домена.';
+COMMENT ON COLUMN rule_domain_map.redirect_rule_id IS 'Ссылка на redirect_rules.id (если используется редирект).';
+COMMENT ON COLUMN rule_domain_map.tds_rule_id IS 'Ссылка на tds_rules.id (если используется TDS).';
+COMMENT ON COLUMN rule_domain_map.domain_id IS 'Ссылка на домен (domains.id), к которому применяется правило.';
+COMMENT ON COLUMN rule_domain_map.enabled IS 'Флаг активности привязки без удаления записи.';
+COMMENT ON COLUMN rule_domain_map.binding_status IS 'Текущее состояние жизненного цикла: pending, applying, applied, failed, retired, removed.';
+COMMENT ON COLUMN rule_domain_map.schedule_start IS 'Не активировать привязку ранее указанного времени.';
+COMMENT ON COLUMN rule_domain_map.schedule_end IS 'Автоматически снять привязку после указанного времени.';
+COMMENT ON COLUMN rule_domain_map.last_synced_at IS 'Дата последней успешной синхронизации с Cloudflare.';
+COMMENT ON COLUMN rule_domain_map.last_error IS 'Текст последней ошибки при деплое или синхронизации.';
+COMMENT ON COLUMN rule_domain_map.replaced_by IS 'Если домен заменён новым — ссылка на новую запись привязки (история миграций).';
+COMMENT ON COLUMN rule_domain_map.created_at IS 'Дата создания привязки.';
+COMMENT ON COLUMN rule_domain_map.updated_at IS 'Дата последнего обновления записи.';
 
 -- ======================================================
 -- VI. ANALYTICS, AUDIT, TASKS
 -- ======================================================
-
-CREATE TABLE IF NOT EXISTS redirect_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    site_id INTEGER NOT NULL,
-    source_url TEXT,
-    target_url TEXT,
-    status_code INTEGER,
-    ip TEXT,
-    country TEXT,
-    user_agent TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_redirect_logs_site_id ON redirect_logs(site_id);
-CREATE INDEX IF NOT EXISTS idx_redirect_logs_created_at ON redirect_logs(created_at);
-
-COMMENT ON TABLE redirect_logs IS 'Сырые логи переходов по редиректам (для аналитики и статистики) на уровне сайтов.';
-COMMENT ON COLUMN redirect_logs.id IS 'Уникальный идентификатор записи лога.';
-COMMENT ON COLUMN redirect_logs.site_id IS 'Ссылка на сайт (sites.id), к которому относится переход.';
-COMMENT ON COLUMN redirect_logs.source_url IS 'URL источника запроса.';
-COMMENT ON COLUMN redirect_logs.target_url IS 'Целевой URL редиректа.';
-COMMENT ON COLUMN redirect_logs.status_code IS 'HTTP-код редиректа (301, 302).';
-COMMENT ON COLUMN redirect_logs.ip IS 'IP-адрес посетителя.';
-COMMENT ON COLUMN redirect_logs.country IS 'Страна посетителя (по GeoIP).';
-COMMENT ON COLUMN redirect_logs.user_agent IS 'User-Agent клиента (браузер, устройство).';
-COMMENT ON COLUMN redirect_logs.created_at IS 'Дата и время редиректа.';
-
-CREATE TABLE IF NOT EXISTS analytics_summary (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    site_id INTEGER NOT NULL,
-    date DATE NOT NULL,
-    redirects_count INTEGER DEFAULT 0,
-    unique_visitors INTEGER DEFAULT 0,
-    top_country TEXT,
-    top_device TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_analytics_summary_site_date ON analytics_summary(site_id, date);
-
-COMMENT ON TABLE analytics_summary IS 'Агрегированные данные аналитики по сайтам и дням.';
-COMMENT ON COLUMN analytics_summary.id IS 'Уникальный идентификатор записи статистики.';
-COMMENT ON COLUMN analytics_summary.site_id IS 'Ссылка на сайт (sites.id), к которому относится статистика.';
-COMMENT ON COLUMN analytics_summary.date IS 'Дата сбора данных.';
-COMMENT ON COLUMN analytics_summary.redirects_count IS 'Количество редиректов за день.';
-COMMENT ON COLUMN analytics_summary.unique_visitors IS 'Количество уникальных посетителей за день.';
-COMMENT ON COLUMN analytics_summary.top_country IS 'Страна с наибольшим трафиком.';
-COMMENT ON COLUMN analytics_summary.top_device IS 'Тип устройства с наибольшей долей (desktop/mobile).';
-COMMENT ON COLUMN analytics_summary.created_at IS 'Дата формирования записи.';
-COMMENT ON COLUMN analytics_summary.updated_at IS 'Дата последнего обновления записи.';
-
-CREATE TABLE IF NOT EXISTS domain_replacement_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    old_domain_id INTEGER NOT NULL,
-    new_domain_id INTEGER,
-    account_id INTEGER NOT NULL,
-    site_id INTEGER,
-    reason TEXT,
-    initiated_by INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
-    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_domain_replacement_log_site_id ON domain_replacement_log(site_id);
-
-COMMENT ON TABLE domain_replacement_log IS 'Журнал замен и блокировок доменов. Фиксирует переходы и причины на уровне сайтов.';
-COMMENT ON COLUMN domain_replacement_log.id IS 'Уникальный идентификатор записи.';
-COMMENT ON COLUMN domain_replacement_log.old_domain_id IS 'ID старого (заблокированного) домена.';
-COMMENT ON COLUMN domain_replacement_log.new_domain_id IS 'ID нового домена, созданного взамен.';
-COMMENT ON COLUMN domain_replacement_log.account_id IS 'Ссылка на аккаунт (accounts.id).';
-COMMENT ON COLUMN domain_replacement_log.site_id IS 'Ссылка на сайт (sites.id), в котором произведена замена домена.';
-COMMENT ON COLUMN domain_replacement_log.reason IS 'Причина замены или блокировки (manual, blocked, expired, auto-rotate и т.п.).';
-COMMENT ON COLUMN domain_replacement_log.initiated_by IS 'ID пользователя (users.id), инициировавшего действие.';
-COMMENT ON COLUMN domain_replacement_log.created_at IS 'Дата и время фиксации события.';
-
-DROP TRIGGER IF EXISTS limit_domain_log;
-
-CREATE TRIGGER limit_domain_log
-AFTER INSERT ON domain_replacement_log
-BEGIN
-    DELETE FROM domain_replacement_log
-    WHERE site_id = NEW.site_id
-      AND id NOT IN (
-          SELECT id
-          FROM domain_replacement_log
-          WHERE site_id = NEW.site_id
-          ORDER BY created_at DESC, id DESC
-          LIMIT 10
-      );
-END;
-
-COMMENT ON TRIGGER limit_domain_log IS 'Поддерживает не более 10 последних записей истории замен для каждого сайта.';
-
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER,
     user_id INTEGER,
     event_type TEXT CHECK(event_type IN (
-        'register', 'login', 'logout','refresh', 
-        'create', 'update', 'delete', 'deploy', 'revoke', 'billing' 
+        'register', 'login', 'logout', 'refresh',
+        'create', 'update', 'delete', 'deploy', 'revoke', 'billing'
     )) NOT NULL,
     ip_address TEXT,
     user_agent TEXT,
@@ -542,38 +659,99 @@ BEGIN
           SELECT id
           FROM audit_log
           WHERE user_id = NEW.user_id
+          ORDER BY id DESC
+          LIMIT 10
+      );
+END;
+
+COMMENT ON TRIGGER limit_audit_log IS 'Сохраняет не более 10 последних событий на пользователя.';
+
+CREATE TABLE IF NOT EXISTS analytics_summary (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL,
+    date DATE NOT NULL,
+    redirects_count INTEGER DEFAULT 0,
+    unique_visitors INTEGER DEFAULT 0,
+    top_country TEXT,
+    top_device TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_analytics_summary_site_date ON analytics_summary(site_id, date);
+
+COMMENT ON TABLE analytics_summary IS 'Агрегированные данные аналитики по сайтам и дням.';
+COMMENT ON COLUMN analytics_summary.id IS 'Уникальный идентификатор записи статистики.';
+COMMENT ON COLUMN analytics_summary.site_id IS 'Ссылка на сайт (sites.id), к которому относится статистика.';
+COMMENT ON COLUMN analytics_summary.date IS 'Дата сбора данных.';
+COMMENT ON COLUMN analytics_summary.redirects_count IS 'Количество редиректов за день.';
+COMMENT ON COLUMN analytics_summary.unique_visitors IS 'Количество уникальных посетителей за день.';
+COMMENT ON COLUMN analytics_summary.top_country IS 'Страна с наибольшим трафиком.';
+COMMENT ON COLUMN analytics_summary.top_device IS 'Тип устройства с наибольшей долей (desktop/mobile).';
+COMMENT ON COLUMN analytics_summary.created_at IS 'Дата формирования записи.';
+COMMENT ON COLUMN analytics_summary.updated_at IS 'Дата последнего обновления записи.';
+
+CREATE TABLE IF NOT EXISTS domain_replacement_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    site_id INTEGER,
+    old_domain_id INTEGER NOT NULL,
+    new_domain_id INTEGER,
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_domain_replacement_log_site_id ON domain_replacement_log(site_id);
+
+COMMENT ON TABLE domain_replacement_log IS 'Журнал замен и блокировок доменов. Фиксирует переходы и причины на уровне сайтов.';
+COMMENT ON COLUMN domain_replacement_log.account_id IS 'Ссылка на аккаунт (accounts.id).';
+COMMENT ON COLUMN domain_replacement_log.site_id IS 'Ссылка на сайт (sites.id), в котором произведена замена домена.';
+COMMENT ON COLUMN domain_replacement_log.id IS 'Уникальный идентификатор записи.';
+COMMENT ON COLUMN domain_replacement_log.old_domain_id IS 'ID старого (заблокированного) домена.';
+COMMENT ON COLUMN domain_replacement_log.new_domain_id IS 'ID нового домена, созданного взамен.';
+COMMENT ON COLUMN domain_replacement_log.reason IS 'Причина замены или блокировки (manual, blocked, expired, auto-rotate и т.п.).';
+COMMENT ON COLUMN domain_replacement_log.created_at IS 'Дата и время фиксации события.';
+
+DROP TRIGGER IF EXISTS limit_domain_log;
+
+CREATE TRIGGER limit_domain_log
+AFTER INSERT ON domain_replacement_log
+BEGIN
+    DELETE FROM domain_replacement_log
+    WHERE site_id = NEW.site_id
+      AND id NOT IN (
+          SELECT id
+          FROM domain_replacement_log
+          WHERE site_id = NEW.site_id
           ORDER BY created_at DESC, id DESC
           LIMIT 10
       );
 END;
 
-COMMENT ON TRIGGER limit_audit_log IS 'Оставляет не более 10 последних событий на пользователя (включая вход, выход, деплой и операции).';
+COMMENT ON TRIGGER limit_domain_log IS 'Поддерживает не более 10 последних записей истории замен для каждого сайта.';
 
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
-    task_type TEXT NOT NULL,
-    payload_json TEXT,
-    status TEXT DEFAULT 'pending',
-    approved_by INTEGER,
+    task_type TEXT CHECK(task_type IN ('deploy','backup','rotate','sync','analytics','manual')),
+    status TEXT CHECK(status IN ('queued','running','done','error')) DEFAULT 'queued',
+    details TEXT,                       -- краткое описание действия или ошибки
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
-    FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL
+    finished_at TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_account_id ON tasks(account_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 
-COMMENT ON TABLE tasks IS 'Очередь задач и акцептов действий пользователей (деплои, обновления).';
-COMMENT ON COLUMN tasks.id IS 'Уникальный идентификатор задачи.';
-COMMENT ON COLUMN tasks.account_id IS 'Ссылка на аккаунт (accounts.id).';
-COMMENT ON COLUMN tasks.task_type IS 'Тип задачи (deploy, sync, revoke, backup).';
-COMMENT ON COLUMN tasks.payload_json IS 'JSON-полезная нагрузка (параметры операции).';
-COMMENT ON COLUMN tasks.status IS 'Статус выполнения задачи (pending, processing, completed, error).';
-COMMENT ON COLUMN tasks.approved_by IS 'ID пользователя, подтвердившего задачу.';
-COMMENT ON COLUMN tasks.created_at IS 'Дата создания задачи.';
-COMMENT ON COLUMN tasks.updated_at IS 'Дата последнего изменения записи.';
+COMMENT ON TABLE tasks IS 'Журнал фоновых операций и системных действий (деплой, бэкап, аналитика).';
+COMMENT ON COLUMN tasks.task_type IS 'Тип задачи (deploy, backup, rotate, sync, analytics, manual).';
+COMMENT ON COLUMN tasks.status IS 'Статус выполнения (queued, running, done, error).';
+COMMENT ON COLUMN tasks.details IS 'Описание задачи или сообщение об ошибке.';
+COMMENT ON COLUMN tasks.finished_at IS 'Время завершения операции.';
 
 CREATE TABLE IF NOT EXISTS backups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
