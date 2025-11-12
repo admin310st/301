@@ -81,6 +81,22 @@ Cloudflare Turnstile применяется в проекте **301.st** для 
 
 Turnstile работает полностью на стороне Cloudflare и не требует визуальных тестов — проверка проходит в фоновом режиме, не влияя на UX.
 
+Для реализации на фронте в форму регистрации вставить Turnstile-виджет:
+```
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<div class="cf-turnstile" data-sitekey="YOUR_SITE_KEY"></div>
+```
+
+При отправке формы включить turnstile_token в JSON:
+```
+const token = document.querySelector('[name="cf-turnstile-response"]').value;
+fetch("/auth/register", {
+  method: "POST",
+  body: JSON.stringify({ email, password, turnstile_token: token }),
+});
+
+```
+
 > Все публичные эндпоинты защищены Cloudflare Turnstile и CORS-политикой.  
 > Разрешённые источники: `api.301.st`, `301.st`, `301st.pages.dev`, `localhost`.
 
