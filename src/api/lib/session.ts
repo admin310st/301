@@ -5,14 +5,21 @@
 export async function createRefreshSession(
   c: any,          // Hono context
   env: Env,        // Worker env с KV_SESSIONS
-  userId: number   // ID пользователя
+  userId: number,  // ID пользователя
+  accountId?: number,        // ID активного аккаунта (ДОБАВЛЕНО)
+  userType: string = 'client' // Тип пользователя (ДОБАВЛЕНО)
 ): Promise<string> {
   const refreshId = crypto.randomUUID();
 
-  // Запоминаем в KV пользователя, которому принадлежит refresh-токен
+  // Запоминаем в KV полный объект session
+  // JSON объект с user_id, account_id, user_type
   await env.KV_SESSIONS.put(
     `refresh:${refreshId}`,
-    String(userId),
+    JSON.stringify({
+      user_id: userId,
+      account_id: accountId ?? null,
+      user_type: userType
+    }),
     {
       expirationTtl: 60 * 60 * 24 * 7 // 7 дней
     }

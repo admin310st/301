@@ -61,8 +61,8 @@ app.post("/", async (c) => {
 
     if (!member) throw new HTTPException(403, { message: "no_account" });
 
-    // создаём refresh-session через библиотеку
-    await createRefreshSession(c, env, user.id);
+    // передаём account_id и user_type
+    await createRefreshSession(c, env, user.id, member.account_id, user.user_type);
 
     // access_token
     const accessToken = await signJWT(
@@ -133,8 +133,8 @@ app.post("/", async (c) => {
     throw new HTTPException(403, { message: "no_account" });
   }
 
-  // создаём refresh-session через библиотеку
-  await createRefreshSession(c, env, user.id);
+  // передаём account_id и user_type
+  await createRefreshSession(c, env, user.id, member.account_id, user.user_type);
 
   const accessToken = await signJWT(
     {

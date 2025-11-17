@@ -124,8 +124,8 @@ app.get("/", async (c) => {
 
   const sessionId = sess.lastInsertRowId;
 
-  //  5. Создаём refresh-session (KV + cookie)
-  await createRefreshSession(c, env, userId);
+  //  5. передаём account_id и user_type в createRefreshSession
+  await createRefreshSession(c, env, userId, accountId, user.user_type || 'client');
 
   // 6. Создаём access_token
   const accessToken = await signJWT(
