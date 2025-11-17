@@ -1,0 +1,168 @@
+// src/api/auth/reset_password.ts
+
+import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { verifyTurnstile } from "../lib/turnstile";
+import { logEvent } from "../lib/logger";
+import { checkRateLimit } from "../lib/ratelimit";
+
+const app = new Hono();
+
+/**
+ * POST /auth/reset_password
+ *
+ * Отправляет reset-link (email) или OTP (tg).
+ */
+
+app.post("/", async (c) => {
+  const env = c.env;
+
+  const ip =
+    c.req.header("CF-Connecting-IP") ||
+    c.req.header("x-real-ip") ||
+    "0.0.0.0";
+
+  const ua = c.req.header("User-Agent") || "unknown";
+
+  const isDev =
+    env.ENV_MODE === "dev" || env.WORKERS_ENV === "dev";
+
+  // 1. Turnstile (prod only)
+  if (!(await verifyTurnstile(c, env))) {
+    throw new HTTPException(400, { message: "turnstile_failed" });
+  }
+
+  // 2. Rate-limit (IP)
+  await checkRateLimit(env, `auth:reset:ip:${ip}`, 20, 60);
+
+  // 3. Body
+  const body = await c.req.json().catch(() => null);
+
+  if (!body || typeof body !== "object") {
+    throw new HTTPException(400, { message: "invalid_body" });
+  }
+
+  const type = body.type;
+  const value = String(body.value || "").trim().toLowerCase();
+
+  if (!type || !value) {
+    throw new HTTPException(400, { message: "invalid_identifier" });
+  }
+
+  if (!["email", "tg", "phone"].includes(type)) {
+    throw new HTTPException(400, { message: "invalid_type" });
+  }
+
+  // 4. Rate-limit (identifier)
+  await checkRateLimit(env, `auth:reset:id:${type}:${value}`, 5, 600);
+
+  // 5. Find user
+  let user = null;
+
+  if (type === "email") {
+    user = await env.DB301
+      .prepare(
+        "SELECT id, email, email_verified, password_hash, oauth_provider FROM users WHERE email=?"
+      )
+      .bind(value)
+      .first();
+  }
+
+  if (type === "tg") {
+    user = await env.DB301
+      .prepare(
+        "SELECT id, email, email_verified, password_hash, oauth_provider, tg_id FROM users WHERE tg_id=?"
+      )
+      .bind(value)
+      .first();
+  }
+
+  if (type === "phone") {
+    throw new HTTPException(400, { message: "phone_not_supported" });
+  }
+
+  // Не раскрываем факт существования пользователя
+  if (!user) {
+    return c.json({ status: "ok" });
+  }
+
+  // 6. Проверка email_verified
+  if (type === "email") {
+    if (!user.email_verified) {
+      throw new HTTPException(400, { message: "email_not_verified" });
+    }
+  }
+
+  // 7. Создаём reset token
+  let token = null;
+
+  if (type === "email") {
+    token = crypto.randomUUID(); // безопасно
+  }
+
+  if (type === "tg") {
+    token = String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
+  }
+
+  const ttl = 900; // 15 минут
+
+  // 8. Пишем в KV
+  await env.KV_SESSIONS.put(
+    `reset:${token}`,
+    JSON.stringify({
+      user_id: user.id,
+      channel: type,
+      identifier: value,
+    }),
+    { expirationTtl: ttl }
+  );
+
+  // 9. Отправка email/TG в prod
+  if (!isDev) {
+    if (type === "email") {
+      const resetLink = `${env.OAUTH_REDIRECT_BASE}/auth/verify?type=reset&token=${token}`;
+      // TODO: отправить resetLink через email_sender.ts
+    }
+
+    if (type === "tg") {
+      // TODO: отправить OTP в Telegram
+    }
+  }
+
+  // 10. Audit
+  try {
+    await logEvent(env, {
+      event_type: "update",
+      user_id: user.id,
+      ip,
+      ua,
+      user_type: "client:none",
+      details: {
+        action: "reset_password_request",
+        channel: type,
+      },
+    });
+  } catch (e) {
+    console.error("[AUDIT ERROR]", e);
+  }
+
+  // 11. DEV response
+  if (isDev) {
+    const resetLink =
+      type === "email"
+        ? `${env.OAUTH_REDIRECT_BASE}/auth/verify?type=reset&token=${token}`
+        : null;
+
+    return c.json({
+      status: "ok",
+      token,
+      reset_link: resetLink,
+    });
+  }
+
+  // 12. PROD response
+  return c.json({ status: "ok" });
+});
+
+export default app;
+
