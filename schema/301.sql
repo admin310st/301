@@ -8,6 +8,7 @@
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
+    email_verified INTEGER DEFAULT 0;
     password_hash TEXT,
     oauth_provider TEXT,
     oauth_id TEXT,
@@ -21,6 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
 COMMENT ON TABLE users IS 'Учётные записи пользователей платформы 301.st.';
 COMMENT ON COLUMN users.id IS 'Уникальный идентификатор пользователя.';
 COMMENT ON COLUMN users.email IS 'Email пользователя, используется для входа.';
+COMMENT ON COLUMN users.email_verified IS 'Верификация Email пользователя .';
 COMMENT ON COLUMN users.password_hash IS 'Хеш пароля (bcrypt/scrypt). NULL для OAuth-пользователей.';
 COMMENT ON COLUMN users.oauth_provider IS 'Провайдер OAuth (google, github).';
 COMMENT ON COLUMN users.oauth_id IS 'Уникальный идентификатор пользователя от OAuth-провайдера. Используется для поиска существующего пользователя при повторном логине.';

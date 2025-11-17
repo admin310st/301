@@ -1,95 +1,171 @@
 // src/api/auth/login.ts
-/**
- * Production endpoint: POST /auth/login
- * Авторизация пользователя по email и паролю.
- * Включает rate-limit (IP + email), JWT, KV-сессии и аудит.
- */
 
-import type { Context } from 'hono'
-import { compare } from 'bcrypt-ts'
-import { signJWT } from '../lib/jwt'
-import { logAuth } from '../lib/logger'
-import { loginGuard } from '../lib/ratelimit'
-import { z } from 'zod'
+import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { getDB } from "../lib/d1";
+import { signJWT } from "../lib/jwt";
+import { logAuth } from "../lib/logger";
+import { verifyPassword } from "../lib/crypto";
+import { createRefreshSession } from "../lib/session";
 
-const LoginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(6)
-})
+const app = new Hono();
 
-export async function login(c: Context<{ Bindings: Env }>) {
+app.post("/", async (c) => {
+  const env = c.env;
+  const db = getDB(env);
+
+  let body: any;
   try {
-    const env = c.env
-    const ip = c.req.header('CF-Connecting-IP') || '0.0.0.0'
-    const ua = c.req.header('User-Agent') || 'unknown'
+    body = await c.req.json();
+  } catch {
+    throw new HTTPException(400, { message: "invalid_json" });
+  }
 
-    const body = await c.req.json()
-    const parsed = LoginSchema.safeParse(body)
-    if (!parsed.success) {
-      return c.json({ error: 'invalid_request', details: parsed.error.flatten() }, 400)
+  const email = body.email || null;
+  const phone = body.phone || null;
+  const password = body.password || null;
+  const tg_init = body.tg_init || null; // Telegram WebApp initData
+
+  const ip =
+    c.req.header("CF-Connecting-IP") ||
+    c.req.header("x-real-ip") ||
+    "0.0.0.0";
+
+  const ua = c.req.header("User-Agent") || "unknown";
+
+  // 1. TELEGRAM MINI-APP (авто-логин через initData)
+  if (tg_init) {
+    const tg_id = tg_init.user?.id;
+
+    if (!tg_id) {
+      throw new HTTPException(400, { message: "invalid_telegram_data" });
     }
-    const { email, password } = parsed.data
 
-    const blocked = await loginGuard(c, email)
-    if (blocked) return blocked
-
-    const user = await env.DB301
-      .prepare('SELECT id, password_hash, role FROM users WHERE email=?')
-      .bind(email)
-      .first()
+    const user = await db
+      .prepare("SELECT * FROM users WHERE tg_id = ? LIMIT 1")
+      .bind(tg_id)
+      .first();
 
     if (!user) {
-      await logAuth(env, 'revoke', 0, undefined, ip, ua)
-      return c.json({ error: 'invalid_credentials' }, 401)
+      throw new HTTPException(404, { message: "user_not_found" });
     }
 
-    const valid = await compare(password, user.password_hash)
-    if (!valid) {
-      await logAuth(env, 'revoke', user.id, undefined, ip, ua)
-      return c.json({ error: 'invalid_credentials' }, 401)
-    }
+    const member = await db
+      .prepare(
+        `SELECT account_id, role FROM account_members
+         WHERE user_id = ?
+         ORDER BY account_id ASC LIMIT 1`
+      )
+      .bind(user.id)
+      .first();
 
-    const user_id = Number(user.id)
+    if (!member) throw new HTTPException(403, { message: "no_account" });
 
-    const account = await env.DB301
-      .prepare('SELECT id FROM accounts WHERE user_id=? AND status="active" LIMIT 1')
-      .bind(user_id)
-      .first()
-    const account_id = account ? Number(account.id) : null
+    // создаём refresh-session через библиотеку
+    await createRefreshSession(c, env, user.id);
 
-    const refresh_id = crypto.randomUUID()
-    await env.KV_SESSIONS.put(`refresh:${refresh_id}`, String(user_id), {
-      expirationTtl: 60 * 60 * 24 * 7
-    })
-
-    const access_token = await signJWT(
+    // access_token
+    const accessToken = await signJWT(
       {
-        user_id,
-        account_id,
-        role: user.role || 'user'
+        typ: "access",
+        user_id: user.id,
+        account_id: member.account_id,
+        iat: Math.floor(Date.now() / 1000),
       },
-      env
-    )
+      env.MASTER_KEY,
+      900
+    );
 
-    const cookie = `refresh_id=${refresh_id}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800`
-    c.header('Set-Cookie', cookie)
+    // логирование
+    await logAuth(
+      env,
+      "login",
+      user.id,
+      member.account_id,
+      ip,
+      ua,
+      user.user_type,
+      member.role
+    );
 
-    await logAuth(env, 'login', user_id, account_id ?? undefined, ip, ua)
-
-    return c.json(
-      {
-        access_token,
-        user: {
-          id: user_id,
-          email,
-          account_id,
-          role: user.role || 'user'
-        }
-      },
-      200
-    )
-  } catch (err) {
-    console.error('[LOGIN ERROR]', err)
-    return c.json({ error: 'internal_error' }, 500)
+    return c.json({
+      ok: true,
+      access_token: accessToken,
+      expires_in: 900,
+      active_account_id: member.account_id,
+    });
   }
-}
+
+  // 2. EMAIL / PHONE + PASSWORD LOGIN
+
+  if ((!email && !phone) || !password) {
+    throw new HTTPException(400, { message: "missing_credentials" });
+  }
+
+  const user = await db
+    .prepare(
+      `SELECT * FROM users
+         WHERE email = ? OR phone = ?
+         LIMIT 1`
+    )
+    .bind(email, phone)
+    .first();
+
+  if (!user) {
+    throw new HTTPException(401, { message: "invalid_login" });
+  }
+
+  const ok = await verifyPassword(password, user.password_hash);
+  if (!ok) {
+    throw new HTTPException(401, { message: "invalid_login" });
+  }
+
+  const member = await db
+    .prepare(
+      `SELECT account_id, role FROM account_members
+       WHERE user_id = ?
+       ORDER BY account_id ASC LIMIT 1`
+    )
+    .bind(user.id)
+    .first();
+
+  if (!member) {
+    throw new HTTPException(403, { message: "no_account" });
+  }
+
+  // создаём refresh-session через библиотеку
+  await createRefreshSession(c, env, user.id);
+
+  const accessToken = await signJWT(
+    {
+      typ: "access",
+      user_id: user.id,
+      account_id: member.account_id,
+      iat: Math.floor(Date.now() / 1000),
+    },
+    env.MASTER_KEY,
+    900
+  );
+
+  // логирование
+  await logAuth(
+    env,
+    "login",
+    user.id,
+    member.account_id,
+    ip,
+    ua,
+    user.user_type,
+    member.role
+  );
+
+  return c.json({
+    ok: true,
+    access_token: accessToken,
+    expires_in: 900,
+    active_account_id: member.account_id,
+  });
+});
+
+export default app;
+

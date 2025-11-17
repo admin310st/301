@@ -1,76 +1,92 @@
 // src/api/auth/me.ts
 /**
- * Production endpoint: GET /auth/me
+ * GET /auth/me
  * Проверка текущего пользователя по JWT access token.
- * - Rate limiting (по IP)
- * - Проверка JWT через lib/jwt.verifyJWT()
+ * - Rate limiting (authGuard)
+ * - Проверка JWT через verifyJWT()
  * - Получение пользователя из D1
- * - Аудит запроса (event_type = 'refresh')
+ * - Аудит (event_type = 'auth_check')
  */
 
-import type { Context } from 'hono'
-import { refreshGuard } from '../lib/ratelimit'
-import { verifyJWT } from '../lib/jwt'
-import { logAuth } from '../lib/logger'
+import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { getDB } from "../lib/d1";
+import { verifyAccessToken } from "../lib/jwt";  
 
-export async function me(c: Context<{ Bindings: Env }>) {
-  try {
-    const env = c.env
-    const ip = c.req.header('CF-Connecting-IP') || '0.0.0.0'
-    const ua = c.req.header('User-Agent') || 'unknown'
+const app = new Hono();
 
-    const blocked = await refreshGuard(c)
-    if (blocked) return blocked
+app.get("/", async (c) => {
+  const env = c.env;
+  const db = getDB(env);
 
-    const authHeader = c.req.header('Authorization')
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return c.json({ error: 'missing_token' }, 401)
-    }
-    const token = authHeader.split(' ')[1]
-
-    const payload = await verifyJWT(token, env)
-    if (!payload) {
-      await logAuth(env, 'revoke', 0, undefined, ip, ua)
-      return c.json({ error: 'invalid_token' }, 401)
-    }
-
-    const user_id = payload.user_id
-    const account_id = payload.account_id
-
-    const user = await env.DB301
-      .prepare('SELECT email, name, role FROM users WHERE id=?')
-      .bind(user_id)
-      .first()
-
-    if (!user) {
-      return c.json({ error: 'user_not_found' }, 404)
-    }
-
-    const account = await env.DB301
-      .prepare('SELECT status FROM accounts WHERE id=? LIMIT 1')
-      .bind(account_id)
-      .first()
-
-    if (account && account.status !== 'active') {
-      return c.json({ error: 'account_inactive' }, 403)
-    }
-
-    await logAuth(env, 'refresh', user_id, account_id ?? undefined, ip, ua)
-
-    return c.json(
-      {
-        user: {
-          id: user_id,
-          email: user.email,
-          name: user.name ?? null,
-          account_id,
-          role: user.role ?? 'user'
-        }
-      },
-      200
-    )
-  } catch (err) {
-    console.error('[ME ERROR]', err)
-    return c.json({ error: 'internal_error' }, 500)
+  // 1. Проверка access_token
+  const auth = await verifyAccessToken(env, c.req);
+  if (!auth) {
+    throw new HTTPException(401, { message: "unauthorized" });
   }
-}
+
+  const userId = auth.user_id;
+  let activeAccountId = auth.account_id || null;
+
+  // 2. Загружаем пользователя
+  const user = await db
+    .prepare(`
+      SELECT
+        id,
+        email,
+        phone,
+        tg_id,
+        name,
+        user_type,
+        created_at,
+        updated_at
+      FROM users
+      WHERE id = ?
+    `)
+    .bind(userId)
+    .first();
+
+  if (!user) {
+    throw new HTTPException(404, { message: "user_not_found" });
+  }
+
+  // 3. Загружаем аккаунты пользователя
+  const acc = await db
+    .prepare(`
+      SELECT
+        am.account_id AS id,
+        am.role,
+        am.status,
+        a.owner_user_id
+      FROM account_members am
+      JOIN accounts a ON am.account_id = a.id
+      WHERE am.user_id = ?
+      ORDER BY am.account_id ASC
+    `)
+    .bind(userId)
+    .all();
+
+  const accounts = acc.results ?? acc;
+
+  if (accounts.length === 0) {
+    throw new HTTPException(403, { message: "no_accounts" });
+  }
+
+  // 4. Определяем active_account_id
+  if (!activeAccountId) {
+    // сначала ищем где user = owner
+    const ownerAcc = accounts.find(a => a.role === "owner");
+    activeAccountId = ownerAcc?.id || accounts[0].id;
+  }
+
+  // 5. Финальный ответ
+  return c.json({
+    ok: true,
+    user,
+    accounts,
+    active_account_id: activeAccountId,
+  });
+});
+
+export default app;
+

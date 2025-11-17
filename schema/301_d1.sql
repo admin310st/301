@@ -14,9 +14,11 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
+    email_verified INTEGER DEFAULT 0,
     password_hash TEXT,
     oauth_provider TEXT,
     oauth_id TEXT,
+    phone TEXT,
     tg_id TEXT,
     name TEXT,
     user_type TEXT DEFAULT 'client' CHECK(user_type IN ('admin','client')),
@@ -69,7 +71,7 @@ CREATE TABLE IF NOT EXISTS account_members (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
-    role TEXT DEFAULT 'editor' CHECK(role IN ('editor','viewer')),
+    role TEXT DEFAULT 'editor' CHECK(role IN ('owner','editor','viewer')),
     status TEXT DEFAULT 'active' CHECK(status IN ('active','suspended','removed')),
     invited_by INTEGER,                 -- ID пригласившего (не FK)
     invited_at TEXT DEFAULT CURRENT_TIMESTAMP,
