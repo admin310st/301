@@ -1,17 +1,18 @@
 /**
- * Инициация GitHub OAuth 2.0 flow
+ * Инициация GitHub OAuth 2.0 flow с PKCE
  *
  * Endpoint:
  * - GET /auth/oauth/github/start
  *
  * Flow:
  * 1. Генерация state (CSRF protection)
- * 2. Сохранение state в KV (TTL 5 минут)
- * 3. Редирект на GitHub OAuth
+ * 2. Генерация PKCE (verifier + challenge)
+ * 3. Сохранение verifier в KV (TTL 5 минут)
+ * 4. Редирект на GitHub OAuth с PKCE challenge
  */
 
 import { Hono } from "hono";
-import { storeState } from "../../../lib/oauth";
+import { storeState, generatePKCE, buildOAuthUrl } from "../../../lib/oauth";
 
 const app = new Hono();
 
@@ -25,17 +26,23 @@ app.get("/", async (c) => {
 
   const state = crypto.randomUUID();
 
-  // GitHub не использует PKCE, сохраняем метку валидности
-  await storeState(c.env, "github", state, "verified");
+  // Генерация PKCE
+  const { verifier, challenge } = await generatePKCE();
+  await storeState(c.env, "github", state, verifier);
 
   const redirect_uri = `${redirect_base}/auth/oauth/github/callback`;
-  const authUrl = new URL("https://github.com/login/oauth/authorize");
-  authUrl.searchParams.set("client_id", client_id);
-  authUrl.searchParams.set("redirect_uri", redirect_uri);
-  authUrl.searchParams.set("state", state);
-  authUrl.searchParams.set("scope", "read:user user:email");
+  
+  // Добавление PKCE параметров в URL
+  const authUrl = buildOAuthUrl("https://github.com/login/oauth/authorize", {
+    client_id,
+    redirect_uri,
+    state,
+    scope: "read:user user:email",
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+  });
 
-  return Response.redirect(authUrl.toString(), 302);
+  return Response.redirect(authUrl, 302);
 });
 
 export default app;

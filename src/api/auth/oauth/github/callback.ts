@@ -1,23 +1,26 @@
 /**
- * GitHub OAuth 2.0 Callback — финальная продакшн версия (исправленная)
+ * GitHub OAuth 2.0 Callback — с исправлениями #2 и #3
  *
  * Endpoint:
  * - GET /auth/oauth/github/callback
  *
  * Flow:
  * 1. Проверка state (CSRF)
- * 2. Обмен code → access_token
- * 3. Получение профиля пользователя GitHub
- * 4. Создание / обновление пользователя и аккаунта в D1
- * 5. Запись события в audit_log через logAuth()
- * 6. Генерация JWT (user_id, account_id, role)
- * 7. Редирект в панель управления
+ * 2. Извлечение PKCE verifier из KV
+ * 3. Обмен code → access_token с code_verifier
+ * 4. Получение профиля пользователя GitHub
+ * 5. Создание / обновление пользователя и аккаунта в D1
+ * 6. Создание refresh session с правильным форматом
+ * 7. Запись события в audit_log через logAuth()
+ * 8. Генерация JWT (user_id, account_id, role)
+ * 9. Редирект в панель управления
  */
 
 import { Hono } from "hono";
 import { consumeState } from "../../../lib/oauth";
 import { signJWT } from "../../../lib/jwt";
 import { logAuth } from "../../../lib/logger";
+import { createRefreshSession } from "../../../lib/session";
 
 const app = new Hono();
 
@@ -31,8 +34,9 @@ app.get("/", async (c) => {
       return c.text("Missing OAuth parameters", 400);
     }
 
-    const stateValue = await consumeState(c.env, "github", state);
-    if (stateValue === null) {
+    // Извлечение PKCE verifier из KV (вместо заглушки "verified")
+    const verifier = await consumeState(c.env, "github", state);
+    if (!verifier) {
       return c.text("Invalid or expired state", 400);
     }
 
@@ -41,6 +45,7 @@ app.get("/", async (c) => {
     const redirect_base = c.env.OAUTH_REDIRECT_BASE || "https://api.301.st";
     const redirect_uri = `${redirect_base}/auth/oauth/github/callback`;
 
+    // Добавление code_verifier при обмене токена
     const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
@@ -49,7 +54,7 @@ app.get("/", async (c) => {
         client_secret,
         code,
         redirect_uri,
-        state,
+        code_verifier: verifier,  // PKCE verifier
       }),
     });
 
@@ -90,11 +95,12 @@ app.get("/", async (c) => {
     let user_id: number;
     let account_id: number;
     let role: string = "user";
+    let user_type: string = "client";
 
     const existing = await db.prepare(`
-      SELECT id, role FROM users 
+      SELECT id, role, user_type FROM users 
       WHERE email = ?1 OR (oauth_provider = 'github' AND oauth_id = ?2)
-    `).bind(email, github_id).first<{ id: number; role: string | null }>();
+    `).bind(email, github_id).first<{ id: number; role: string | null; user_type: string | null }>();
 
     if (!existing) {
       const userInsert = await db.prepare(`
@@ -104,6 +110,7 @@ app.get("/", async (c) => {
       // @ts-ignore
       user_id = userInsert.meta.last_row_id as number;
       role = "user";
+      user_type = "client";
 
       const accountInsert = await db.prepare(`
         INSERT INTO accounts (user_id, account_name, cf_account_id, plan, status, created_at, updated_at)
@@ -116,6 +123,7 @@ app.get("/", async (c) => {
     } else {
       user_id = existing.id;
       role = existing.role || "user";
+      user_type = existing.user_type || "client";
 
       await db.prepare(`
         UPDATE users 
@@ -139,6 +147,9 @@ app.get("/", async (c) => {
 
       console.log(`Existing GitHub user: ${email}`);
     }
+
+    // Создание refresh session с правильным форматом
+    await createRefreshSession(c, c.env, user_id, account_id, user_type);
 
     try {
       await logAuth(c.env, 'login', user_id, account_id, ip, ua);

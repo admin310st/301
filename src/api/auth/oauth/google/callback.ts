@@ -5,18 +5,21 @@
  * Flow:
  * 1) Проверка state (CSRF) и извлечение PKCE verifier из KV (oauth:google:state:<uuid>)
  * 2) Обмен code → tokens (access_token + id_token)
- * 3) Декодирование id_token → email, name, sub
+ * 3) ВЕРИФИКАЦИЯ id_token через JWKS (ИСПРАВЛЕНО #1)
  * 4) D1: поиск пользователя по email или (oauth_provider, oauth_id), создание / обновление
  * 5) Создание / получение аккаунта
- * 6) Запись события в audit_log через logAuth()
- * 7) JWT payload = { user_id, account_id, role }
- * 8) Redirect → https://301.st/auth/success?token=...
+ * 6) ИСПРАВЛЕНО #2: Создание refresh session с правильным форматом
+ * 7) Запись события в audit_log через logAuth()
+ * 8) JWT payload = { user_id, account_id, role }
+ * 9) Redirect → https://301.st/auth/success?token=...
  */
 
 import { Hono } from "hono";
 import { consumeState } from "../../../lib/oauth";
 import { signJWT } from "../../../lib/jwt";
 import { logAuth } from "../../../lib/logger";
+import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createRefreshSession } from "../../../lib/session";
 
 const app = new Hono();
 
@@ -65,8 +68,22 @@ app.get("/", async (c) => {
     const idToken = tokenData.id_token;
     if (!idToken) return c.text("Missing id_token", 500);
 
-    // 3) Раскодирование id_token
-    const payload = JSON.parse(atob(idToken.split(".")[1]));
+    // 3) ИСПРАВЛЕНИЕ #1: Верификация ID token через JWKS
+    let payload: any;
+    try {
+      const JWKS = createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs"));
+      
+      const { payload: verifiedPayload } = await jwtVerify(idToken, JWKS, {
+        issuer: "https://accounts.google.com",
+        audience: client_id,
+      });
+      
+      payload = verifiedPayload;
+    } catch (verifyError) {
+      console.error("ID token verification failed:", verifyError);
+      return c.text("Invalid ID token", 403);
+    }
+
     const email: string = payload.email;
     const name: string = payload.name;
     const sub: string = payload.sub;
@@ -80,15 +97,16 @@ app.get("/", async (c) => {
     let user_id: number;
     let account_id: number;
     let role: string = "user";
+    let user_type: string = "client";
 
     // Поиск пользователя по email или (oauth_provider, oauth_id)
     const existing = await db.prepare(`
-      SELECT id, role FROM users
+      SELECT id, role, user_type FROM users
       WHERE email = ?1 OR (oauth_provider = 'google' AND oauth_id = ?2)
-    `).bind(email, sub).first<{ id: number; role: string | null }>();
+    `).bind(email, sub).first<{ id: number; role: string | null; user_type: string | null }>();
 
     if (!existing) {
-      // Создание нового пользователя (структура из 301.txt)
+      // Создание нового пользователя
       const userInsert = await db.prepare(`
         INSERT INTO users (email, password_hash, oauth_provider, oauth_id, tg_id, name, role, user_type, created_at, updated_at)
         VALUES (?1, NULL, 'google', ?2, NULL, ?3, 'user', 'client', ?4, ?4)
@@ -96,6 +114,7 @@ app.get("/", async (c) => {
       // @ts-ignore
       user_id = userInsert.meta.last_row_id as number;
       role = "user";
+      user_type = "client";
 
       // Создание аккаунта
       const accountInsert = await db.prepare(`
@@ -110,6 +129,7 @@ app.get("/", async (c) => {
       // Обновление существующего пользователя
       user_id = existing.id;
       role = existing.role || "user";
+      user_type = existing.user_type || "client";
 
       await db.prepare(`
         UPDATE users
@@ -133,17 +153,20 @@ app.get("/", async (c) => {
       console.log(`Existing Google user: ${email}`);
     }
 
-    // 5) Запись события в audit_log
+    // 5) Создание refresh session
+    await createRefreshSession(c, c.env, user_id, account_id, user_type);
+
+    // 6) Запись события в audit_log
     try {
       await logAuth(c.env, 'login', user_id, account_id, ip, ua);
     } catch (logErr) {
       console.error('Audit log write error:', logErr);
     }
 
-    // 6) JWT: user_id, account_id, role
+    // 7) JWT: user_id, account_id, role
     const jwt = await signJWT({ user_id, account_id, role }, c.env);
 
-    // 7) Redirect
+    // 8) Redirect
     const redirectTo = `https://301.st/auth/success?token=${jwt}`;
     return Response.redirect(redirectTo, 302);
   } catch (err) {
