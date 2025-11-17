@@ -1,14 +1,10 @@
 // src/api/lib/logger.ts
+
+// Централизованный логгер событий.
+
 import type { Env } from '../types/worker'
 
-/**
- * logEvent()
- * Централизованная запись событий в таблицу audit_log (D1)
- * Работает на Edge, не требует Node.js API.
- *
- * @param env - окружение воркера (содержит DB301)
- * @param data - объект события
- */
+// Базовый логгер событий (insert в audit_log)
 export async function logEvent(
   env: Env,
   data: {
@@ -27,14 +23,14 @@ export async function logEvent(
       | 'billing'
     ip?: string
     ua?: string
-    role?: string
+    user_type?: string
     details?: Record<string, any>
   }
 ): Promise<void> {
   try {
     await env.DB301.prepare(
       `INSERT INTO audit_log 
-       (account_id, user_id, event_type, ip_address, user_agent, details, role)
+        (account_id, user_id, event_type, ip_address, user_agent, details, role)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
       .bind(
@@ -43,34 +39,41 @@ export async function logEvent(
         data.event_type,
         data.ip ?? null,
         data.ua ?? null,
-        JSON.stringify(data.details ?? {}),
-        data.role ?? null
+        JSON.stringify(data.details ?? {}), //  для расширений
+        data.user_type ?? null
       )
       .run()
   } catch (err) {
-    console.error('Audit log error:', err)
+    console.error('[AUDIT_LOG ERROR]', err)
   }
 }
 
-/**
- * logAuth()
- * Упрощённая обёртка для auth-событий (register/login/logout/refresh)
- */
+// Логгер событий авторизации.
+ 
 export async function logAuth(
   env: Env,
   event_type: 'register' | 'login' | 'logout' | 'refresh',
   user_id: number,
   account_id?: number,
   ip?: string,
-  ua?: string
+  ua?: string,
+  user_type: 'admin' | 'client' = 'client',
+  account_role: 'owner' | 'editor' | 'viewer' | 'none' = 'none'
 ): Promise<void> {
-  await logEvent(env, {
-    account_id,
-    user_id,
-    event_type,
-    ip,
-    ua,
-    role: 'user'
-  })
+  const combined = `${user_type}:${account_role}`
+
+  try {
+    await logEvent(env, {
+      account_id,
+      user_id,
+      event_type,
+      ip,
+      ua,
+      user_type: combined,
+      details: {}            // для будущих расширений
+    })
+  } catch (err) {
+    console.error('[AUTH_LOG_WRAPPER ERROR]', err)
+  }
 }
 

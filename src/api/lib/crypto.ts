@@ -60,14 +60,30 @@ export async function decrypt<T = unknown>(
   payload: { iv: string; ct: string; ver?: string },
   masterSecret: string
 ): Promise<T> {
-  const iv = Uint8Array.from(atob(payload.iv), (c) => c.charCodeAt(0));
-  const data = Uint8Array.from(atob(payload.ct), (c) => c.charCodeAt(0));
+  // --- учёт версии шифрования ---
+  if (!payload.ver) {
+    console.warn(
+      "[crypto.decrypt] Missing encryption version, assuming v1 (current=%s)",
+      KEY_VERSION
+    );
+  } else if (payload.ver !== KEY_VERSION) {
+    console.warn(
+      "[crypto.decrypt] Version mismatch: encrypted=%s, expected=%s",
+      payload.ver,
+      KEY_VERSION
+    );
+    // здесь можно будет добавить миграцию/особую обработку для старых версий
+  }
+
+  const ivBytes = Uint8Array.from(atob(payload.iv), (c) => c.charCodeAt(0));
+  const ctBytes = Uint8Array.from(atob(payload.ct), (c) => c.charCodeAt(0));
 
   const key = await getMasterKey(masterSecret);
+
   const decrypted = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv },
+    { name: "AES-GCM", iv: ivBytes },
     key,
-    data
+    ctBytes
   );
 
   const text = decoder.decode(decrypted);
