@@ -7,6 +7,7 @@ import { signJWT } from "../lib/jwt";
 import { logAuth } from "../lib/logger";
 import { verifyPassword } from "../lib/crypto";
 import { createRefreshSession } from "../lib/session";
+import { extractRequestInfo } from "../lib/fingerprint";  // ДОБАВЛЕНО #4
 
 const app = new Hono();
 
@@ -26,12 +27,8 @@ app.post("/", async (c) => {
   const password = body.password || null;
   const tg_init = body.tg_init || null; // Telegram WebApp initData
 
-  const ip =
-    c.req.header("CF-Connecting-IP") ||
-    c.req.header("x-real-ip") ||
-    "0.0.0.0";
-
-  const ua = c.req.header("User-Agent") || "unknown";
+  // ИСПРАВЛЕНИЕ #4: Извлечение IP и UA для fingerprinting
+  const { ip, ua } = extractRequestInfo(c);
 
   // 1. TELEGRAM MINI-APP (авто-логин через initData)
   if (tg_init) {
@@ -61,10 +58,10 @@ app.post("/", async (c) => {
 
     if (!member) throw new HTTPException(403, { message: "no_account" });
 
-    // передаём account_id и user_type
+    // ИСПРАВЛЕНО #2: передаём account_id и user_type
     await createRefreshSession(c, env, user.id, member.account_id, user.user_type);
 
-    // access_token
+    // ИСПРАВЛЕНИЕ #4: access_token с fingerprint
     const accessToken = await signJWT(
       {
         typ: "access",
@@ -72,8 +69,9 @@ app.post("/", async (c) => {
         account_id: member.account_id,
         iat: Math.floor(Date.now() / 1000),
       },
-      env.MASTER_KEY,
-      900
+      env,
+      "15m",
+      { ip, ua }  // ✅ Fingerprint
     );
 
     // логирование
@@ -133,9 +131,10 @@ app.post("/", async (c) => {
     throw new HTTPException(403, { message: "no_account" });
   }
 
-  // передаём account_id и user_type
+  // ИСПРАВЛЕНО #2: передаём account_id и user_type
   await createRefreshSession(c, env, user.id, member.account_id, user.user_type);
 
+  // ИСПРАВЛЕНИЕ #4: access_token с fingerprint
   const accessToken = await signJWT(
     {
       typ: "access",
@@ -143,8 +142,9 @@ app.post("/", async (c) => {
       account_id: member.account_id,
       iat: Math.floor(Date.now() / 1000),
     },
-    env.MASTER_KEY,
-    900
+    env,
+    "15m",
+    { ip, ua }  // ✅ Fingerprint
   );
 
   // логирование

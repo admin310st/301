@@ -1,18 +1,18 @@
 /**
- * GitHub OAuth 2.0 Callback — с исправлениями #2 и #3
+ * GitHub OAuth 2.0 Callback — с исправлениями #2, #3 и #4
  *
  * Endpoint:
  * - GET /auth/oauth/github/callback
  *
  * Flow:
  * 1. Проверка state (CSRF)
- * 2. Извлечение PKCE verifier из KV
- * 3. Обмен code → access_token с code_verifier
+ * 2. ИСПРАВЛЕНО #3: Извлечение PKCE verifier из KV
+ * 3. ИСПРАВЛЕНО #3: Обмен code → access_token с code_verifier
  * 4. Получение профиля пользователя GitHub
  * 5. Создание / обновление пользователя и аккаунта в D1
- * 6. Создание refresh session с правильным форматом
+ * 6. ИСПРАВЛЕНО #2: Создание refresh session с правильным форматом
  * 7. Запись события в audit_log через logAuth()
- * 8. Генерация JWT (user_id, account_id, role)
+ * 8. ИСПРАВЛЕНИЕ #4: Генерация JWT с fingerprinting (IP + UA)
  * 9. Редирект в панель управления
  */
 
@@ -21,6 +21,7 @@ import { consumeState } from "../../../lib/oauth";
 import { signJWT } from "../../../lib/jwt";
 import { logAuth } from "../../../lib/logger";
 import { createRefreshSession } from "../../../lib/session";
+import { extractRequestInfo } from "../../../lib/fingerprint";
 
 const app = new Hono();
 
@@ -34,7 +35,10 @@ app.get("/", async (c) => {
       return c.text("Missing OAuth parameters", 400);
     }
 
-    // Извлечение PKCE verifier из KV (вместо заглушки "verified")
+    // ИСПРАВЛЕНИЕ #4: Извлечение IP и UA
+    const { ip, ua } = extractRequestInfo(c);
+
+    // ИСПРАВЛЕНИЕ #3: Извлечение PKCE verifier из KV
     const verifier = await consumeState(c.env, "github", state);
     if (!verifier) {
       return c.text("Invalid or expired state", 400);
@@ -45,7 +49,7 @@ app.get("/", async (c) => {
     const redirect_base = c.env.OAUTH_REDIRECT_BASE || "https://api.301.st";
     const redirect_uri = `${redirect_base}/auth/oauth/github/callback`;
 
-    // Добавление code_verifier при обмене токена
+    // ИСПРАВЛЕНИЕ #3: Добавление code_verifier при обмене токена
     const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
@@ -54,7 +58,7 @@ app.get("/", async (c) => {
         client_secret,
         code,
         redirect_uri,
-        code_verifier: verifier,  // PKCE verifier
+        code_verifier: verifier,  // ✅ PKCE verifier
       }),
     });
 
@@ -89,8 +93,6 @@ app.get("/", async (c) => {
 
     const db = c.env.DB301;
     const now = new Date().toISOString();
-    const ip = c.req.header("cf-connecting-ip") || "0.0.0.0";
-    const ua = c.req.header("user-agent") || "unknown";
 
     let user_id: number;
     let account_id: number;
@@ -148,7 +150,7 @@ app.get("/", async (c) => {
       console.log(`Existing GitHub user: ${email}`);
     }
 
-    // Создание refresh session с правильным форматом
+    // ИСПРАВЛЕНИЕ #2: Создание refresh session с правильным форматом
     await createRefreshSession(c, c.env, user_id, account_id, user_type);
 
     try {
@@ -157,7 +159,13 @@ app.get("/", async (c) => {
       console.error('Audit log write error:', logErr);
     }
 
-    const jwt = await signJWT({ user_id, account_id, role }, c.env);
+    // ИСПРАВЛЕНИЕ #4: JWT с fingerprinting
+    const jwt = await signJWT(
+      { user_id, account_id, role },
+      c.env,
+      "15m",
+      { ip, ua }  // ✅ Fingerprint
+    );
 
     const redirectTo = `https://301.st/auth/success?token=${jwt}`;
     return Response.redirect(redirectTo, 302);

@@ -16,7 +16,8 @@ import { getDB } from "../lib/d1";
 import { verifyOmniToken } from "../lib/omni_tokens";
 import { logAuth } from "../lib/logger";
 import { signJWT } from "../lib/jwt";
-import { createRefreshSession } from "../lib/session"; 
+import { createRefreshSession } from "../lib/session";
+import { extractRequestInfo } from "../lib/fingerprint";  // ДОБАВЛЕНО #4
 
 const app = new Hono();
 
@@ -27,12 +28,8 @@ app.get("/", async (c) => {
   const token = c.req.query("token");
   const code = c.req.query("code") || null;
 
-  const ip =
-    c.req.header("CF-Connecting-IP") ||
-    c.req.header("x-real-ip") ||
-    "0.0.0.0";
-
-  const ua = c.req.header("User-Agent") || "unknown";
+  // ИСПРАВЛЕНИЕ #4: Извлечение IP и UA для fingerprinting
+  const { ip, ua } = extractRequestInfo(c);
 
   if (!token) {
     throw new HTTPException(400, { message: "token_required" });
@@ -124,10 +121,10 @@ app.get("/", async (c) => {
 
   const sessionId = sess.lastInsertRowId;
 
-  //  5. передаём account_id и user_type в createRefreshSession
+  //  5. ИСПРАВЛЕНО #2: передаём account_id и user_type в createRefreshSession
   await createRefreshSession(c, env, userId, accountId, user.user_type || 'client');
 
-  // 6. Создаём access_token
+  // 6. ИСПРАВЛЕНИЕ #4: Создаём access_token с fingerprint
   const accessToken = await signJWT(
     {
       typ: "access",
@@ -136,8 +133,9 @@ app.get("/", async (c) => {
       session_id: sessionId,
       iat: Math.floor(Date.now() / 1000),
     },
-    env.MASTER_KEY,
-    900
+    env,
+    "15m",
+    { ip, ua }  // ✅ Fingerprint
   );
 
   // 7. Загружаем аккаунты

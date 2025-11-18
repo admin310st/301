@@ -2,6 +2,7 @@
 
 import { SignJWT, jwtVerify } from "jose";
 import { encrypt, decrypt } from "./crypto";
+import { createFingerprint, verifyFingerprint } from "./fingerprint";
 import type { Env } from "../types/worker";
 
 const ACCESS_TTL = "15m";                // TTL access_token
@@ -12,11 +13,13 @@ const KEY_CREATION_LOCK_TTL = 60;        // 60 секунд
 
 /**
  * Подписывает Access Token с использованием активного HS256-ключа
+ * ИСПРАВЛЕНИЕ #4: Добавлен fingerprinting (IP + UA)
  */
 export async function signJWT(
   payload: Record<string, any>,
   env: Env,
-  expiresIn = ACCESS_TTL
+  expiresIn = ACCESS_TTL,
+  fingerprint?: { ip: string; ua: string }  // ДОБАВЛЕНО: fingerprint опциональный
 ): Promise<string> {
   const keyRow = await ensureActiveKey(env);
   if (!keyRow) throw new Error("Failed to get or create active JWT key");
@@ -25,6 +28,12 @@ export async function signJWT(
   const jwtSecret = await decrypt<string>(encryptedData, env.MASTER_SECRET);
 
   const key = new TextEncoder().encode(jwtSecret);
+
+  // ИСПРАВЛЕНИЕ #4: Добавляем fingerprint в payload если передан
+  if (fingerprint) {
+    const fp = await createFingerprint(fingerprint.ip, fingerprint.ua);
+    payload.fp = fp;
+  }
 
   return await new SignJWT(payload)
     .setProtectedHeader({ alg: "HS256", kid: keyRow.kid as string })
@@ -35,10 +44,12 @@ export async function signJWT(
 
 /**
  * Проверяет и декодирует JWT
+ * ИСПРАВЛЕНИЕ #4: Добавлена проверка fingerprint
  */
 export async function verifyJWT<T = any>(
   token: string,
-  env: Env
+  env: Env,
+  fingerprint?: { ip: string; ua: string }  // ДОБАВЛЕНО: fingerprint для проверки
 ): Promise<T | null> {
   try {
     const keyRow = await ensureActiveKey(env);
@@ -49,6 +60,20 @@ export async function verifyJWT<T = any>(
     const key = new TextEncoder().encode(jwtSecret);
 
     const { payload } = await jwtVerify(token, key);
+
+    // ИСПРАВЛЕНИЕ #4: Проверка fingerprint если есть в токене
+    if (payload.fp && fingerprint) {
+      const valid = await verifyFingerprint(
+        payload.fp as string,
+        fingerprint.ip,
+        fingerprint.ua
+      );
+      
+      if (!valid) {
+        console.warn('[JWT] Fingerprint mismatch - possible token theft');
+        return null;
+      }
+    }
 
     return payload as T;
   } catch {

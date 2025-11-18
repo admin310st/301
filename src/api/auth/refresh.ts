@@ -1,22 +1,23 @@
 // src/api/auth/refresh.ts
 /**
- * Production endpoint: POST /auth/refresh
  * Обновление access-токена по refresh_id (из cookie).
  * Использует rateLimit, KV, JWT и audit_log.
+ * ИСПРАВЛЕНИЕ #4: Добавлен fingerprinting при создании нового токена
  */
 
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { logAuth } from "../lib/logger";
 import { signJWT } from "../lib/jwt";
+import { extractRequestInfo } from "../lib/fingerprint";
 
 const app = new Hono();
 
 app.post("/", async (c) => {
   const env = c.env;
 
-  const ip = c.req.header("CF-Connecting-IP") || "0.0.0.0";
-  const ua = c.req.header("User-Agent") || "unknown";
+  // ИСПРАВЛЕНИЕ #4: Извлечение IP и UA для fingerprinting
+  const { ip, ua } = extractRequestInfo(c);
 
   // 1. Получаем refresh_id из Cookie
   const cookieHeader = c.req.header("Cookie") || "";
@@ -43,7 +44,7 @@ app.post("/", async (c) => {
   const account_id = session.account_id ?? null;
   const user_type = session.user_type ?? "client";
 
-  // 3. Генерируем новый access token
+  // 3. ИСПРАВЛЕНИЕ #4: Генерируем новый access token с fingerprint
   const access_token = await signJWT(
     {
       user_id,
@@ -52,7 +53,9 @@ app.post("/", async (c) => {
       iat: Math.floor(Date.now() / 1000),
       exp: Math.floor(Date.now() / 1000) + 900, // 15 минут
     },
-    env
+    env,
+    "15m",
+    { ip, ua }  // ✅ Fingerprint
   );
 
   // 4. Генерируем новый refresh_id
@@ -75,7 +78,7 @@ app.post("/", async (c) => {
   );
 
   // 8. Логируем событие
-  await logAuth(env, "auth_refresh", user_id, account_id, ip, ua, user_type);
+  await logAuth(env, "refresh", user_id, account_id, ip, ua, user_type);
 
   // 9. Возвращаем новый access
   return c.json({

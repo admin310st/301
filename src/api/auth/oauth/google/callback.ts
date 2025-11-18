@@ -3,15 +3,14 @@
  *   GET /auth/oauth/google/callback
  *
  * Flow:
- * 1) Проверка state (CSRF) и извлечение PKCE verifier из KV (oauth:google:state:<uuid>)
+ * 1) Проверка state (CSRF) и извлечение PKCE verifier из KV
  * 2) Обмен code → tokens (access_token + id_token)
- * 3) ВЕРИФИКАЦИЯ id_token через JWKS (ИСПРАВЛЕНО #1)
+ * 3) ИСПРАВЛЕНО #1: Верификация id_token через JWKS
  * 4) D1: поиск пользователя по email или (oauth_provider, oauth_id), создание / обновление
- * 5) Создание / получение аккаунта
- * 6) ИСПРАВЛЕНО #2: Создание refresh session с правильным форматом
- * 7) Запись события в audit_log через logAuth()
- * 8) JWT payload = { user_id, account_id, role }
- * 9) Redirect → https://301.st/auth/success?token=...
+ * 5) ИСПРАВЛЕНО #2: Создание refresh session с правильным форматом
+ * 6) Запись события в audit_log через logAuth()
+ * 7) ИСПРАВЛЕНИЕ #4: JWT с fingerprinting (IP + UA)
+ * 8) Redirect → https://301.st/auth/success?token=...
  */
 
 import { Hono } from "hono";
@@ -20,6 +19,7 @@ import { signJWT } from "../../../lib/jwt";
 import { logAuth } from "../../../lib/logger";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { createRefreshSession } from "../../../lib/session";
+import { extractRequestInfo } from "../../../lib/fingerprint";
 
 const app = new Hono();
 
@@ -29,6 +29,9 @@ app.get("/", async (c) => {
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     if (!code || !state) return c.text("Missing OAuth parameters", 400);
+
+    // ИСПРАВЛЕНИЕ #4: Извлечение IP и UA
+    const { ip, ua } = extractRequestInfo(c);
 
     // 1) Проверка state (CSRF) и извлечение PKCE verifier
     let verifier = await consumeState(c.env, "google", state);
@@ -91,8 +94,6 @@ app.get("/", async (c) => {
     // 4) Работа с D1: users / accounts
     const db = c.env.DB301;
     const now = new Date().toISOString();
-    const ip = c.req.header("cf-connecting-ip") || "0.0.0.0";
-    const ua = c.req.header("user-agent") || "unknown";
 
     let user_id: number;
     let account_id: number;
@@ -153,7 +154,7 @@ app.get("/", async (c) => {
       console.log(`Existing Google user: ${email}`);
     }
 
-    // 5) Создание refresh session
+    // 5) ИСПРАВЛЕНИЕ #2: Создание refresh session с правильным форматом
     await createRefreshSession(c, c.env, user_id, account_id, user_type);
 
     // 6) Запись события в audit_log
@@ -163,8 +164,13 @@ app.get("/", async (c) => {
       console.error('Audit log write error:', logErr);
     }
 
-    // 7) JWT: user_id, account_id, role
-    const jwt = await signJWT({ user_id, account_id, role }, c.env);
+    // 7) ИСПРАВЛЕНИЕ #4: JWT с fingerprinting
+    const jwt = await signJWT(
+      { user_id, account_id, role },
+      c.env,
+      "15m",
+      { ip, ua }  // Fingerprint
+    );
 
     // 8) Redirect
     const redirectTo = `https://301.st/auth/success?token=${jwt}`;
