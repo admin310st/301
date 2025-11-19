@@ -127,7 +127,7 @@ fetch("/auth/register", {
 
 ---
 
-##### Добавление на фронтенд (Webstudio)
+##### Добавление на фронтенд 
 
 На страницах **регистрации и логина** вставить HTML Embed:
 
@@ -465,6 +465,26 @@ sequenceDiagram
     CF-->>A: 200 OK
 ```
 
+### Ключи использованные в коде
+
+Добавить:
+
+```
+npx wrangler secret put EMAIL_API_KEY
+npx wrangler secret put TG_BOT_TOKEN
+npx wrangler secret put SMS_API_KEY
+npx wrangler secret put TURNSTILE_SECRET
+```
+
+Использование в коде:
+```
+env.EMAIL_FROM
+env.TG_BOT_TOKEN
+env.SMS_ENDPOINT
+env.SMS_API_KEY
+env.TURNSTILE_SECRET
+env.TURNSTILE_SITEKEY
+```
 ---
 
 ## Безопасность и политика хранения
