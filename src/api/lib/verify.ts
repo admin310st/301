@@ -1,35 +1,50 @@
 // src/api/lib/verify.ts
 
 /**
- * Универсальная библиотечная проверка OmniAuth.
- * НЕ endpoint.
- * Вызывается из /auth/verify.
+ * Универсальная библиотека завершения OmniFlow.
+ * НЕ endpoint - экспортирует функцию verifyOmniFlow().
+ * Вызывается из endpoint /auth/verify.
  */
 
-// src/api/lib/verify.ts
-// Универсальная библиотека завершения OmniFlow
-// Используется в endpoint /auth/verify
-
-import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { getDB } from "../lib/d1";
-import { verifyOmniToken } from "../lib/omni_tokens";
-import { logAuth } from "../lib/logger";
-import { signJWT } from "../lib/jwt";
-import { createRefreshSession } from "../lib/session";
-import { extractRequestInfo } from "../lib/fingerprint";  // ДОБАВЛЕНО #4
+import type { Context } from "hono";
+import type { Env } from "../types/worker";
+import { verifyOmniToken } from "./omni_tokens";
+import { logAuth } from "./logger";
+import { signJWT } from "./jwt";
+import { createRefreshSession } from "./session";
+import { extractRequestInfo } from "./fingerprint";
 
-const app = new Hono();
+interface VerifyOmniFlowInput {
+  token: string;
+  code?: string | null;
+  ip: string;
+  ua: string;
+}
 
-app.get("/", async (c) => {
-  const env = c.env;
-  const db = getDB(env);
+interface VerifyOmniFlowResult {
+  ok: boolean;
+  type?: string;
+  user?: any;
+  accounts?: any[];
+  active_account_id?: number | null;
+  access_token?: string;
+  expires_in?: number;
+  user_id?: number;
+  csrf_token?: string;
+  message?: string;
+}
 
-  const token = c.req.query("token");
-  const code = c.req.query("code") || null;
-
-  // ИСПРАВЛЕНИЕ #4: Извлечение IP и UA для fingerprinting
-  const { ip, ua } = extractRequestInfo(c);
+/**
+ * Универсальная функция завершения OmniFlow.
+ * Обрабатывает: register, login, reset, invite, action, oauth.
+ */
+export async function verifyOmniFlow(
+  env: Env,
+  input: VerifyOmniFlowInput,
+  context?: Context
+): Promise<VerifyOmniFlowResult> {
+  const { token, code, ip, ua } = input;
 
   if (!token) {
     throw new HTTPException(400, { message: "token_required" });
@@ -48,13 +63,13 @@ app.get("/", async (c) => {
   }
 
   // 2. Проверяем/создаём пользователя
-  let user = await db
+  let user = await env.DB301
     .prepare("SELECT * FROM users WHERE email = ?")
     .bind(identifier)
     .first();
 
   if (!user) {
-    const res = await db
+    const res = await env.DB301
       .prepare(
         `INSERT INTO users (email, user_type, created_at, updated_at)
          VALUES (?, 'client', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
@@ -63,7 +78,7 @@ app.get("/", async (c) => {
       .run();
 
     user = {
-      id: res.lastInsertRowId,
+      id: res.meta?.last_row_id || res.lastInsertRowId,
       email: identifier,
       user_type: "client",
     };
@@ -75,7 +90,7 @@ app.get("/", async (c) => {
 
   // 3. Создание аккаунта (register) или выбор (reset/login)
   if (type === "register") {
-    const acc = await db
+    const acc = await env.DB301
       .prepare(
         `INSERT INTO accounts (owner_user_id, created_at, updated_at)
          VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
@@ -83,9 +98,9 @@ app.get("/", async (c) => {
       .bind(userId)
       .run();
 
-    accountId = acc.lastInsertRowId;
+    accountId = acc.meta?.last_row_id || acc.lastInsertRowId;
 
-    await db
+    await env.DB301
       .prepare(
         `INSERT INTO account_members (account_id, user_id, role)
          VALUES (?, ?, 'owner')`
@@ -95,7 +110,7 @@ app.get("/", async (c) => {
 
     accountRole = "owner";
   } else {
-    const am = await db
+    const am = await env.DB301
       .prepare(
         `SELECT account_id, role FROM account_members
          WHERE user_id = ?
@@ -110,8 +125,8 @@ app.get("/", async (c) => {
     accountRole = am.role;
   }
 
-  // 4. Создаём session
-  const sess = await db
+  // 4. Создаём session в БД
+  const sess = await env.DB301
     .prepare(
       `INSERT INTO sessions (user_id, ip_address, user_agent, created_at)
        VALUES (?, ?, ?, CURRENT_TIMESTAMP)`
@@ -119,12 +134,71 @@ app.get("/", async (c) => {
     .bind(userId, ip, ua)
     .run();
 
-  const sessionId = sess.lastInsertRowId;
+  const sessionId = sess.meta?.last_row_id || sess.lastInsertRowId;
 
-  //  5. ИСПРАВЛЕНО #2: передаём account_id и user_type в createRefreshSession
-  await createRefreshSession(c, env, userId, accountId, user.user_type || 'client');
+  // создаём CSRF-защищённую reset_session
+  if (type === "reset") {
+    const resetSessionId = crypto.randomUUID();
+    const csrfToken = crypto.randomUUID();
 
-  // 6. ИСПРАВЛЕНИЕ #4: Создаём access_token с fingerprint
+    // Сохраняем reset session с CSRF token
+    await env.KV_SESSIONS.put(
+      `reset:${resetSessionId}`,
+      JSON.stringify({
+        user_id: userId,
+        channel: session.channel || "email",
+        identifier,
+        csrf_token: csrfToken,
+      }),
+      { expirationTtl: 900 } // 15 минут
+    );
+
+    // Устанавливаем reset_session cookie (HttpOnly) если есть context
+    if (context) {
+      context.header(
+        "Set-Cookie",
+        `reset_session=${resetSessionId}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=900`
+      );
+    }
+
+    // Логируем событие reset verified
+    try {
+      await logAuth(
+        env,
+        "login",
+        userId,
+        accountId,
+        ip,
+        ua,
+        user.user_type || "client",
+        accountRole
+      );
+    } catch (err) {
+      console.error("[AUDIT_LOG ERROR verify reset]", err);
+    }
+
+    // Возвращаем специальный ответ для reset flow с CSRF token
+    return {
+      ok: true,
+      type: "reset",
+      user_id: userId,
+      csrf_token: csrfToken, // UI получит и отправит в confirm_password
+      message: "reset_verified_proceed_to_confirm",
+    };
+  }
+
+  // 5. Для register/login flow — создаём обычную refresh session
+  if (context) {
+    await createRefreshSession(
+      context,
+      env,
+      userId,
+      accountId,
+      user.user_type || "client"
+    );
+  }
+
+  // 6. Создаём access_token с fingerprint
   const accessToken = await signJWT(
     {
       typ: "access",
@@ -135,11 +209,11 @@ app.get("/", async (c) => {
     },
     env,
     "15m",
-    { ip, ua }  // ✅ Fingerprint
+    { ip, ua }
   );
 
   // 7. Загружаем аккаунты
-  const accounts = await db
+  const accountsResult = await env.DB301
     .prepare(
       `SELECT
          am.account_id AS id,
@@ -154,28 +228,31 @@ app.get("/", async (c) => {
     .bind(userId)
     .all();
 
-  //  8. Логирование
-  await logAuth(
-    env,
-    type === "reset" ? "login" : (type as "register" | "login" | "logout" | "refresh"),
-    userId,
-    accountId,
-    ip,
-    ua,
-    user.user_type,
-    accountRole
-  );
+  const accounts = accountsResult.results || [];
 
-  // 9. Ответ
-  return c.json({
+  // 8. Логирование
+  try {
+    await logAuth(
+      env,
+      type === "reset" ? "login" : (type as "register" | "login" | "logout" | "refresh"),
+      userId,
+      accountId,
+      ip,
+      ua,
+      user.user_type || "client",
+      accountRole
+    );
+  } catch (err) {
+    console.error("[AUDIT_LOG ERROR verify]", err);
+  }
+
+  // 9. Возвращаем успешный ответ для register/login
+  return {
     ok: true,
     user,
-    accounts: accounts.results ?? accounts,
+    accounts,
     active_account_id: accountId,
     access_token: accessToken,
     expires_in: 900,
-  });
-});
-
-export default app;
-
+  };
+}

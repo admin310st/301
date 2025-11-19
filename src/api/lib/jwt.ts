@@ -1,5 +1,11 @@
 // src/lib/jwt.ts
 
+/**
+ * Модуль для работы с JWT токенами.
+ * Использует HS256 с ротацией ключей через jwt_keys таблицу.
+ * Поддерживает fingerprinting (IP + UA) для защиты от token theft.
+ */
+
 import { SignJWT, jwtVerify } from "jose";
 import { encrypt, decrypt } from "./crypto";
 import { createFingerprint, verifyFingerprint } from "./fingerprint";
@@ -13,13 +19,13 @@ const KEY_CREATION_LOCK_TTL = 60;        // 60 секунд
 
 /**
  * Подписывает Access Token с использованием активного HS256-ключа
- * ИСПРАВЛЕНИЕ #4: Добавлен fingerprinting (IP + UA)
+ * fingerprinting (IP + UA)
  */
 export async function signJWT(
   payload: Record<string, any>,
   env: Env,
   expiresIn = ACCESS_TTL,
-  fingerprint?: { ip: string; ua: string }  // ДОБАВЛЕНО: fingerprint опциональный
+  fingerprint?: { ip: string; ua: string }
 ): Promise<string> {
   const keyRow = await ensureActiveKey(env);
   if (!keyRow) throw new Error("Failed to get or create active JWT key");
@@ -29,7 +35,7 @@ export async function signJWT(
 
   const key = new TextEncoder().encode(jwtSecret);
 
-  // ИСПРАВЛЕНИЕ #4: Добавляем fingerprint в payload если передан
+  // Добавляем fingerprint в payload если передан
   if (fingerprint) {
     const fp = await createFingerprint(fingerprint.ip, fingerprint.ua);
     payload.fp = fp;
@@ -42,23 +48,55 @@ export async function signJWT(
     .sign(key);
 }
 
-/**
- * Проверяет и декодирует JWT
- * ИСПРАВЛЕНИЕ #4: Добавлена проверка fingerprint
- */
+//  Проверка и декодирование JWT, Проверка kid из заголовка токена
 export async function verifyJWT<T = any>(
   token: string,
   env: Env,
-  fingerprint?: { ip: string; ua: string }  // ДОБАВЛЕНО: fingerprint для проверки
+  fingerprint?: { ip: string; ua: string }
 ): Promise<T | null> {
   try {
-    const keyRow = await ensureActiveKey(env);
-    if (!keyRow) return null;
+    // Извлекаем kid из JWT заголовка
+    let header: { kid?: string; alg?: string };
+    try {
+      header = JSON.parse(atob(token.split(".")[0]));
+    } catch {
+      console.warn('[JWT] Invalid token format');
+      return null;
+    }
 
+    const kid = header.kid;
+    
+    if (!kid) {
+      console.warn('[JWT] Token missing kid in header');
+      return null;
+    }
+
+    // Получаем ключ по kid (не только active!)
+    const keyRow = await getKeyByKid(kid, env);
+    
+    if (!keyRow) {
+      console.warn('[JWT] Key not found for kid:', kid);
+      return null;
+    }
+
+    // Проверяем статус ключа
+    if (keyRow.status === "revoked") {
+      console.warn('[JWT] Token signed with revoked key:', kid);
+      return null;
+    }
+
+    // Allowed statuses: 'active' or 'deprecated'
+    if (!['active', 'deprecated'].includes(keyRow.status)) {
+      console.warn('[JWT] Key has invalid status:', keyRow.status);
+      return null;
+    }
+
+    // Расшифровываем секрет ключа
     const encryptedData = JSON.parse(keyRow.secret_encrypted as string);
     const jwtSecret = await decrypt<string>(encryptedData, env.MASTER_SECRET);
     const key = new TextEncoder().encode(jwtSecret);
 
+    // Проверяем подпись токена
     const { payload } = await jwtVerify(token, key);
 
     // ИСПРАВЛЕНИЕ #4: Проверка fingerprint если есть в токене
@@ -76,7 +114,8 @@ export async function verifyJWT<T = any>(
     }
 
     return payload as T;
-  } catch {
+  } catch (err) {
+    console.error('[JWT] Verification error:', err);
     return null;
   }
 }
@@ -209,7 +248,7 @@ export async function getActiveKey(env: Env): Promise<any> {
   ).first();
 }
 
-/** Возвращает ключ по kid */
+// Возвращает ключ по kid
 export async function getKeyByKid(kid: string, env: Env): Promise<any> {
   return await env.DB301.prepare(
     "SELECT * FROM jwt_keys WHERE kid=?"
