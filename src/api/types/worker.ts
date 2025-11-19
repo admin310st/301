@@ -1,6 +1,9 @@
 // src/api/types/worker.ts
 
 export interface Env {
+  // ===== Environment =====
+  ENVIRONMENT?: 'dev' | 'production';
+
   // ===== KV =====
   KV_RATELIMIT: KVNamespace;     // rate limits
   KV_SESSIONS: KVNamespace;      // sessions, omni tokens, oauth state
