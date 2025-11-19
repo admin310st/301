@@ -12,6 +12,7 @@ const app = new Hono();
  * POST /auth/reset_password
  *
  * Отправляет reset-link (email) или OTP (tg).
+ * Генерирует CSRF токен для защиты от CSRF атак.
  */
 
 app.post("/", async (c) => {
@@ -93,7 +94,7 @@ app.post("/", async (c) => {
     }
   }
 
-  // 7. Создаём reset token
+  // 7. Создаём reset token и CSRF токен
   let token = null;
 
   if (type === "email") {
@@ -104,15 +105,17 @@ app.post("/", async (c) => {
     token = String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
   }
 
+  const csrfToken = crypto.randomUUID(); // CSRF защита
   const ttl = 900; // 15 минут
 
-  // 8. Пишем в KV
+  // 8. Пишем в KV с CSRF токеном
   await env.KV_SESSIONS.put(
     `reset:${token}`,
     JSON.stringify({
       user_id: user.id,
       channel: type,
       identifier: value,
+      csrf_token: csrfToken,
     }),
     { expirationTtl: ttl }
   );
@@ -146,7 +149,7 @@ app.post("/", async (c) => {
     console.error("[AUDIT ERROR]", e);
   }
 
-  // 11. DEV response
+  // 11. DEV response (показываем CSRF токен)
   if (isDev) {
     const resetLink =
       type === "email"
@@ -157,6 +160,7 @@ app.post("/", async (c) => {
       status: "ok",
       token,
       reset_link: resetLink,
+      csrf_token: csrfToken, // DEV only
     });
   }
 
