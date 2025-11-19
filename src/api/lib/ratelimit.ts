@@ -8,9 +8,7 @@
 import type { Context } from "hono";
 import { logEvent } from "./logger"; // необязательно; если нет — закомментируй вызов в handleBlock
 
-// -------------------------------
 // Типы
-// -------------------------------
 interface RateLimitConfig {
   max: number;       // максимум попыток
   windowSec: number; // окно в секундах
@@ -23,9 +21,7 @@ interface RateLimitResult {
   retryAfter?: number; // сек до сброса (если заблокирован)
 }
 
-// -------------------------------
-// Конфигурации лимитов (твои значения сохранены)
-// -------------------------------
+// Конфигурации лимитов 
 export const RATE_LIMITS = {
   // Login endpoints
   LOGIN_BY_IP: { max: 5, windowSec: 300 },       // 5 попыток / 5 минут с IP
@@ -42,9 +38,7 @@ export const RATE_LIMITS = {
   REFRESH_BY_IP: { max: 20, windowSec: 60 },     // 20 refresh / 1 минута
 } as const;
 
-// -------------------------------
 // Утилиты
-// -------------------------------
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
@@ -73,9 +67,7 @@ function fnv1a(input: string): string {
   return ("00000000" + h.toString(16)).slice(-8);
 }
 
-// -------------------------------
 // Ядро проверки
-// -------------------------------
 export async function checkRateLimit(
   env: Env,
   key: string,
@@ -167,9 +159,7 @@ export function rateLimitError(result: RateLimitResult): Response {
   );
 }
 
-// -------------------------------
 // Доп. хелперы для удобной интеграции в роуты
-// -------------------------------
 
 /**
  * Единая обёртка: запускает checkRateLimit, при блоке — логирует и возвращает 429.
@@ -206,11 +196,9 @@ async function handleBlock(c: Context, res: RateLimitResult, auditRoute?: string
   }
 }
 
-// -------------------------------
 // Готовые guard’ы для /auth/*
 // Использование в маршруте: 
 //   const block = await registerGuard(c, email); if (block) return block;
-// -------------------------------
 
 /** Guard для /auth/register — двойная защита: IP + EMAIL */
 export async function registerGuard(c: Context, email?: string): Promise<Response | null> {
