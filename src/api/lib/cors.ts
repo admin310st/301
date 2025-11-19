@@ -3,28 +3,35 @@ import { cors } from "hono/cors";
 
 export const corsMiddleware = cors({
   origin: (origin) => {
+    // Нет origin в запросе → отклоняем
     if (!origin) return false;
 
     const allowed = [
       "https://301.st",
       "https://app.301.st",
-      "https://api.301.st",     // основное API
-      "https://dev.301.st",     // тестовый фронтенд
-      "http://localhost:8787",  // локальные тесты
-      "http://127.0.0.1:8787",  // альтернатива
+      "https://api.301.st",
+      "https://dev.301.st",
+      "http://localhost:8787",
+      "http://127.0.0.1:8787",
     ];
 
-    // все поддомены *.webstudio.is
-    if (origin.endsWith(".webstudio.is")) return origin;
+    // 1. Проверка wildcard поддоменов
+    if (origin.endsWith(".webstudio.is")) {
+      return origin;
+    }
 
-    // сам origin из списка
-    if (allowed.includes(origin)) return origin;
+    // 2. Проверка whitelist
+    if (allowed.includes(origin)) {
+      return origin;
+    }
 
-    return allowed.includes(origin);
+    // 3. Все остальные → запрещены
+    return false;
   },
   allowHeaders: ["Accept", "Content-Type", "Authorization"],
   allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   credentials: true,
   maxAge: 86400,
 });
+
 
