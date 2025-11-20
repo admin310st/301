@@ -68,25 +68,6 @@ UI обязан:
 * получить клиентский токен
 * передать его в API: `turnstile_token`
 
-```
-// При клике на "Зарегистрироваться"
-async function handleRegister(email, password) {
-  // 1. Получить токен от Turnstile
-  const turnstileToken = await turnstile.execute();
-
-  // 2. Отправить на API
-  const response = await fetch('https://api.301.st/auth/register', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      email,
-      password,
-      turnstile_token: turnstileToken  // ← Backend проверит
-    })
-  });
-}
-```
-
 ## 1.3 Access Token и Refresh Cookie
 
 * **Access Token** живёт ~15 мин
@@ -989,6 +970,27 @@ flowchart LR
 **Проверка Cloudflare Turnstile** — антибот‑механизм от Cloudflare, аналог reCAPTCHA.
    Проверяет, что запрос выполнен человеком. Отправляется `token` с фронтенда на API:
 
+    Пример для UI JavaScript API
+
+    ```js
+    // При клике на "Зарегистрироваться"
+    async function handleRegister(email, password) {
+      // 1. Получить токен от Turnstile
+      const turnstileToken = await turnstile.execute();
+
+      // 2. Отправить на API
+      const response = await fetch('https://api.301.st/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          password,
+          turnstile_token: turnstileToken  // ← Backend проверит
+        })
+      });
+    }
+```
+
    ```bash
    curl -X POST https://api.301.st/auth/register \
      -H "Content-Type: application/json" \
@@ -998,17 +1000,26 @@ flowchart LR
    Воркер обращается к API Turnstile:
 
    ```js
-   const verify = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-     method: 'POST',
-     body: new URLSearchParams({
-       secret: env.TURNSTILE_SECRET,
-       response: body.turnstile_token
-     })
-   });
+   // Проверка токена от фронтенда
+    const verify = await fetch(
+      'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+      {
+        method: 'POST',
+        body: new URLSearchParams({
+          secret: env.TURNSTILE_SECRET,  // Secret Key из secrets
+          response: turnstile_token,      // От фронтенда
+          remoteip: ip
+        })
+      }
+    );
+
+    const data = await verify.json();
+    if (!data.success) {
+      return false;  // Бот обнаружен
+    }
    ```
 
    При неуспешной верификации возвращается `403 Forbidden`.
-
 
 ---
 
