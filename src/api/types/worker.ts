@@ -22,7 +22,7 @@ export interface Env {
   SMS_API_KEY?: string;
   SMS_SENDER_ID?: string;
 
-  // ===== Email =====
+  // ===== Cloudflare Email Routing (ВХОДЯЩИЕ: тикеты, support) =====
   EMAIL?: {
     send(options: {
       to: string;
@@ -31,10 +31,18 @@ export interface Env {
       text: string;
     }): Promise<void>;
   };
-  EMAIL_FROM?: string;
+
+  // ===== MailerSend (ИСХОДЯЩИЕ: registration, reset, notifications) =====
+  MAILERSEND_API_TOKEN: string;
+  MAILERSEND_API_URL: string;
+  EMAIL_FROM: string;
+  EMAIL_FROM_NAME?: string;
 
   // ===== OAuth =====
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
+  OAUTH_REDIRECT_BASE?: string;
 }
 
