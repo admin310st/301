@@ -15,6 +15,7 @@ import { verifyTurnstile } from "../lib/turnstile";
  * - Выбор канала (email/sms/telegram)
  */
 export async function startOmniFlow(
+  c: Context,
   env: Env,
   params: {
     identifier: string;
@@ -22,7 +23,6 @@ export async function startOmniFlow(
     payload?: any;
     ip: string;
     ua?: string;
-    turnstileToken?: string;
   }
 ) {
   const {
@@ -43,7 +43,7 @@ export async function startOmniFlow(
   await checkRateLimit(env, `auth:start:id:${identifier}`, 5, 60);
 
   // TURNSTILE
-  const turnstileOK = await verifyTurnstile(env, turnstileToken, ip);
+  const turnstileOK = await verifyTurnstile(c, env);
   if (!turnstileOK) {
     throw new HTTPException(403, { message: "turnstile_failed" });
   }

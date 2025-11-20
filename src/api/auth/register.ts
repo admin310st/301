@@ -43,7 +43,6 @@ app.post("/", async (c) => {
     payload: null,
     ip,
     ua,
-    turnstileToken: turnstile_token,
   });
 
   // результат

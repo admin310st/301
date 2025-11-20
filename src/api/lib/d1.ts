@@ -39,3 +39,10 @@ export class D1 {
   }
 }
 
+/**
+ * Helper function для создания экземпляра D1 клиента
+ */
+export function getDB(env: Env): D1 {
+  return new D1(env);
+}
+

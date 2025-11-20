@@ -18,12 +18,13 @@ const app = new Hono<{ Bindings: Env }>();
 app.use("*", corsMiddleware);
 
 // --- Auth endpoints ---
+// --- Auth endpoints ---
 app.route("/auth/verify", verify);
-app.post("/auth/register", register);
-app.post("/auth/login", login);
-app.post("/auth/refresh", refresh);
-app.post("/auth/logout", logout);
-app.get("/auth/me", me);
+app.route("/auth/register", register);
+app.route("/auth/login", login);
+app.route("/auth/refresh", refresh);
+app.route("/auth/logout", logout);
+app.route("/auth/me", me);
 app.route("/auth/reset_password", resetPassword);
 app.route("/auth/confirm_password", confirmPassword);
 app.route("/auth/oauth/google/start", googleStart);

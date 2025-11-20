@@ -5,9 +5,9 @@ import { HTTPException } from "hono/http-exception";
 import { getDB } from "../lib/d1";
 import { signJWT } from "../lib/jwt";
 import { logAuth } from "../lib/logger";
-import { verifyPassword } from "../lib/crypto";
+import { verifyPassword } from "../lib/password";
 import { createRefreshSession } from "../lib/session";
-import { extractRequestInfo } from "../lib/fingerprint";  // ДОБАВЛЕНО #4
+import { extractRequestInfo } from "../lib/fingerprint";
 
 const app = new Hono();
 
