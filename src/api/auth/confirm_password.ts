@@ -9,75 +9,10 @@
 
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { hashPassword } from "../lib/password";
+import { hashPassword, validatePasswordStrength, verifyPassword } from "../lib/password";
 import { logEvent } from "../lib/logger";
-import { compare } from "bcrypt-ts";
 
 const app = new Hono();
-
-// Правила сложности пароля
-const PASSWORD_MIN_LENGTH = 8;
-const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
-const PASSWORD_BLACKLIST = [
-  "password", "Password1", "12345678", "qwerty123", 
-  "admin123", "welcome1", "letmein1", "Passw0rd"
-];
-
-/**
- * Проверка сложности пароля
- * @returns null если валиден, иначе объект с ошибкой
- */
-function validatePasswordStrength(password: string): { message: string; requirements?: string[] } | null {
-  // Длина
-  if (password.length < PASSWORD_MIN_LENGTH) {
-    return {
-      message: "password_too_short",
-      requirements: [`Minimum ${PASSWORD_MIN_LENGTH} characters`]
-    };
-  }
-
-  // Максимальная длина (защита от DoS)
-  if (password.length > 128) {
-    return {
-      message: "password_too_long",
-      requirements: ["Maximum 128 characters"]
-    };
-  }
-
-  // Сложность: строчные, заглавные, цифры
-  if (!PASSWORD_REGEX.test(password)) {
-    const missing: string[] = [];
-    if (!/[a-z]/.test(password)) missing.push("lowercase letter (a-z)");
-    if (!/[A-Z]/.test(password)) missing.push("uppercase letter (A-Z)");
-    if (!/\d/.test(password)) missing.push("digit (0-9)");
-
-    return {
-      message: "password_too_weak",
-      requirements: [
-        `At least ${PASSWORD_MIN_LENGTH} characters`,
-        "At least one uppercase letter",
-        "At least one lowercase letter",
-        "At least one digit",
-        ...missing.map(m => `Missing: ${m}`)
-      ]
-    };
-  }
-
-  // Чёрный список слабых паролей (case-insensitive)
-  const lowerPassword = password.toLowerCase();
-  if (PASSWORD_BLACKLIST.some(weak => lowerPassword.includes(weak.toLowerCase()))) {
-    return {
-      message: "password_too_common",
-      requirements: ["Password is too common, choose a more unique one"]
-    };
-  }
-
-  return null; // ✅ Валиден
-}
-
-// ========================================
-// Endpoint handler
-// ========================================
 
 app.post("/", async (c) => {
   const env = c.env;
@@ -128,7 +63,7 @@ app.post("/", async (c) => {
     throw new HTTPException(401, { message: "reset_session_invalid" });
   }
 
-  // 3) ✅ ИСПРАВЛЕНИЕ #5: Проверка CSRF token
+  // 3) Проверка CSRF token
   const body = await c.req.json().catch(() => ({} as any));
   const clientCsrfToken = body.csrf_token?.trim();
 
@@ -169,14 +104,13 @@ app.post("/", async (c) => {
     }
   }
 
-  // 4) валидируем новый пароль
+  // 4) Валидируем новый пароль
   const newPassword = body.password?.trim();
 
   if (!newPassword) {
     throw new HTTPException(400, { message: "password_required" });
   }
 
-  // Проверка сложности пароля
   const validationError = validatePasswordStrength(newPassword);
   if (validationError) {
     throw new HTTPException(400, validationError as any);
@@ -209,7 +143,8 @@ app.post("/", async (c) => {
 
   // 7) Проверка: новый пароль не должен совпадать со старым
   if (user.password_hash) {
-    const same = await compare(newPassword, user.password_hash);
+    //  Используем verifyPassword из lib/password.ts (PBKDF2)
+    const same = await verifyPassword(newPassword, user.password_hash);
     if (same) {
       throw new HTTPException(400, { message: "password_reused" });
     }
@@ -225,7 +160,7 @@ app.post("/", async (c) => {
     .bind(hash, user.id)
     .run();
 
-  // 9) Инвалидация всех refresh-токенов пользователя (security best practice)
+  // 9) Инвалидация всех refresh-токенов пользователя
   try {
     const list = await env.KV_SESSIONS.list({ prefix: "refresh:" });
 
@@ -239,7 +174,6 @@ app.post("/", async (c) => {
           await env.KV_SESSIONS.delete(key.name);
         }
       } catch {
-        // malformed entry — удаляем для безопасности
         await env.KV_SESSIONS.delete(key.name);
       }
     }
@@ -268,7 +202,7 @@ app.post("/", async (c) => {
         action: "reset_password_confirmed",
         channel: resetData.channel ?? "email",
         csrf_verified: !isDev,
-        password_strength_checked: true, // Отметка о проверке
+        password_strength_checked: true,
       },
     });
   } catch (err) {

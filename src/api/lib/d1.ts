@@ -4,12 +4,16 @@
  * Минимальный  D1-клиент 
  * Обёртка вокруг env.DB301.prepare().
  */
-
 export class D1 {
   private db: D1Database;
 
   constructor(env: Env) {
     this.db = env.DB301;
+  }
+
+  //  доступ к prepare
+  prepare(query: string) {
+    return this.db.prepare(query);
   }
 
   // EXEC — INSERT / UPDATE / DELETE (без возврата строк)

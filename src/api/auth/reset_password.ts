@@ -5,6 +5,8 @@ import { HTTPException } from "hono/http-exception";
 import { verifyTurnstile } from "../lib/turnstile";
 import { logEvent } from "../lib/logger";
 import { checkRateLimit } from "../lib/ratelimit";
+import { createOmniToken } from "../lib/omni_tokens";
+import { sendOmniMessage } from "../lib/message_sender";
 
 const app = new Hono();
 
@@ -87,52 +89,38 @@ app.post("/", async (c) => {
     return c.json({ status: "ok" });
   }
 
-  // 6. Проверка email_verified
-  if (type === "email") {
+  // 6. Проверка email_verified (только в prod)
+  if (type === "email" && !isDev) {
     if (!user.email_verified) {
       throw new HTTPException(400, { message: "email_not_verified" });
     }
   }
 
-  // 7. Создаём reset token и CSRF токен
-  let token = null;
+  // 7. Создаём OmniToken для reset с CSRF в payload
+  const csrfToken = crypto.randomUUID();
 
-  if (type === "email") {
-    token = crypto.randomUUID(); // безопасно
-  }
+  const omniResult = await createOmniToken(env, {
+    type: "reset",
+    identifier: value,
+    channel: type,
+    payload: { csrf_token: csrfToken },
+    otp: type !== "email",
+    ttl: 900, // 15 минут
+  });
 
-  if (type === "tg") {
-    token = String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
-  }
+  const token = omniResult.token;
+  const code = omniResult.code; // OTP для tg/sms
 
-  const csrfToken = crypto.randomUUID(); // CSRF защита
-  const ttl = 900; // 15 минут
+  // 8. Отправка email/TG/SMS через универсальный sender
+  await sendOmniMessage(env, {
+    channel: type as "email" | "telegram" | "sms",
+    identifier: value,
+    token,
+    code,
+    template: "reset",
+  });
 
-  // 8. Пишем в KV с CSRF токеном
-  await env.KV_SESSIONS.put(
-    `reset:${token}`,
-    JSON.stringify({
-      user_id: user.id,
-      channel: type,
-      identifier: value,
-      csrf_token: csrfToken,
-    }),
-    { expirationTtl: ttl }
-  );
-
-  // 9. Отправка email/TG в prod
-  if (!isDev) {
-    if (type === "email") {
-      const resetLink = `${env.OAUTH_REDIRECT_BASE}/auth/verify?type=reset&token=${token}`;
-      // TODO: отправить resetLink через email_sender.ts
-    }
-
-    if (type === "tg") {
-      // TODO: отправить OTP в Telegram
-    }
-  }
-
-  // 10. Audit
+  // 9. Audit
   try {
     await logEvent(env, {
       event_type: "update",
@@ -149,7 +137,7 @@ app.post("/", async (c) => {
     console.error("[AUDIT ERROR]", e);
   }
 
-  // 11. DEV response (показываем CSRF токен)
+  // 10. DEV response (показываем токены для тестирования)
   if (isDev) {
     const resetLink =
       type === "email"
@@ -159,12 +147,13 @@ app.post("/", async (c) => {
     return c.json({
       status: "ok",
       token,
+      code, // OTP для tg/sms
       reset_link: resetLink,
-      csrf_token: csrfToken, // DEV only
+      csrf_token: csrfToken,
     });
   }
 
-  // 12. PROD response
+  // 11. PROD response (не раскрываем детали)
   return c.json({ status: "ok" });
 });
 

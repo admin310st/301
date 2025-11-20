@@ -63,23 +63,28 @@ export async function verifyOmniFlow(
   }
 
   // 2. Проверяем/создаём пользователя
+  // 2. Проверяем/создаём пользователя
   let user = await env.DB301
     .prepare("SELECT * FROM users WHERE email = ?")
     .bind(identifier)
     .first();
 
   if (!user) {
+    // Извлекаем password_hash из payload (если есть)
+    const password_hash = session.payload?.password_hash || null;
+
     const res = await env.DB301
       .prepare(
-        `INSERT INTO users (email, user_type, created_at, updated_at)
-         VALUES (?, 'client', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+        `INSERT INTO users (email, password_hash, user_type, created_at, updated_at)
+         VALUES (?, ?, 'client', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
       )
-      .bind(identifier)
+      .bind(identifier, password_hash)
       .run();
 
     user = {
       id: res.meta?.last_row_id || res.lastInsertRowId,
       email: identifier,
+      password_hash,
       user_type: "client",
     };
   }
@@ -93,7 +98,7 @@ export async function verifyOmniFlow(
     const acc = await env.DB301
       .prepare(
         `INSERT INTO accounts (user_id, account_name, created_at, updated_at)
-         VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+         VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
       )
       .bind(userId, identifier.split('@')[0] || 'Account')
       .run();

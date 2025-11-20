@@ -3,12 +3,13 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { startOmniFlow } from "../lib/start";
+import { hashPassword, validatePasswordStrength } from "../lib/password";
 
 const app = new Hono();
 
 /**
  * Classic Sign-Up → OmniAuth START
- * вызываем библиотеку startOmniFlow напрямую,
+ * Email + Password регистрация
  */
 
 app.post("/", async (c) => {
@@ -22,13 +23,28 @@ app.post("/", async (c) => {
   }
 
   const email = body.email?.trim();
-  const turnstile_token = body.turnstile_token;
+  const password = body.password?.trim();
 
+  // Валидация email
   if (!email) {
     throw new HTTPException(400, { message: "email_required" });
   }
 
-  // IP + UA 
+  // Валидация пароля
+  if (!password) {
+    throw new HTTPException(400, { message: "password_required" });
+  }
+
+  // Проверка сложности пароля
+  const validationError = validatePasswordStrength(password);
+  if (validationError) {
+    throw new HTTPException(400, validationError as any);
+  }
+
+  // Хэшируем пароль
+  const password_hash = await hashPassword(password);
+
+  // IP + UA
   const ip =
     c.req.header("CF-Connecting-IP") ||
     c.req.header("x-real-ip") ||
@@ -36,16 +52,16 @@ app.post("/", async (c) => {
 
   const ua = c.req.header("User-Agent") || "unknown";
 
-  // вызов библиотеки
+  // Запуск OmniFlow с password_hash в payload
   const result = await startOmniFlow(c, env, {
     identifier: email,
     mode: "register",
-    payload: null,
+    payload: { password_hash },  // Передаём хэш
     ip,
     ua,
   });
 
-  // результат
+  // Результат
   return c.json({
     status: result.status,
     token: result.token,

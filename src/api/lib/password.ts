@@ -8,6 +8,14 @@ const HASH_ALGO = "SHA-256"
 
 const encoder = new TextEncoder()
 
+// Правила валидации
+const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
+const PASSWORD_BLACKLIST = [
+  "password", "Password1", "12345678", "qwerty123", 
+  "admin123", "welcome1", "letmein1", "Passw0rd"
+];
+
 function toBase64(bytes: Uint8Array): string {
   let str = ""
   for (let i = 0; i < bytes.length; i++) {
@@ -48,11 +56,57 @@ async function deriveKey(password: string, salt: Uint8Array): Promise<Uint8Array
   return new Uint8Array(bits)
 }
 
-/**
- * Хэш пароля.
- * Формат хранения в БД: "<salt_base64>:<hash_base64>"
- */
-export async function hashPassword(password: string): Promise<string> {
+// Валидация сложности пароля
+export function validatePasswordStrength(password: string): { message: string; requirements?: string[] } | null {
+  // Длина
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    return {
+      message: "password_too_short",
+      requirements: [`Minimum ${PASSWORD_MIN_LENGTH} characters`]
+    };
+  }
+
+  // Максимальная длина (защита от DoS)
+  if (password.length > 128) {
+    return {
+      message: "password_too_long",
+      requirements: ["Maximum 128 characters"]
+    };
+  }
+
+  // Сложность: строчные, заглавные, цифры
+  if (!PASSWORD_REGEX.test(password)) {
+    const missing: string[] = [];
+    if (!/[a-z]/.test(password)) missing.push("lowercase letter (a-z)");
+    if (!/[A-Z]/.test(password)) missing.push("uppercase letter (A-Z)");
+    if (!/\d/.test(password)) missing.push("digit (0-9)");
+
+    return {
+      message: "password_too_weak",
+      requirements: [
+        `At least ${PASSWORD_MIN_LENGTH} characters`,
+        "At least one uppercase letter",
+        "At least one lowercase letter",
+        "At least one digit",
+        ...missing.map(m => `Missing: ${m}`)
+      ]
+    };
+  }
+
+  // Чёрный список слабых паролей (case-insensitive)
+  const lowerPassword = password.toLowerCase();
+  if (PASSWORD_BLACKLIST.some(weak => lowerPassword.includes(weak.toLowerCase()))) {
+    return {
+      message: "password_too_common",
+      requirements: ["Password is too common, choose a more unique one"]
+    };
+  }
+
+  return null; // Валиден
+}
+
+// Хэш пароля. Формат хранения в БД: "<salt_base64>:<hash_base64>"
+ export async function hashPassword(password: string): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(16))
   const hash = await deriveKey(password, salt)
 
@@ -62,9 +116,7 @@ export async function hashPassword(password: string): Promise<string> {
   return `${saltB64}:${hashB64}`
 }
 
-/**
- * Проверка пароля.
- */
+// Проверка пароля
 export async function verifyPassword(
   password: string,
   stored: string | null
