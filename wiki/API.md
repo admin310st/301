@@ -68,6 +68,25 @@ UI обязан:
 * получить клиентский токен
 * передать его в API: `turnstile_token`
 
+```
+// При клике на "Зарегистрироваться"
+async function handleRegister(email, password) {
+  // 1. Получить токен от Turnstile
+  const turnstileToken = await turnstile.execute();
+
+  // 2. Отправить на API
+  const response = await fetch('https://api.301.st/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email,
+      password,
+      turnstile_token: turnstileToken  // ← Backend проверит
+    })
+  });
+}
+```
+
 ## 1.3 Access Token и Refresh Cookie
 
 * **Access Token** живёт ~15 мин
