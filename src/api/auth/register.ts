@@ -37,7 +37,7 @@ app.post("/", async (c) => {
   const ua = c.req.header("User-Agent") || "unknown";
 
   // вызов библиотеки
-  const result = await startOmniFlow(env, {
+  const result = await startOmniFlow(c, env, {
     identifier: email,
     mode: "register",
     payload: null,
