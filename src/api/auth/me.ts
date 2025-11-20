@@ -70,7 +70,7 @@ app.get("/", async (c) => {
         am.account_id AS id,
         am.role,
         am.status,
-        a.owner_user_id
+        a.user_id
       FROM account_members am
       JOIN accounts a ON am.account_id = a.id
       WHERE am.user_id = ?

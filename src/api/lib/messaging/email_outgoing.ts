@@ -11,15 +11,28 @@ import type { SendMessageInput } from "../message_sender";
 /**
  * Отправка email через MailerSend API
  */
+
 export async function sendEmailOutgoing(
   env: Env,
   data: SendMessageInput
 ): Promise<void> {
-  // Проверка конфигурации
+  // DEV MODE: логируем и выходим ДО проверки токена
+  const isDev = env.ENV_MODE === "dev" || env.WORKERS_ENV === "dev";
+  
+  if (isDev) {
+    const template = getEmailTemplate(data.template, data.token, env);
+    console.log("[EMAIL DEV MODE] Skipping real send:", {
+      to: data.identifier,
+      subject: template.subject,
+      verify_url: `${env.OAUTH_REDIRECT_BASE}/auth/verify?token=${data.token}`
+    });
+    return; // Выход БЕЗ отправки
+  }
+
+  // PROD MODE: проверяем токен (он уже в secrets)
   if (!env.MAILERSEND_API_TOKEN) {
     throw new HTTPException(500, { message: "mailersend_not_configured" });
   }
-
   if (!env.EMAIL_FROM) {
     throw new HTTPException(500, { message: "email_from_not_configured" });
   }

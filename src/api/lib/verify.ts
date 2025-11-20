@@ -92,10 +92,10 @@ export async function verifyOmniFlow(
   if (type === "register") {
     const acc = await env.DB301
       .prepare(
-        `INSERT INTO accounts (owner_user_id, created_at, updated_at)
+        `INSERT INTO accounts (user_id, account_name, created_at, updated_at)
          VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
       )
-      .bind(userId)
+      .bind(userId, identifier.split('@')[0] || 'Account')
       .run();
 
     accountId = acc.meta?.last_row_id || acc.lastInsertRowId;
@@ -219,7 +219,7 @@ export async function verifyOmniFlow(
          am.account_id AS id,
          am.role,
          am.status,
-         a.owner_user_id
+         a.user_id
        FROM account_members am
        JOIN accounts a ON am.account_id = a.id
        WHERE am.user_id = ?
