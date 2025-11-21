@@ -11,13 +11,14 @@ import confirmPassword from "./auth/confirm_password";
 import keysRouter from "./integrations/keys/router";
 import googleStart from "./auth/oauth/google/start";
 import googleCallback from "./auth/oauth/google/callback";
+import githubStart from "./auth/oauth/github/start";
+import githubCallback from "./auth/oauth/github/callback";
 
 
 const app = new Hono<{ Bindings: Env }>();
 
 app.use("*", corsMiddleware);
 
-// --- Auth endpoints ---
 // --- Auth endpoints ---
 app.route("/auth/verify", verify);
 app.route("/auth/register", register);
@@ -29,6 +30,8 @@ app.route("/auth/reset_password", resetPassword);
 app.route("/auth/confirm_password", confirmPassword);
 app.route("/auth/oauth/google/start", googleStart);
 app.route("/auth/oauth/google/callback", googleCallback);
+app.route("/auth/oauth/github/start", githubStart);
+app.route("/auth/oauth/github/callback", githubCallback);
 
 // --- Key endpoint ---
 app.route("/integrations/keys", keysRouter);
