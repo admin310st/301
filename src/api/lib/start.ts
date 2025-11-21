@@ -5,7 +5,7 @@ import type { Env } from "../types/worker";
 import { createOmniToken } from "../lib/omni_tokens";
 import { sendOmniMessage } from "../lib/message_sender";
 import { checkRateLimit } from "../lib/ratelimit";
-import { verifyTurnstile } from "../lib/turnstile";
+import { verifyTurnstileToken } from "../lib/turnstile";
 
 /**
  * Универсальный запуск OmniAuth - БИБЛИОТЕКА 
@@ -15,7 +15,6 @@ import { verifyTurnstile } from "../lib/turnstile";
  * - Выбор канала (email/sms/telegram)
  */
 export async function startOmniFlow(
-  c: Context,
   env: Env,
   params: {
     identifier: string;
@@ -23,6 +22,7 @@ export async function startOmniFlow(
     payload?: any;
     ip: string;
     ua?: string;
+    turnstileToken?: string;
   }
 ) {
   const {
@@ -39,11 +39,11 @@ export async function startOmniFlow(
   }
 
   // RATE LIMIT
-  await checkRateLimit(env, `auth:start:ip:${ip}`, 20, 60);
-  await checkRateLimit(env, `auth:start:id:${identifier}`, 5, 60);
+  await checkRateLimit(env, `auth:start:ip:${ip}`, { max: 20, windowSec: 60 });
+  await checkRateLimit(env, `auth:start:id:${identifier}`, { max: 5, windowSec: 60 });
 
   // TURNSTILE
-  const turnstileOK = await verifyTurnstile(c, env);
+  const turnstileOK = await verifyTurnstileToken(env, turnstileToken, ip);
   if (!turnstileOK) {
     throw new HTTPException(403, { message: "turnstile_failed" });
   }
@@ -80,10 +80,10 @@ export async function startOmniFlow(
     identifier,
     token,
     template,
-    code, // теперь OTP реально передаётся для sms/tg
+    code,
   });
 
-  // ---- Ответ UI (NOT JSON!) ----
+  // ---- Ответ UI ----
   return {
     status: "pending",
     mode,

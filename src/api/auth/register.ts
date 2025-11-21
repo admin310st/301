@@ -22,8 +22,9 @@ app.post("/", async (c) => {
     throw new HTTPException(400, { message: "invalid_json" });
   }
 
-  const email = body.email?.trim();
+  const email = body.email?.trim().toLowerCase();
   const password = body.password?.trim();
+  const turnstile_token = body.turnstile_token;
 
   // Валидация email
   if (!email) {
@@ -41,6 +42,21 @@ app.post("/", async (c) => {
     throw new HTTPException(400, validationError as any);
   }
 
+  // Ранняя проверка: существует ли user + owner аккаунт
+  // Экономит отправку email если пользователь уже зарегистрирован
+  const existingOwner = await env.DB301
+    .prepare(`
+      SELECT u.id FROM users u
+      JOIN account_members am ON u.id = am.user_id
+      WHERE u.email = ? AND am.role = 'owner'
+    `)
+    .bind(email)
+    .first();
+
+  if (existingOwner) {
+    throw new HTTPException(409, { message: "user_already_registered" });
+  }
+
   // Хэшируем пароль
   const password_hash = await hashPassword(password);
 
@@ -53,12 +69,13 @@ app.post("/", async (c) => {
   const ua = c.req.header("User-Agent") || "unknown";
 
   // Запуск OmniFlow с password_hash в payload
-  const result = await startOmniFlow(c, env, {
+  const result = await startOmniFlow(env, {
     identifier: email,
     mode: "register",
-    payload: { password_hash },  // Передаём хэш
+    payload: { password_hash },
     ip,
     ua,
+    turnstileToken: turnstile_token,
   });
 
   // Результат

@@ -5,7 +5,7 @@ import type { Env } from "../types/worker";
 
 /**
  * verifyTurnstile()
- * Универсальная проверка Cloudflare Turnstile.
+ * Проверка Cloudflare Turnstile из Hono Context.
  *
  * Поведение:
  *  - В dev-режиме ВСЕГДА возвращает true.
@@ -28,8 +28,7 @@ export async function verifyTurnstile(
     }
 
     // --- 2. Читаем токен ---
-    let token =
-      c.req.header("cf-turnstile-token") || null;
+    let token = c.req.header("cf-turnstile-token") || null;
 
     if (!token) {
       // Может быть в теле
@@ -46,27 +45,54 @@ export async function verifyTurnstile(
     // --- 3. Проверяем Turnstile API ---
     const ip = c.req.header("CF-Connecting-IP") || "";
 
+    return await verifyTurnstileToken(env, token, ip);
+  } catch (err) {
+    console.error("[Turnstile ERROR]", err);
+    return false;
+  }
+}
+
+/**
+ * verifyTurnstileToken()
+ * Прямая проверка токена без Hono Context.
+ * Используется в библиотечных функциях (start.ts, startOmniFlow).
+ */
+export async function verifyTurnstileToken(
+  env: Env,
+  token: string | null | undefined,
+  ip: string
+): Promise<boolean> {
+  try {
+    // dev-режим → пропуск
+    const isDev =
+      env.ENV_MODE === "dev" || env.WORKERS_ENV === "dev";
+
+    if (isDev) {
+      return true;
+    }
+
+    if (!token) {
+      return false;
+    }
+
+    // Проверяем Turnstile API
     const res = await fetch(
       "https://challenges.cloudflare.com/turnstile/v0/siteverify",
       {
         method: "POST",
         body: new URLSearchParams({
-          secret: env.TURNSTILE_SECRET,
+          secret: env.TURNSTILE_SECRET || "",
           response: token,
           remoteip: ip
         })
       }
     );
 
-    const data = await res.json().catch(() => null);
+    const data: { success?: boolean } = await res.json().catch(() => ({}));
 
-    if (!data || !data.success) {
-      return false;
-    }
-
-    return true;
+    return data?.success === true;
   } catch (err) {
-    console.error("[Turnstile ERROR]", err);
+    console.error("[Turnstile Token ERROR]", err);
     return false;
   }
 }

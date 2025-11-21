@@ -30,7 +30,6 @@ app.get("/", async (c) => {
     const state = url.searchParams.get("state");
     if (!code || !state) return c.text("Missing OAuth parameters", 400);
 
-    // ИСПРАВЛЕНИЕ #4: Извлечение IP и UA
     const { ip, ua } = extractRequestInfo(c);
 
     // 1) Проверка state (CSRF) и извлечение PKCE verifier
@@ -71,7 +70,7 @@ app.get("/", async (c) => {
     const idToken = tokenData.id_token;
     if (!idToken) return c.text("Missing id_token", 500);
 
-    // 3) ИСПРАВЛЕНИЕ #1: Верификация ID token через JWKS
+    // 3) Верификация ID token через JWKS
     let payload: any;
     try {
       const JWKS = createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs"));
@@ -87,94 +86,127 @@ app.get("/", async (c) => {
       return c.text("Invalid ID token", 403);
     }
 
-    const email: string = payload.email;
-    const name: string = payload.name;
+    const email: string = payload.email?.toLowerCase();
+    const name: string = payload.name || "";
     const sub: string = payload.sub;
 
-    // 4) Работа с D1: users / accounts
+    if (!email) {
+      return c.text("Email not provided by Google", 400);
+    }
+
+    // 4) Работа с D1: users / accounts / account_members
     const db = c.env.DB301;
     const now = new Date().toISOString();
 
     let user_id: number;
     let account_id: number;
-    let role: string = "user";
     let user_type: string = "client";
+    let accountRole: "owner" | "editor" | "viewer" = "owner";
 
     // Поиск пользователя по email или (oauth_provider, oauth_id)
     const existing = await db.prepare(`
-      SELECT id, role, user_type FROM users
+      SELECT id, user_type FROM users
       WHERE email = ?1 OR (oauth_provider = 'google' AND oauth_id = ?2)
-    `).bind(email, sub).first<{ id: number; role: string | null; user_type: string | null }>();
+    `).bind(email, sub).first<{ id: number; user_type: string | null }>();
 
     if (!existing) {
       // Создание нового пользователя
       const userInsert = await db.prepare(`
-        INSERT INTO users (email, password_hash, oauth_provider, oauth_id, tg_id, name, role, user_type, created_at, updated_at)
-        VALUES (?1, NULL, 'google', ?2, NULL, ?3, 'user', 'client', ?4, ?4)
+        INSERT INTO users (email, email_verified, password_hash, oauth_provider, oauth_id, name, user_type, created_at, updated_at)
+        VALUES (?1, 1, NULL, 'google', ?2, ?3, 'client', ?4, ?4)
       `).bind(email, sub, name, now).run();
-      // @ts-ignore
-      user_id = userInsert.meta.last_row_id as number;
-      role = "user";
+
+      user_id = userInsert.meta?.last_row_id as number;
       user_type = "client";
 
       // Создание аккаунта
       const accountInsert = await db.prepare(`
-        INSERT INTO accounts (user_id, account_name, cf_account_id, plan, status, created_at, updated_at)
-        VALUES (?1, ?2, NULL, 'free', 'active', ?3, ?3)
+        INSERT INTO accounts (user_id, account_name, created_at, updated_at)
+        VALUES (?1, ?2, ?3, ?3)
       `).bind(user_id, name || email.split('@')[0], now).run();
-      // @ts-ignore
-      account_id = accountInsert.meta.last_row_id as number;
 
-      console.log(`New Google user created: ${email}`);
+      account_id = accountInsert.meta?.last_row_id as number;
+
+      // Создание membership с ролью owner
+      await db.prepare(`
+        INSERT INTO account_members (account_id, user_id, role, status, created_at, updated_at)
+        VALUES (?1, ?2, 'owner', 'active', ?3, ?3)
+      `).bind(account_id, user_id, now).run();
+
+      accountRole = "owner";
+      console.log(`[OAuth Google] New user created: ${email}`);
+
     } else {
-      // Обновление существующего пользователя
+      // Существующий пользователь
       user_id = existing.id;
-      role = existing.role || "user";
       user_type = existing.user_type || "client";
 
+      // Обновляем OAuth данные
       await db.prepare(`
         UPDATE users
-        SET oauth_provider = 'google', oauth_id = ?1, updated_at = ?2
+        SET oauth_provider = 'google', oauth_id = ?1, email_verified = 1, updated_at = ?2
         WHERE id = ?3
       `).bind(sub, now, user_id).run();
 
-      // Проверка / создание аккаунта
-      const acc = await db.prepare(`SELECT id FROM accounts WHERE user_id = ?1`).bind(user_id).first<{ id: number }>();
-      if (acc && acc.id) {
-        account_id = acc.id;
-      } else {
-        const accountInsert = await db.prepare(`
-          INSERT INTO accounts (user_id, account_name, cf_account_id, plan, status, created_at, updated_at)
-          VALUES (?1, ?2, NULL, 'free', 'active', ?3, ?3)
-        `).bind(user_id, name || email.split('@')[0], now).run();
-        // @ts-ignore
-        account_id = accountInsert.meta.last_row_id as number;
-      }
+      // Проверяем есть ли owner аккаунт
+      const ownerMembership = await db.prepare(`
+        SELECT am.account_id, am.role 
+        FROM account_members am
+        WHERE am.user_id = ?1 AND am.role = 'owner'
+        LIMIT 1
+      `).bind(user_id).first<{ account_id: number; role: string }>();
 
-      console.log(`Existing Google user: ${email}`);
+      if (ownerMembership) {
+        // Уже есть owner аккаунт — используем его
+        account_id = ownerMembership.account_id;
+        accountRole = "owner";
+        console.log(`[OAuth Google] Existing owner: ${email}`);
+      } else {
+        // Был invited — создаём owner аккаунт
+        const accountInsert = await db.prepare(`
+          INSERT INTO accounts (user_id, account_name, created_at, updated_at)
+          VALUES (?1, ?2, ?3, ?3)
+        `).bind(user_id, name || email.split('@')[0], now).run();
+
+        account_id = accountInsert.meta?.last_row_id as number;
+
+        await db.prepare(`
+          INSERT INTO account_members (account_id, user_id, role, status, created_at, updated_at)
+          VALUES (?1, ?2, 'owner', 'active', ?3, ?3)
+        `).bind(account_id, user_id, now).run();
+
+        accountRole = "owner";
+        console.log(`[OAuth Google] Created owner account for invited user: ${email}`);
+      }
     }
 
-    // 5) ИСПРАВЛЕНИЕ #2: Создание refresh session с правильным форматом
+    // 5) Создание refresh session
     await createRefreshSession(c, c.env, user_id, account_id, user_type);
 
     // 6) Запись события в audit_log
     try {
-      await logAuth(c.env, 'login', user_id, account_id, ip, ua);
+      await logAuth(c.env, 'login', user_id, account_id, ip, ua, user_type, accountRole);
     } catch (logErr) {
       console.error('Audit log write error:', logErr);
     }
 
-    // 7) ИСПРАВЛЕНИЕ #4: JWT с fingerprinting
+    // 7) JWT с fingerprinting
     const jwt = await signJWT(
-      { user_id, account_id, role },
+      { 
+        typ: "access",
+        user_id, 
+        account_id,
+        iat: Math.floor(Date.now() / 1000),
+      },
       c.env,
       "15m",
-      { ip, ua }  // Fingerprint
+      { ip, ua }
     );
 
     // 8) Redirect
     const redirectTo = `https://301.st/auth/success?token=${jwt}`;
     return Response.redirect(redirectTo, 302);
+
   } catch (err) {
     console.error('OAuth callback error:', err);
     return c.text('OAuth callback failed', 500);
