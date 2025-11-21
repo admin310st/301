@@ -1,18 +1,10 @@
 /**
- * Инициация GitHub OAuth 2.0 flow с PKCE
- *
- * Endpoint:
- * - GET /auth/oauth/github/start
- *
- * Flow:
- * 1. Генерация state (CSRF protection)
- * 2. Генерация PKCE (verifier + challenge)
- * 3. Сохранение verifier в KV (TTL 5 минут)
- * 4. Редирект на GitHub OAuth с PKCE challenge
+ * GitHub OAuth 2.0 Start
+ * GitHub НЕ поддерживает PKCE — используем только state
  */
 
 import { Hono } from "hono";
-import { storeState, generatePKCE, buildOAuthUrl } from "../../../lib/oauth";
+import { storeState, buildOAuthUrl } from "../../../lib/oauth";
 
 const app = new Hono();
 
@@ -26,24 +18,20 @@ app.get("/", async (c) => {
 
   const state = crypto.randomUUID();
 
-  // Генерация PKCE
-  const { verifier, challenge } = await generatePKCE();
-  await storeState(c.env, "github", state, verifier);
+  // Сохраняем state (verifier = "none" — GitHub не поддерживает PKCE)
+  await storeState(c.env, "github", state, "github-no-pkce");
 
   const redirect_uri = `${redirect_base}/auth/oauth/github/callback`;
-  
-  // Добавление PKCE параметров в URL
+
+  // БЕЗ PKCE параметров — GitHub их игнорирует
   const authUrl = buildOAuthUrl("https://github.com/login/oauth/authorize", {
     client_id,
     redirect_uri,
     state,
     scope: "read:user user:email",
-    code_challenge: challenge,
-    code_challenge_method: "S256",
   });
 
   return Response.redirect(authUrl, 302);
 });
 
 export default app;
-
