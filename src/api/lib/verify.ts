@@ -13,10 +13,12 @@ import { verifyOmniToken } from "./omni_tokens";
 import { logAuth } from "./logger";
 import { signJWT } from "./jwt";
 import { createRefreshSession } from "./session";
+import { hashPassword } from "./password";
 
 interface VerifyOmniFlowInput {
   token: string;
   code?: string | null;
+  password?: string | null;
   ip: string;
   ua: string;
 }
@@ -24,14 +26,7 @@ interface VerifyOmniFlowInput {
 interface VerifyOmniFlowResult {
   ok: boolean;
   type?: string;
-  user?: {
-    id: number;
-    email: string;
-    phone?: string | null;
-    tg_id?: string | null;
-    name?: string | null;
-    user_type: string;
-  };
+  user?: any;
   accounts?: any[];
   active_account_id?: number | null;
   access_token?: string;
@@ -39,20 +34,6 @@ interface VerifyOmniFlowResult {
   user_id?: number;
   csrf_token?: string;
   message?: string;
-}
-
-/**
- * Создаёт безопасный объект user без sensitive данных
- */
-function sanitizeUser(user: any): VerifyOmniFlowResult["user"] {
-  return {
-    id: user.id,
-    email: user.email,
-    phone: user.phone || null,
-    tg_id: user.tg_id || null,
-    name: user.name || null,
-    user_type: user.user_type || "client",
-  };
 }
 
 /**
@@ -64,7 +45,7 @@ export async function verifyOmniFlow(
   input: VerifyOmniFlowInput,
   context?: Context
 ): Promise<VerifyOmniFlowResult> {
-  const { token, code, ip, ua } = input;
+  const { token, code, password, ip, ua } = input;
 
   if (!token) {
     throw new HTTPException(400, { message: "token_required" });
@@ -76,7 +57,7 @@ export async function verifyOmniFlow(
     throw new HTTPException(400, { message: "invalid_or_expired_token" });
   }
 
-  const { identifier, type } = session;
+  const { identifier, type, channel, payload } = session;
 
   if (!identifier) {
     throw new HTTPException(400, { message: "identifier_missing" });
@@ -88,44 +69,44 @@ export async function verifyOmniFlow(
     .bind(identifier)
     .first();
 
-  if (!user) {
-    // User не существует
-    if (type !== "register") {
-      // Для login/reset/etc требуется существующий пользователь
-      throw new HTTPException(404, { message: "user_not_found" });
-    }
+  const isEmailChannel = channel === "email";
 
-    // Создаём нового пользователя (только для register)
-    const password_hash = session.payload?.password_hash || null;
+  if (!user) {
+    // Новый пользователь — создаём с email_verified если канал email
+    // Также хэшируем пароль если передан (register flow)
+    let passwordHash: string | null = null;
+    
+    if (password) {
+      passwordHash = await hashPassword(password);
+    } else if (payload?.password) {
+      passwordHash = await hashPassword(payload.password);
+    }
 
     const res = await env.DB301
       .prepare(
-        `INSERT INTO users (email, password_hash, user_type, created_at, updated_at)
-         VALUES (?, ?, 'client', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+        `INSERT INTO users (email, email_verified, password_hash, user_type, created_at, updated_at)
+         VALUES (?, ?, ?, 'client', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
       )
-      .bind(identifier, password_hash)
+      .bind(identifier, isEmailChannel ? 1 : 0, passwordHash)
       .run();
 
     user = {
       id: res.meta?.last_row_id || res.lastInsertRowId,
       email: identifier,
-      password_hash,
+      email_verified: isEmailChannel ? 1 : 0,
+      password_hash: passwordHash,
       user_type: "client",
     };
-  } else if (type === "register") {
-    // User существует — проверяем есть ли у него owner аккаунт
-    const ownerAccount = await env.DB301
-      .prepare(
-        "SELECT id FROM account_members WHERE user_id = ? AND role = 'owner'"
-      )
-      .bind(user.id)
-      .first();
-
-    if (ownerAccount) {
-      // Уже есть owner аккаунт — нельзя регистрироваться повторно
-      throw new HTTPException(409, { message: "user_already_registered" });
+  } else {
+    // Существующий пользователь — обновляем email_verified если канал email
+    if (isEmailChannel && !user.email_verified) {
+      await env.DB301
+        .prepare("UPDATE users SET email_verified = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(user.id)
+        .run();
+      
+      user.email_verified = 1;
     }
-    // Пользователь был invited (editor/viewer) — разрешаем создать owner аккаунт
   }
 
   const userId = user.id;
@@ -134,26 +115,44 @@ export async function verifyOmniFlow(
 
   // 3. Создание аккаунта (register) или выбор (reset/login)
   if (type === "register") {
-    const acc = await env.DB301
+    // Проверяем, нет ли уже аккаунта (на случай повторной верификации)
+    const existingMember = await env.DB301
       .prepare(
-        `INSERT INTO accounts (user_id, account_name, created_at, updated_at)
-         VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+        `SELECT account_id, role FROM account_members
+         WHERE user_id = ?
+         ORDER BY account_id ASC LIMIT 1`
       )
-      .bind(userId, identifier.split('@')[0] || 'Account')
-      .run();
+      .bind(userId)
+      .first();
 
-    accountId = acc.meta?.last_row_id || acc.lastInsertRowId;
+    if (existingMember) {
+      // Аккаунт уже есть
+      accountId = existingMember.account_id;
+      accountRole = existingMember.role;
+    } else {
+      // Создаём новый аккаунт
+      const acc = await env.DB301
+        .prepare(
+          `INSERT INTO accounts (user_id, account_name, created_at, updated_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+        )
+        .bind(userId, identifier.split('@')[0])
+        .run();
 
-    await env.DB301
-      .prepare(
-        `INSERT INTO account_members (account_id, user_id, role)
-         VALUES (?, ?, 'owner')`
-      )
-      .bind(accountId, userId)
-      .run();
+      accountId = acc.meta?.last_row_id || acc.lastInsertRowId;
 
-    accountRole = "owner";
+      await env.DB301
+        .prepare(
+          `INSERT INTO account_members (account_id, user_id, role, status)
+           VALUES (?, ?, 'owner', 'active')`
+        )
+        .bind(accountId, userId)
+        .run();
+
+      accountRole = "owner";
+    }
   } else {
+    // login / reset / action — ищем существующий аккаунт
     const am = await env.DB301
       .prepare(
         `SELECT account_id, role FROM account_members
@@ -180,22 +179,24 @@ export async function verifyOmniFlow(
 
   const sessionId = sess.meta?.last_row_id || sess.lastInsertRowId;
 
-  // 5. Reset flow — CSRF-защищённая reset_session
+  // 5. Reset flow — создаём CSRF-защищённую reset_session
   if (type === "reset") {
     const resetSessionId = crypto.randomUUID();
-    const csrfToken = crypto.randomUUID();
+    const csrfToken = payload?.csrf_token || crypto.randomUUID();
 
+    // Сохраняем reset session с CSRF token
     await env.KV_SESSIONS.put(
       `reset:${resetSessionId}`,
       JSON.stringify({
         user_id: userId,
-        channel: session.channel || "email",
+        channel: channel || "email",
         identifier,
         csrf_token: csrfToken,
       }),
-      { expirationTtl: 900 }
+      { expirationTtl: 900 } // 15 минут
     );
 
+    // Устанавливаем reset_session cookie (HttpOnly) если есть context
     if (context) {
       context.header(
         "Set-Cookie",
@@ -203,24 +204,41 @@ export async function verifyOmniFlow(
       );
     }
 
+    // Логируем событие reset verified
     try {
-      await logAuth(env, "login", userId, accountId, ip, ua, user.user_type || "client", accountRole);
+      await logAuth(
+        env,
+        "login",
+        userId,
+        accountId,
+        ip,
+        ua,
+        user.user_type || "client",
+        accountRole
+      );
     } catch (err) {
       console.error("[AUDIT_LOG ERROR verify reset]", err);
     }
 
+    // Возвращаем специальный ответ для reset flow с CSRF token
     return {
       ok: true,
       type: "reset",
       user_id: userId,
-      csrf_token: csrfToken,
+      csrf_token: csrfToken, // UI получит и отправит в confirm_password
       message: "reset_verified_proceed_to_confirm",
     };
   }
 
-  // 6. Register/login flow — создаём refresh session
+  // 6. Для register/login flow — создаём обычную refresh session
   if (context) {
-    await createRefreshSession(context, env, userId, accountId, user.user_type || "client");
+    await createRefreshSession(
+      context,
+      env,
+      userId,
+      accountId,
+      user.user_type || "client"
+    );
   }
 
   // 7. Создаём access_token с fingerprint
@@ -244,7 +262,7 @@ export async function verifyOmniFlow(
          am.account_id AS id,
          am.role,
          am.status,
-         a.user_id
+         am.user_id
        FROM account_members am
        JOIN accounts a ON am.account_id = a.id
        WHERE am.user_id = ?
@@ -259,7 +277,7 @@ export async function verifyOmniFlow(
   try {
     await logAuth(
       env,
-      type === "reset" ? "login" : (type as "register" | "login" | "logout" | "refresh"),
+      type === "register" ? "register" : "login",
       userId,
       accountId,
       ip,
@@ -271,10 +289,17 @@ export async function verifyOmniFlow(
     console.error("[AUDIT_LOG ERROR verify]", err);
   }
 
-  // 10. Возвращаем ответ без password_hash
+  // 10. Возвращаем успешный ответ
   return {
     ok: true,
-    user: sanitizeUser(user),
+    user: {
+      id: user.id,
+      email: user.email,
+      phone: user.phone || null,
+      tg_id: user.tg_id || null,
+      name: user.name || null,
+      user_type: user.user_type,
+    },
     accounts,
     active_account_id: accountId,
     access_token: accessToken,

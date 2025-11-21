@@ -15,6 +15,9 @@ const app = new Hono();
  *
  * Отправляет reset-link (email) или OTP (tg).
  * Генерирует CSRF токен для защиты от CSRF атак.
+ * 
+ * OAuth-only пользователи получают информативный ответ
+ * о необходимости входа через провайдера.
  */
 
 app.post("/", async (c) => {
@@ -36,7 +39,7 @@ app.post("/", async (c) => {
   }
 
   // 2. Rate-limit (IP)
-  await checkRateLimit(env, `auth:reset:ip:${ip}`, 20, 60);
+  await checkRateLimit(env, `auth:reset:ip:${ip}`, { max: 20, windowSec: 60 });
 
   // 3. Body
   const body = await c.req.json().catch(() => null);
@@ -57,10 +60,17 @@ app.post("/", async (c) => {
   }
 
   // 4. Rate-limit (identifier)
-  await checkRateLimit(env, `auth:reset:id:${type}:${value}`, 5, 600);
+  await checkRateLimit(env, `auth:reset:id:${type}:${value}`, { max: 5, windowSec: 600 });
 
   // 5. Find user
-  let user = null;
+  let user: {
+    id: number;
+    email: string;
+    email_verified: number;
+    password_hash: string | null;
+    oauth_provider: string | null;
+    tg_id?: string;
+  } | null = null;
 
   if (type === "email") {
     user = await env.DB301
@@ -89,14 +99,52 @@ app.post("/", async (c) => {
     return c.json({ status: "ok" });
   }
 
-  // 6. Проверка email_verified (только в prod)
+  // 6. OAuth-only пользователь: пароля нет, вход через провайдера
+  if (user.oauth_provider && !user.password_hash) {
+    // Форматируем название провайдера для UI
+    const providerNames: Record<string, string> = {
+      google: "Google",
+      github: "GitHub",
+      apple: "Apple",
+      telegram: "Telegram",
+    };
+
+    const providerDisplay = providerNames[user.oauth_provider] || user.oauth_provider;
+
+    // Логируем попытку reset для OAuth-only
+    try {
+      await logEvent(env, {
+        event_type: "update",
+        user_id: user.id,
+        ip,
+        ua,
+        user_type: "client:none",
+        details: {
+          action: "reset_password_oauth_only",
+          provider: user.oauth_provider,
+          channel: type,
+        },
+      });
+    } catch (e) {
+      console.error("[AUDIT ERROR]", e);
+    }
+
+    // Возвращаем информативный ответ
+    return c.json({
+      status: "oauth_only",
+      provider: user.oauth_provider,
+      message: `Вход в аккаунт осуществляется через ${providerDisplay}. Сброс пароля недоступен.`,
+    });
+  }
+
+  // 7. Проверка email_verified (только в prod)
   if (type === "email" && !isDev) {
     if (!user.email_verified) {
       throw new HTTPException(400, { message: "email_not_verified" });
     }
   }
 
-  // 7. Создаём OmniToken для reset с CSRF в payload
+  // 8. Создаём OmniToken для reset с CSRF в payload
   const csrfToken = crypto.randomUUID();
 
   const omniResult = await createOmniToken(env, {
@@ -111,7 +159,7 @@ app.post("/", async (c) => {
   const token = omniResult.token;
   const code = omniResult.code; // OTP для tg/sms
 
-  // 8. Отправка email/TG/SMS через универсальный sender
+  // 9. Отправка email/TG/SMS через универсальный sender
   await sendOmniMessage(env, {
     channel: type as "email" | "telegram" | "sms",
     identifier: value,
@@ -120,7 +168,7 @@ app.post("/", async (c) => {
     template: "reset",
   });
 
-  // 9. Audit
+  // 10. Audit
   try {
     await logEvent(env, {
       event_type: "update",
@@ -137,7 +185,7 @@ app.post("/", async (c) => {
     console.error("[AUDIT ERROR]", e);
   }
 
-  // 10. DEV response (показываем токены для тестирования)
+  // 11. DEV response (показываем токены для тестирования)
   if (isDev) {
     const resetLink =
       type === "email"
@@ -153,7 +201,7 @@ app.post("/", async (c) => {
     });
   }
 
-  // 11. PROD response (не раскрываем детали)
+  // 12. PROD response (не раскрываем детали)
   return c.json({ status: "ok" });
 });
 

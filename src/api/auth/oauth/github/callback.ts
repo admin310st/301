@@ -1,19 +1,16 @@
 /**
- * GitHub OAuth 2.0 Callback — с исправлениями #2, #3 и #4
- *
- * Endpoint:
- * - GET /auth/oauth/github/callback
+ * GitHub OAuth 2.0 Callback 
  *
  * Flow:
- * 1. Проверка state (CSRF)
- * 2. ИСПРАВЛЕНО #3: Извлечение PKCE verifier из KV
- * 3. ИСПРАВЛЕНО #3: Обмен code → access_token с code_verifier
- * 4. Получение профиля пользователя GitHub
- * 5. Создание / обновление пользователя и аккаунта в D1
- * 6. ИСПРАВЛЕНО #2: Создание refresh session с правильным форматом
- * 7. Запись события в audit_log через logAuth()
- * 8. ИСПРАВЛЕНИЕ #4: Генерация JWT с fingerprinting (IP + UA)
- * 9. Редирект в панель управления
+ * 1. Проверка state (CSRF) + получение PKCE verifier
+ * 2. Обмен code → access_token (PKCE)
+ * 3. Получение профиля GitHub + email (fallback запрос)
+ * 4. Создание / обновление user
+ * 5. Создание / обновление account + account_members
+ * 6. Создание refresh session
+ * 7. Запись audit_log
+ * 8. Генерация JWT (fingerprint IP+UA)
+ * 9. Redirect → https://301.st/auth/success?token=...
  */
 
 import { Hono } from "hono";
@@ -35,10 +32,9 @@ app.get("/", async (c) => {
       return c.text("Missing OAuth parameters", 400);
     }
 
-    // ИСПРАВЛЕНИЕ #4: Извлечение IP и UA
     const { ip, ua } = extractRequestInfo(c);
 
-    // ИСПРАВЛЕНИЕ #3: Извлечение PKCE verifier из KV
+    // 1. Проверка state + извлечение PKCE verifier
     const verifier = await consumeState(c.env, "github", state);
     if (!verifier) {
       return c.text("Invalid or expired state", 400);
@@ -49,20 +45,25 @@ app.get("/", async (c) => {
     const redirect_base = c.env.OAUTH_REDIRECT_BASE || "https://api.301.st";
     const redirect_uri = `${redirect_base}/auth/oauth/github/callback`;
 
-    // ИСПРАВЛЕНИЕ #3: Добавление code_verifier при обмене токена
+    // 2. Обмен code → access_token (PKCE)
     const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
       body: JSON.stringify({
         client_id,
         client_secret,
         code,
         redirect_uri,
-        code_verifier: verifier,  // ✅ PKCE verifier
+        code_verifier: verifier,
       }),
     });
 
     if (!tokenRes.ok) {
+      const t = await tokenRes.text();
+      console.error("GitHub token exchange failed:", t);
       return c.text("Failed to exchange token", 500);
     }
 
@@ -72,103 +73,184 @@ app.get("/", async (c) => {
       return c.text("Missing access_token", 500);
     }
 
+    // 3. Получение профиля GitHub
     const userRes = await fetch("https://api.github.com/user", {
       headers: { Authorization: `Bearer ${access_token}` },
     });
-    const user = await userRes.json();
 
-    // GitHub может не возвращать email - запрашиваем отдельно
-    let email = user.email;
-    if (!email) {
-      const emailRes = await fetch("https://api.github.com/user/emails", {
-        headers: { Authorization: `Bearer ${access_token}` }
-      });
-      const emails = await emailRes.json();
-      const primaryEmail = emails.find((e: any) => e.primary && e.verified);
-      email = primaryEmail?.email || `github${user.id}@301.st`;
+    if (!userRes.ok) {
+      return c.text("Failed to fetch GitHub profile", 500);
     }
 
-    const name = user.name || user.login;
-    const github_id = String(user.id);
+    const gh = await userRes.json();
 
+    let email = gh.email;
+    const github_id = String(gh.id);
+    const name = gh.name || gh.login || `github-${github_id}`;
+
+    // GitHub часто скрывает email — получаем отдельным запросом
+    if (!email) {
+      const emailRes = await fetch("https://api.github.com/user/emails", {
+        headers: { Authorization: `Bearer ${access_token}` },
+      });
+
+      if (emailRes.ok) {
+        const emails = await emailRes.json();
+        const primary = emails.find((e: any) => e.primary && e.verified);
+        if (primary?.email) email = primary.email;
+      }
+    }
+
+    // fallback если email скрыт полностью
+    if (!email) {
+      email = `github_${github_id}@301.st`;
+    }
+
+    email = email.toLowerCase();
+
+    // 4. D1 — создание / обновление user
     const db = c.env.DB301;
     const now = new Date().toISOString();
 
     let user_id: number;
     let account_id: number;
-    let role: string = "user";
-    let user_type: string = "client";
+    const user_type = "client";
 
-    const existing = await db.prepare(`
-      SELECT id, role, user_type FROM users 
+    const existing = await db
+      .prepare(
+        `
+      SELECT id FROM users
       WHERE email = ?1 OR (oauth_provider = 'github' AND oauth_id = ?2)
-    `).bind(email, github_id).first<{ id: number; role: string | null; user_type: string | null }>();
+    `
+      )
+      .bind(email, github_id)
+      .first<{ id: number }>();
 
     if (!existing) {
-      const userInsert = await db.prepare(`
-        INSERT INTO users (email, password_hash, oauth_provider, oauth_id, tg_id, name, role, user_type, created_at, updated_at)
-        VALUES (?1, NULL, 'github', ?2, NULL, ?3, 'user', 'client', ?4, ?4)
-      `).bind(email, github_id, name, now).run();
-      // @ts-ignore
+      // новый user
+      const userInsert = await db
+        .prepare(
+          `
+        INSERT INTO users (email, email_verified, password_hash, oauth_provider, oauth_id, name, user_type, created_at, updated_at)
+        VALUES (?1, 1, NULL, 'github', ?2, ?3, 'client', ?4, ?4)
+      `
+        )
+        .bind(email, github_id, name, now)
+        .run();
+
       user_id = userInsert.meta.last_row_id as number;
-      role = "user";
-      user_type = "client";
 
-      const accountInsert = await db.prepare(`
-        INSERT INTO accounts (user_id, account_name, cf_account_id, plan, status, created_at, updated_at)
-        VALUES (?1, ?2, NULL, 'free', 'active', ?3, ?3)
-      `).bind(user_id, name || email.split('@')[0], now).run();
-      // @ts-ignore
-      account_id = accountInsert.meta.last_row_id as number;
+      // создание аккаунта
+      const accInsert = await db
+        .prepare(
+          `
+        INSERT INTO accounts (user_id, account_name, created_at, updated_at)
+        VALUES (?1, ?2, ?3, ?3)
+      `
+        )
+        .bind(user_id, name, now)
+        .run();
 
-      console.log(`New GitHub user created: ${email}`);
+      account_id = accInsert.meta.last_row_id as number;
+
+      // создание membership — ВАЖНО
+      await db
+        .prepare(
+          `
+        INSERT INTO account_members (account_id, user_id, role, status, created_at, updated_at)
+        VALUES (?1, ?2, 'owner', 'active', ?3, ?3)
+      `
+        )
+        .bind(account_id, user_id, now)
+        .run();
+
+      console.log(`[OAuth GitHub] New user created: ${email}`);
     } else {
       user_id = existing.id;
-      role = existing.role || "user";
-      user_type = existing.user_type || "client";
 
-      await db.prepare(`
-        UPDATE users 
-        SET oauth_provider = 'github', oauth_id = ?1, updated_at = ?2 
+      // обновление oauth-полей
+      await db
+        .prepare(
+          `
+        UPDATE users
+        SET oauth_provider = 'github',
+            oauth_id = ?1,
+            email_verified = 1,
+            updated_at = ?2
         WHERE id = ?3
-      `).bind(github_id, now, user_id).run();
+      `
+        )
+        .bind(github_id, now, user_id)
+        .run();
 
-      const acc = await db.prepare(`SELECT id FROM accounts WHERE user_id = ?1`)
-        .bind(user_id).first<{ id: number }>();
+      // получаем owner account
+      const acc = await db
+        .prepare(
+          `
+        SELECT account_id, role
+        FROM account_members
+        WHERE user_id = ?1 AND role='owner'
+        LIMIT 1
+      `
+        )
+        .bind(user_id)
+        .first<{ account_id: number; role: string }>();
 
-      if (acc && acc.id) {
-        account_id = acc.id;
+      if (acc?.account_id) {
+        account_id = acc.account_id;
       } else {
-        const accountInsert = await db.prepare(`
-          INSERT INTO accounts (user_id, account_name, cf_account_id, plan, status, created_at, updated_at)
-          VALUES (?1, ?2, NULL, 'free', 'active', ?3, ?3)
-        `).bind(user_id, name || email.split('@')[0], now).run();
-        // @ts-ignore
-        account_id = accountInsert.meta.last_row_id as number;
+        // создаём новый owner account, если пользователь был invited
+        const accInsert = await db
+          .prepare(
+            `
+          INSERT INTO accounts (user_id, account_name, created_at, updated_at)
+          VALUES (?1, ?2, ?3, ?3)
+        `
+          )
+          .bind(user_id, name, now)
+          .run();
+
+        account_id = accInsert.meta.last_row_id as number;
+
+        await db
+          .prepare(
+            `
+          INSERT INTO account_members (account_id, user_id, role, status, created_at, updated_at)
+          VALUES (?1, ?2, 'owner', 'active', ?3, ?3)
+        `
+          )
+          .bind(account_id, user_id, now)
+          .run();
       }
 
-      console.log(`Existing GitHub user: ${email}`);
+      console.log(`[OAuth GitHub] Existing user: ${email}`);
     }
 
-    // ИСПРАВЛЕНИЕ #2: Создание refresh session с правильным форматом
+    // 6. refresh session
     await createRefreshSession(c, c.env, user_id, account_id, user_type);
 
+    // 7. audit_log
     try {
-      await logAuth(c.env, 'login', user_id, account_id, ip, ua);
-    } catch (logErr) {
-      console.error('Audit log write error:', logErr);
+      await logAuth(c.env, "login", user_id, account_id, ip, ua, user_type, "owner");
+    } catch (e) {
+      console.error("Audit log error:", e);
     }
 
-    // ИСПРАВЛЕНИЕ #4: JWT с fingerprinting
+    // 8. JWT + fingerprint
     const jwt = await signJWT(
-      { user_id, account_id, role },
+      {
+        typ: "access",
+        user_id,
+        account_id,
+        iat: Math.floor(Date.now() / 1000),
+      },
       c.env,
       "15m",
-      { ip, ua }  // ✅ Fingerprint
+      { ip, ua }
     );
 
-    const redirectTo = `https://301.st/auth/success?token=${jwt}`;
-    return Response.redirect(redirectTo, 302);
+    // 9. redirect
+    return Response.redirect(`https://301.st/auth/success?token=${jwt}`, 302);
   } catch (err) {
     console.error("GitHub OAuth callback error:", err);
     return c.text("OAuth callback failed", 500);
