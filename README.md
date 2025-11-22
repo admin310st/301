@@ -11,36 +11,36 @@
 │   └── migrations/               # миграции (ALTER/добавления)
 │
 ├── src/
-├── api/                       # главный воркер платформы 301.st
-│   ├── auth/                  # авторизация, регистрация, OAuth
-│   ├── projects/              # CRUD проектов
-│   ├── sites/                 # CRUD сайтов
-│   ├── domains/               # CRUD доменов и зон
-│   ├── redirects/             # правила редиректов
-│   ├── tds/                   # правила TDS
-│   ├── integrations/          # внешние API
-│   │   ├── keys/              # ключи интеграций (шифрование, хранение)
-│   │   ├── cloudflare/        # CF API: zones, routes, KV, workers
-│   │   ├── namecheap/
-│   │   ├── namesilo/
-│   │   ├── hosttracker/
-│   │   └── analytics/
-│   ├── jobs/                  # постановка задач во внутренние очереди
-│   ├── lib/                   # crypto, jwt, sessions, d1, kv, turnstile, ratelimit
-│   ├── types/                 # типы окружения
-│   └── wrangler.toml          # конфигурация воркера API
-│
-├── system/                    # объединённый edge + jobs (внутренние задачи)
-│   ├── health.ts              # /health, /status
-│   ├── cron.ts                # периодические задания
-│   ├── backup.ts              # резервные копии (D1/KV 301)
-│   ├── cleanup.ts             # TTL очистка
-│   ├── queue.ts               # обработка внутренних очередей
-│   └── wrangler.toml          # конфигурация системного воркера
-│
-├── webhook/                   # приём внешних событий (HostTracker, CF Events, др.)
-│   ├── index.ts
-│   └── wrangler.toml
+│   ├── api/                       # главный воркер платформы 301.st
+│   │   ├── auth/                  # авторизация, регистрация, OAuth
+│   │   ├── projects/              # CRUD проектов
+│   │   ├── sites/                 # CRUD сайтов
+│   │   ├── domains/               # CRUD доменов и зон
+│   │   ├── redirects/             # правила редиректов
+│   │   ├── tds/                   # правила TDS
+│   │   ├── integrations/          # внешние API
+│   │   │   ├── keys/              # ключи интеграций (шифрование, хранение)
+│   │   │   ├── cloudflare/        # CF API: zones, routes, KV, workers
+│   │   │   ├── namecheap/
+│   │   │   ├── namesilo/
+│   │   │   ├── hosttracker/
+│   │   │   └── analytics/
+│   │   ├── jobs/                  # постановка задач во внутренние очереди
+│   │   ├── lib/                   # crypto, jwt, sessions, d1, kv, turnstile, ratelimit
+│   │   ├── types/                 # типы окружения
+│   │   └── wrangler.toml          # конфигурация воркера API
+│   │
+│   ├── system/                    # объединённый edge + jobs (внутренние задачи)
+│   │   ├── health.ts              # /health, /status
+│   │   ├── cron.ts                # периодические задания
+│   │   ├── backup.ts              # резервные копии (D1/KV 301)
+│   │   ├── cleanup.ts             # TTL очистка
+│   │   ├── queue.ts               # обработка внутренних очередей
+│   │   └── wrangler.toml          # конфигурация системного воркера
+│   │
+│   └── webhook/                   # приём внешних событий (HostTracker, CF Events, др.)
+│       ├── index.ts
+│       └── wrangler.toml
 │
 ├── wiki/                         # документация проекта
 │
