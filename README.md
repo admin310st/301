@@ -11,87 +11,38 @@
 │   └── migrations/               # миграции (ALTER/добавления)
 │
 ├── src/
-│   ├── api/                      # Core API (api.301.st)
-│   │   ├── index.ts              # точка входа API воркера
-│   │   │
-│   │   ├── auth/                 # аутентификация, регистрация, OAuth
-│   │   │   ├── login.ts
-│   │   │   ├── register.ts
-│   │   │   ├── refresh.ts
-│   │   │   ├── logout.ts
-│   │   │   ├── me.ts
-│   │   │   ├── reset_password.ts
-│   │   │   ├── confirm_password.ts
-│   │   │   ├── verify.ts
-│   │   │   └── oauth/            # Google/GitHub OAuth
-│   │   │       ├── google/
-│   │   │       └── github/
-│   │   │
-│   │   ├── integrations/         # Интеграции с внешними сервисами
-│   │   │   ├── keys/             # CRUD ключей + KV storage
-│   │   │   │   ├── router.ts
-│   │   │   │   ├── schema.ts
-│   │   │   │   └── storage.ts
-│   │   │   └── providers/        # Namecheap, Namesilo, GA, HostTracker
-│   │   │       ├── namecheap.ts
-│   │   │       ├── namesilo.ts
-│   │   │       ├── registry.ts
-│   │   │       ├── hosttracker.ts
-│   │   │       ├── google_analytics.ts
-│   │   │       └── yandex_metrica.ts
-│   │   │
-│   │   ├── jobs/                 # отправка задач во внутренние очереди
-│   │   │
-│   │   ├── lib/                  # общая библиотека ТОЛЬКО для API
-│   │   │   ├── cors.ts
-│   │   │   ├── crypto.ts         # AES-GCM шифрование ключей
-│   │   │   ├── d1.ts             # операции с Cloudflare D1
-│   │   │   ├── jwt.ts            # JWT + ключи с версионированием
-│   │   │   ├── kv.ts             # KV sessions / credentials / rules
-│   │   │   ├── logger.ts
-│   │   │   ├── message_sender.ts
-│   │   │   ├── oauth.ts
-│   │   │   ├── omni_tokens.ts
-│   │   │   ├── password.ts
-│   │   │   ├── ratelimit.ts      # анти-брут + лимиты на login/register
-│   │   │   ├── start.ts
-│   │   │   ├── turnstile.ts      # защита регистрации/login
-│   │   │   └── verify.ts
-│   │   │
-│   │   ├── types/                # Типы окружения для воркера
-│   │   │   └── worker.ts
-│   │   │
-│   │   └── wrangler.toml         # индивидуальная конфигурация API воркера
-│   │
-│   ├── edge/                     # Edge-воркер платформы (edge.301.st)
-│   │   └── wrangler.toml
-│   │
-│   ├── jobs/                     # фоновый воркер (Cron, Queues)
-│   │   └── wrangler.toml
-│   │
-│   └── webhook/                  # воркер приёма внешних уведомлений
-│       └── wrangler.toml
+├── api/                       # главный воркер платформы 301.st
+│   ├── auth/                  # авторизация, регистрация, OAuth
+│   ├── projects/              # CRUD проектов
+│   ├── sites/                 # CRUD сайтов
+│   ├── domains/               # CRUD доменов и зон
+│   ├── redirects/             # правила редиректов
+│   ├── tds/                   # правила TDS
+│   ├── integrations/          # внешние API
+│   │   ├── keys/              # ключи интеграций (шифрование, хранение)
+│   │   ├── cloudflare/        # CF API: zones, routes, KV, workers
+│   │   ├── namecheap/
+│   │   ├── namesilo/
+│   │   ├── hosttracker/
+│   │   └── analytics/
+│   ├── jobs/                  # постановка задач во внутренние очереди
+│   ├── lib/                   # crypto, jwt, sessions, d1, kv, turnstile, ratelimit
+│   ├── types/                 # типы окружения
+│   └── wrangler.toml          # конфигурация воркера API
 │
-├── scripts/                      # DevOps: деплой, бэкапы, утилиты
-│   ├── init_db.sh
-│   ├── deploy_api.sh
-│   ├── deploy_edge.sh
-│   ├── deploy_jobs.sh
-│   ├── backup_r2.sh
-│   └── cleanup_jobs.sh
+├── system/                    # объединённый edge + jobs (внутренние задачи)
+│   ├── health.ts              # /health, /status
+│   ├── cron.ts                # периодические задания
+│   ├── backup.ts              # резервные копии (D1/KV 301)
+│   ├── cleanup.ts             # TTL очистка
+│   ├── queue.ts               # обработка внутренних очередей
+│   └── wrangler.toml          # конфигурация системного воркера
+│
+├── webhook/                   # приём внешних событий (HostTracker, CF Events, др.)
+│   ├── index.ts
+│   └── wrangler.toml
 │
 ├── wiki/                         # документация проекта
-│   ├── Home.md
-│   ├── Architecture.md
-│   ├── Data_Model.md
-│   ├── Security.md
-│   ├── Glossary.md
-│   ├── Redirects.md
-│   ├── TDS.md
-│   ├── Notifications.md
-│   ├── Appendix.md
-│   ├── Workers.md
-│   └── ...
 │
 └── .github/workflows/            # CI/CD (GitHub Actions)
     ├── deploy.yml
