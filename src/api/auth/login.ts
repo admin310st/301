@@ -8,6 +8,8 @@ import { logAuth } from "../lib/logger";
 import { verifyPassword } from "../lib/password";
 import { createRefreshSession } from "../lib/session";
 import { extractRequestInfo } from "../lib/fingerprint";
+import { verifyTurnstileToken } from "../lib/turnstile";
+import { loginGuard } from "../lib/ratelimit";
 
 const app = new Hono();
 
@@ -26,6 +28,7 @@ app.post("/", async (c) => {
   const phone = body.phone || null;
   const password = body.password || null;
   const tg_init = body.tg_init || null; // Telegram WebApp initData
+  const turnstile_token = body.turnstile_token;
 
   // ИСПРАВЛЕНИЕ #4: Извлечение IP и UA для fingerprinting
   const { ip, ua } = extractRequestInfo(c);
@@ -94,11 +97,27 @@ app.post("/", async (c) => {
     });
   }
 
-  // 2. EMAIL / PHONE + PASSWORD LOGIN
+  // 2. ✅ TURNSTILE — ПЕРВАЯ ЛИНИЯ ЗАЩИТЫ
+
+  const turnstileValid = await verifyTurnstileToken(env, turnstile_token, ip);
+  if (!turnstileValid) {
+    throw new HTTPException(403, { message: "turnstile_failed" });
+  }
+
+  // 3. БАЗОВАЯ ВАЛИДАЦИЯ
 
   if ((!email && !phone) || !password) {
     throw new HTTPException(400, { message: "missing_credentials" });
   }
+
+  // 4. ✅ RATE LIMITING — ВТОРАЯ ЛИНИЯ ЗАЩИТЫ
+
+  const rateBlock = await loginGuard(c, email);
+  if (rateBlock) {
+    return rateBlock;
+  }
+
+  // 5. ПОИСК ПОЛЬЗОВАТЕЛЯ
 
   const user = await db
     .prepare(
@@ -113,10 +132,14 @@ app.post("/", async (c) => {
     throw new HTTPException(401, { message: "invalid_login" });
   }
 
+  // 6. ПРОВЕРКА ПАРОЛЯ
+
   const ok = await verifyPassword(password, user.password_hash);
   if (!ok) {
     throw new HTTPException(401, { message: "invalid_login" });
   }
+
+  // 7. ПОЛУЧЕНИЕ АККАУНТА
 
   const member = await db
     .prepare(
