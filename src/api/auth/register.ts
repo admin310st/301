@@ -68,11 +68,28 @@ app.post("/", async (c) => {
 
   const ua = c.req.header("User-Agent") || "unknown";
 
-  // Запуск OmniFlow с password_hash в payload
+  // Определяем origin из Referer или Origin header
+  const referer = c.req.header("Referer") || c.req.header("Origin");
+  let origin = "https://301.st"; // fallback на production
+
+  if (referer) {
+    try {
+      const url = new URL(referer);
+      origin = url.origin; // https://dev.301.st или https://301.st
+    } catch (err) {
+      // Невалидный referer - используем fallback
+      console.warn("[register] Invalid Referer/Origin header:", referer);
+    }
+  }
+
+  //  origin в payload
   const result = await startOmniFlow(env, {
     identifier: email,
     mode: "register",
-    payload: { password_hash },
+    payload: { 
+      password_hash,
+      origin // Сохраняем origin для использования в email ссылке
+    },
     ip,
     ua,
     turnstileToken: turnstile_token,
