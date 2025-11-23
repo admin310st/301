@@ -23,6 +23,7 @@ export async function startOmniFlow(
     ip: string;
     ua?: string;
     turnstileToken?: string;
+    skipTurnstile?: boolean;
   }
 ) {
   const {
@@ -43,9 +44,15 @@ export async function startOmniFlow(
   await checkRateLimit(env, `auth:start:id:${identifier}`, { max: 5, windowSec: 60 });
 
   // TURNSTILE
-  const turnstileOK = await verifyTurnstileToken(env, turnstileToken, ip);
-  if (!turnstileOK) {
-    throw new HTTPException(403, { message: "turnstile_failed" });
+    if (!params.skipTurnstile) {
+    const turnstileOK = await verifyTurnstileToken(
+      env, 
+      params.turnstileToken, 
+      params.ip
+    );
+    if (!turnstileOK) {
+      throw new HTTPException(403, { message: "turnstile_failed" });
+    }
   }
 
   // ---- Выбор канала доставки: email | sms | telegram ----
@@ -81,6 +88,7 @@ export async function startOmniFlow(
     token,
     template,
     code,
+    origin: payload?.origin
   });
 
   // ---- Ответ UI ----
