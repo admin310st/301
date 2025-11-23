@@ -38,7 +38,8 @@ export async function sendEmailOutgoing(
   }
 
   // Получаем шаблон письма
-  const template = getEmailTemplate(data.template, data.token, env);
+  const origin = data.origin;
+  const template = getEmailTemplate(data.template, data.token, env, "ru", origin);
 
   // Формируем payload для MailerSend API
   const payload = {

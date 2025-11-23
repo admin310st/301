@@ -4,6 +4,8 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { startOmniFlow } from "../lib/start";
 import { hashPassword, validatePasswordStrength } from "../lib/password";
+import { verifyTurnstileToken } from "../lib/turnstile";
+import { registerGuard } from "../lib/ratelimit";
 
 const app = new Hono();
 
@@ -26,24 +28,60 @@ app.post("/", async (c) => {
   const password = body.password?.trim();
   const turnstile_token = body.turnstile_token;
 
-  // Валидация email
+  // ========================================
+  // 1. БАЗОВАЯ ВАЛИДАЦИЯ (дешевые проверки)
+  // ========================================
+
   if (!email) {
     throw new HTTPException(400, { message: "email_required" });
   }
 
-  // Валидация пароля
   if (!password) {
     throw new HTTPException(400, { message: "password_required" });
   }
 
-  // Проверка сложности пароля
+  // ========================================
+  // 2. IP + UA (нужны для следующих шагов)
+  // ========================================
+
+  const ip =
+    c.req.header("CF-Connecting-IP") ||
+    c.req.header("x-real-ip") ||
+    "0.0.0.0";
+
+  const ua = c.req.header("User-Agent") || "unknown";
+
+  // ========================================
+  // 3. ✅ TURNSTILE — ПЕРВАЯ ЛИНИЯ ЗАЩИТЫ!
+  // ========================================
+
+  const turnstileValid = await verifyTurnstileToken(env, turnstile_token, ip);
+  if (!turnstileValid) {
+    throw new HTTPException(403, { message: "turnstile_failed" });
+  }
+
+  // ========================================
+  // 4. ✅ RATE LIMITING — ВТОРАЯ ЛИНИЯ ЗАЩИТЫ
+  // ========================================
+
+  const rateBlock = await registerGuard(c, email);
+  if (rateBlock) {
+    return rateBlock; // 429 Too Many Requests
+  }
+
+  // ========================================
+  // 5. ПРОВЕРКА СЛОЖНОСТИ ПАРОЛЯ
+  // ========================================
+
   const validationError = validatePasswordStrength(password);
   if (validationError) {
     throw new HTTPException(400, validationError as any);
   }
 
-  // Ранняя проверка: существует ли user + owner аккаунт
-  // Экономит отправку email если пользователь уже зарегистрирован
+  // ========================================
+  // 6. ПРОВЕРКА СУЩЕСТВУЮЩЕГО ПОЛЬЗОВАТЕЛЯ
+  // ========================================
+
   const existingOwner = await env.DB301
     .prepare(`
       SELECT u.id FROM users u
@@ -57,45 +95,49 @@ app.post("/", async (c) => {
     throw new HTTPException(409, { message: "user_already_registered" });
   }
 
-  // Хэшируем пароль
+  // ========================================
+  // 7. ХЭШИРОВАНИЕ ПАРОЛЯ (дорогая операция)
+  // ========================================
+
   const password_hash = await hashPassword(password);
 
-  // IP + UA
-  const ip =
-    c.req.header("CF-Connecting-IP") ||
-    c.req.header("x-real-ip") ||
-    "0.0.0.0";
+  // ========================================
+  // 8. ОПРЕДЕЛЕНИЕ ORIGIN
+  // ========================================
 
-  const ua = c.req.header("User-Agent") || "unknown";
-
-  // Определяем origin из Referer или Origin header
   const referer = c.req.header("Referer") || c.req.header("Origin");
-  let origin = "https://301.st"; // fallback на production
+  let origin = "https://301.st"; // fallback
 
   if (referer) {
     try {
       const url = new URL(referer);
-      origin = url.origin; // https://dev.301.st или https://301.st
+      origin = url.origin;
     } catch (err) {
-      // Невалидный referer - используем fallback
       console.warn("[register] Invalid Referer/Origin header:", referer);
     }
   }
 
-  //  origin в payload
+  // ========================================
+  // 9. OMNIFLOW (БЕЗ ПОВТОРНОЙ ПРОВЕРКИ TURNSTILE!)
+  // ========================================
+
   const result = await startOmniFlow(env, {
     identifier: email,
     mode: "register",
     payload: { 
       password_hash,
-      origin // Сохраняем origin для использования в email ссылке
+      origin
     },
     ip,
     ua,
-    turnstileToken: turnstile_token,
+    turnstileToken: turnstile_token, // Передаём, но внутри будет dev bypass
+    skipTurnstile: true, // ✅ Новый флаг - пропустить проверку внутри
   });
 
-  // Результат
+  // ========================================
+  // 10. РЕЗУЛЬТАТ
+  // ========================================
+
   return c.json({
     status: result.status,
     token: result.token,

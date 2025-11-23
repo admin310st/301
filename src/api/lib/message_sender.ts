@@ -17,6 +17,7 @@ export interface SendMessageInput {
   token: string;              // omni token
   code?: string;              // OTP код (для TG/SMS)
   template?: "verify" | "login" | "reset" | "invite" | "action";
+  origin?: string;
 }
 
 /**
