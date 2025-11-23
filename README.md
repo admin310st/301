@@ -82,7 +82,7 @@ npm install -g wrangler
 cd ~/git/301
 ```
 
-Создай каталог воркера:
+Создаем каталог воркера:
 
 ```bash
 mkdir -p src/api
@@ -93,13 +93,13 @@ cd src/api
 
 ##  2. Установка зависимостей
 
-Создай локальный `package.json`:
+Создаем локальный `package.json`:
 
 ```bash
 npm init -y
 ```
 
-Установи зависимости, совместимые с Cloudflare Workers:
+Установливаем зависимости, совместимые с Cloudflare Workers:
 
 ```bash
 npm install hono zod bcrypt-ts jose
@@ -116,7 +116,7 @@ npm install hono zod bcrypt-ts jose
 
 ##  3. Настройка `wrangler.toml`
 
-Создай файл `src/api/wrangler.toml`:
+Создаем файл `src/api/wrangler.toml`:
 
 ```toml
 name = "301"
@@ -145,7 +145,7 @@ binding = "KV_SESSIONS"
 id = "********************************"
 ```
 
-> `main` должен указывать **на файл внутри текущего каталога** (`index.ts`), а не на `src/api/index.ts`.
+> `main` должен указывать **на файл внутри текущего каталога где расположен воркер**
 
 ---
 
@@ -219,43 +219,15 @@ Your Worker has access to DB301 (local) and KV_SESSIONS
 
 ### 7.2 Тестирование эндпоинтов
 
-**Регистрация:**
+** Через curl**
+
+Пример регистрации
 
 ```bash
 curl -X POST http://127.0.0.1:8787/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"test@local.dev","password":"secret123"}'
 ```
-
-**Логин:**
-
-```bash
-curl -i -X POST http://127.0.0.1:8787/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"test@local.dev","password":"secret123"}'
-```
-
-**Обновление токена:**
-
-```bash
-curl -X POST http://127.0.0.1:8787/auth/refresh \
-  -H "Cookie: refresh_id=<uuid из Set-Cookie>"
-```
-
-**Проверка пользователя:**
-
-```bash
-curl -X GET http://127.0.0.1:8787/auth/me \
-  -H "Authorization: Bearer <access_token>"
-```
-
-**Выход (Logout):**
-
-```bash
-curl -X POST http://127.0.0.1:8787/auth/logout \
-  -H "Cookie: refresh_id=<uuid>"
-```
-
 **Проверка записи в БД**
 Из папки с api/ (где находится БД .wrangler) выполнить
 ```
@@ -270,7 +242,7 @@ npx wrangler d1 execute 301-dev --local --env dev --command="SELECT * FROM users
 
 * Все воркеры должны использовать **ESM и Web API** (не Node).
 * Локальная база D1 хранится в `.wrangler/state/v3/d1/`.
-* Все тесты выполняются через `wrangler dev --env dev`.
+* Все тесты выполняются через `wrangler dev`.
 * Продакшн-деплой осуществляется через `wrangler deploy`.
 
 
