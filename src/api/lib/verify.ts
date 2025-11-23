@@ -74,27 +74,21 @@ export async function verifyOmniFlow(
   if (!user) {
     // Новый пользователь — создаём с email_verified если канал email
     // Также хэшируем пароль если передан (register flow)
-    let passwordHash: string | null = null;
-    
-    if (password) {
-      passwordHash = await hashPassword(password);
-    } else if (payload?.password) {
-      passwordHash = await hashPassword(payload.password);
-    }
+    const password_hash = session.payload?.password_hash || null;
 
     const res = await env.DB301
       .prepare(
         `INSERT INTO users (email, email_verified, password_hash, user_type, created_at, updated_at)
          VALUES (?, ?, ?, 'client', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
       )
-      .bind(identifier, isEmailChannel ? 1 : 0, passwordHash)
+      .bind(identifier, isEmailChannel ? 1 : 0, password_hash)
       .run();
 
     user = {
       id: res.meta?.last_row_id || res.lastInsertRowId,
       email: identifier,
       email_verified: isEmailChannel ? 1 : 0,
-      password_hash: passwordHash,
+      password_hash: password_hash,
       user_type: "client",
     };
   } else {

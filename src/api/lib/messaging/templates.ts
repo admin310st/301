@@ -17,13 +17,41 @@ interface EmailTemplate {
  * @param env Worker environment
  * @param lang язык (по умолчанию ru, готово к en)
  */
+
+// src/api/lib/messaging/templates.ts
+
+/**
+ * Построение verify URL с origin параметром
+ */
+function buildVerifyUrl(
+  token: string,
+  type: string | undefined,
+  env: Env,
+  origin?: string // Добавили параметр origin
+): string {
+  const base = env.OAUTH_REDIRECT_BASE || "https://api.301.st";
+  
+  // Добавляем origin в query параметры
+  const originParam = origin ? `&origin=${encodeURIComponent(origin)}` : '';
+
+  if (type === "reset") {
+    return `${base}/auth/verify?type=reset&token=${token}${originParam}`;
+  }
+
+  return `${base}/auth/verify?token=${token}${originParam}`;
+}
+
+/**
+ * Получить email шаблон
+ */
 export function getEmailTemplate(
   type: string | undefined,
   token: string,
   env: Env,
-  lang: string = "ru"
+  lang: string = "ru",
+  origin?: string // ✅ Добавили параметр origin
 ): EmailTemplate {
-  const verifyUrl = buildVerifyUrl(token, type, env);
+  const verifyUrl = buildVerifyUrl(token, type, env, origin); // Передаём origin
 
   switch (type) {
     case "reset":
@@ -31,27 +59,6 @@ export function getEmailTemplate(
         subject: "Восстановление пароля — 301.st",
         text: `Для восстановления пароля перейдите по ссылке:\n${verifyUrl}\n\nЕсли вы не запрашивали восстановление пароля, проигнорируйте это письмо.\n\n301.st`,
         html: getResetPasswordHTML(verifyUrl),
-      };
-
-    case "login":
-      return {
-        subject: "Подтверждение входа — 301.st",
-        text: `Для входа нажмите ссылку:\n${verifyUrl}\n\n301.st`,
-        html: getLoginHTML(verifyUrl),
-      };
-
-    case "invite":
-      return {
-        subject: "Приглашение в 301.st",
-        text: `Вас пригласили в аккаунт 301.st:\n${verifyUrl}\n\n301.st`,
-        html: getInviteHTML(verifyUrl),
-      };
-
-    case "action":
-      return {
-        subject: "Подтверждение действия — 301.st",
-        text: `Подтвердите действие:\n${verifyUrl}\n\n301.st`,
-        html: getActionHTML(verifyUrl),
       };
 
     case "verify":
