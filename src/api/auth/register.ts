@@ -29,19 +29,7 @@ app.post("/", async (c) => {
   const turnstile_token = body.turnstile_token;
 
   // ========================================
-  // 1. БАЗОВАЯ ВАЛИДАЦИЯ (дешевые проверки)
-  // ========================================
-
-  if (!email) {
-    throw new HTTPException(400, { message: "email_required" });
-  }
-
-  if (!password) {
-    throw new HTTPException(400, { message: "password_required" });
-  }
-
-  // ========================================
-  // 2. IP + UA (нужны для следующих шагов)
+  // 1. IP + UA (нужны для следующих шагов)
   // ========================================
 
   const ip =
@@ -52,12 +40,24 @@ app.post("/", async (c) => {
   const ua = c.req.header("User-Agent") || "unknown";
 
   // ========================================
-  // 3. ✅ TURNSTILE — ПЕРВАЯ ЛИНИЯ ЗАЩИТЫ!
+  // 2. ✅ TURNSTILE — ПЕРВАЯ ЛИНИЯ ЗАЩИТЫ!
   // ========================================
 
   const turnstileValid = await verifyTurnstileToken(env, turnstile_token, ip);
   if (!turnstileValid) {
     throw new HTTPException(403, { message: "turnstile_failed" });
+  }
+
+  // ========================================
+  // 3. БАЗОВАЯ ВАЛИДАЦИЯ (дешевые проверки)
+  // ========================================
+
+  if (!email) {
+    throw new HTTPException(400, { message: "email_required" });
+  }
+
+  if (!password) {
+    throw new HTTPException(400, { message: "password_required" });
   }
 
   // ========================================

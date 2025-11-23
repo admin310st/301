@@ -38,10 +38,7 @@ app.post("/", async (c) => {
     throw new HTTPException(400, { message: "turnstile_failed" });
   }
 
-  // 2. Rate-limit (IP)
-  await checkRateLimit(env, `auth:reset:ip:${ip}`, { max: 20, windowSec: 60 });
-
-  // 3. Body
+  // 2. Body
   const body = await c.req.json().catch(() => null);
 
   if (!body || typeof body !== "object") {
@@ -58,6 +55,9 @@ app.post("/", async (c) => {
   if (!["email", "tg", "phone"].includes(type)) {
     throw new HTTPException(400, { message: "invalid_type" });
   }
+
+  // 3. Rate-limit (IP)
+  await checkRateLimit(env, `auth:reset:ip:${ip}`, { max: 20, windowSec: 60 });
 
   // 4. Rate-limit (identifier)
   await checkRateLimit(env, `auth:reset:id:${type}:${value}`, { max: 5, windowSec: 600 });
