@@ -71,23 +71,6 @@ export function getEmailTemplate(
   }
 }
 
-/**
- * Построение verify URL
- */
-function buildVerifyUrl(
-  token: string,
-  type: string | undefined,
-  env: Env
-): string {
-  const base = env.OAUTH_REDIRECT_BASE || "https://api.301.st";
-
-  if (type === "reset") {
-    return `${base}/auth/verify?type=reset&token=${token}`;
-  }
-
-  return `${base}/auth/verify?token=${token}`;
-}
-
 // ============================================
 // HTML Templates
 // ============================================
