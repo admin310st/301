@@ -545,6 +545,76 @@ Telegram WebApp передаёт `initData`, подписанное Telegram. AP
 4. UI сохраняет `access_token` **только в памяти** (не localStorage!).
 5. UI выполняет redirect в личный кабинет.
 
+Refresh-cookie не передаётся между доменами
+Он остаётся host-only только на api.301.st, как и должно быть.
+
+Если для входа и кабинета используются разные домены, то
+можно безопасно передавать Access-token (короткий -15 мин) через query / fragment / postMessage.
+Для максимальной безопасности лучше передавать в #fragment, чтобы браузер не логировал URL
+
+```
+https://app.301.st/#token=<jwt>
+```
+
+app.301.st сам возьмёт refresh-cookie при запросе:
+```
+POST https://api.301.st/auth/refresh
+credentials: 'include'
+```
+Браузер сам отправит refresh_id → app получит новый access_token → работа продолжается без повторного логина.
+После считывания — удалить токен из URL
+
+```
+<script type="module">
+const API_ROOT = 'https://api.301.st/auth';
+
+let currentToken = '';
+let hasSession = false;
+
+const setWSVar = (name, value) => {
+  try {
+    if (typeof window.webstudioSetVariable === "function") {
+      window.webstudioSetVariable(name, value);
+    }
+  } catch {}
+};
+
+function setToken(t = '') {
+  currentToken = t;
+  setWSVar('authBearer', t ? `Bearer ${t}` : '');
+  window.dispatchEvent(new CustomEvent('auth:token', { detail: { token: t }}));
+}
+
+async function handleOAuthSuccessPage() {
+  const url = new URL(location.href);
+  const token = url.searchParams.get('token');
+
+  if (!token) {
+    document.body.innerHTML = `
+      <div class="box">
+        <h2>OAuth Error</h2>
+        <p>No token provided.</p>
+        <p><a href="/">Back</a></p>
+      </div>`;
+    return;
+  }
+
+  // сохраняем токен в память
+  hasSession = true;
+  setToken(token);
+
+  // удаляем токен из URL
+  history.replaceState(null, '', location.pathname);
+
+  // редирект в приложение SaaS
+  location.href = 'https://app.301.st';
+}
+
+handleOAuthSuccessPage();
+</script>
+
+```
+
 ---
 
 # 4. OmniFlow (Verify)
