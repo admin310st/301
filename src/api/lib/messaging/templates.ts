@@ -11,47 +11,45 @@ interface EmailTemplate {
 }
 
 /**
- * Получить email шаблон
- * @param type тип письма (verify, reset, login, invite, action)
- * @param token omni token для verify URL
- * @param env Worker environment
- * @param lang язык (по умолчанию ru, готово к en)
- */
-
-// src/api/lib/messaging/templates.ts
-
-/**
- * Построение verify URL с origin параметром
+ * Построение verify URL
+ * 
+ * Логика:
+ * 1. Если передан origin (откуда пришёл пользователь) — используем его как base
+ * 2. Иначе fallback на https://301.st
+ * 
+ * Ссылка ведёт на ФРОНТЕНД (dev.301.st, app.301.st), не на API!
  */
 function buildVerifyUrl(
   token: string,
   type: string | undefined,
-  env: Env,
-  origin?: string // Добавили параметр origin
+  origin?: string
 ): string {
-  const base = env.OAUTH_REDIRECT_BASE || "https://api.301.st";
-  
-  // Добавляем origin в query параметры
-  const originParam = origin ? `&origin=${encodeURIComponent(origin)}` : '';
+  // Origin = base URL фронтенда
+  const base = origin || "https://301.st";
 
   if (type === "reset") {
-    return `${base}/auth/verify?type=reset&token=${token}${originParam}`;
+    return `${base}/auth/verify?type=reset&token=${token}`;
   }
 
-  return `${base}/auth/verify?token=${token}${originParam}`;
+  return `${base}/auth/verify?token=${token}`;
 }
 
 /**
  * Получить email шаблон
+ * @param type тип письма (verify, reset, login, invite, action)
+ * @param token omni token для verify URL
+ * @param env Worker environment (не используется для URL, оставлен для совместимости)
+ * @param lang язык (по умолчанию ru, готово к en)
+ * @param origin домен фронтенда откуда пришёл запрос
  */
 export function getEmailTemplate(
   type: string | undefined,
   token: string,
   env: Env,
   lang: string = "ru",
-  origin?: string // ✅ Добавили параметр origin
+  origin?: string
 ): EmailTemplate {
-  const verifyUrl = buildVerifyUrl(token, type, env, origin); // Передаём origin
+  const verifyUrl = buildVerifyUrl(token, type, origin);
 
   switch (type) {
     case "reset":
@@ -367,3 +365,4 @@ function getActionHTML(url: string): string {
 </html>
   `;
 }
+

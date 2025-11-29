@@ -2,7 +2,7 @@
 
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { verifyTurnstile } from "../lib/turnstile";
+import { verifyTurnstileToken } from "../lib/turnstile";
 import { logEvent } from "../lib/logger";
 import { checkRateLimit } from "../lib/ratelimit";
 import { createOmniToken } from "../lib/omni_tokens";
@@ -23,6 +23,8 @@ const app = new Hono();
 app.post("/", async (c) => {
   const env = c.env;
 
+  // 1. IP + UA
+
   const ip =
     c.req.header("CF-Connecting-IP") ||
     c.req.header("x-real-ip") ||
@@ -30,20 +32,43 @@ app.post("/", async (c) => {
 
   const ua = c.req.header("User-Agent") || "unknown";
 
-  const isDev =
-    env.ENV_MODE === "dev" || env.WORKERS_ENV === "dev";
+  const isDev = env.ENV_MODE === "dev" || env.WORKERS_ENV === "dev";
 
-  // 1. Turnstile (prod only)
-  if (!(await verifyTurnstile(c, env))) {
-    throw new HTTPException(400, { message: "turnstile_failed" });
+  // 2. ОПРЕДЕЛЕНИЕ ORIGIN (откуда пришёл запрос)
+
+  const referer = c.req.header("Referer") || c.req.header("Origin");
+  let origin = "https://301.st";
+
+  if (referer) {
+    try {
+      const url = new URL(referer);
+      origin = url.origin;
+    } catch {
+      console.warn("[reset_password] Invalid Referer/Origin:", referer);
+    }
   }
 
-  // 2. Body
-  const body = await c.req.json().catch(() => null);
+  // 3. Парсим body ОДИН раз
+
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    throw new HTTPException(400, { message: "invalid_json" });
+  }
 
   if (!body || typeof body !== "object") {
     throw new HTTPException(400, { message: "invalid_body" });
   }
+
+  // 4. ✅ TURNSTILE — ПЕРВАЯ ЛИНИЯ ЗАЩИТЫ
+
+  const turnstileValid = await verifyTurnstileToken(env, body.turnstile_token, ip);
+  if (!turnstileValid) {
+    throw new HTTPException(403, { message: "turnstile_failed" });
+  }
+
+  // 5. БАЗОВАЯ ВАЛИДАЦИЯ
 
   const type = body.type;
   const value = String(body.value || "").trim().toLowerCase();
@@ -56,13 +81,13 @@ app.post("/", async (c) => {
     throw new HTTPException(400, { message: "invalid_type" });
   }
 
-  // 3. Rate-limit (IP)
-  await checkRateLimit(env, `auth:reset:ip:${ip}`, { max: 20, windowSec: 60 });
+  // 6. RATE LIMITING — ВТОРАЯ ЛИНИЯ ЗАЩИТЫ
 
-  // 4. Rate-limit (identifier)
+  await checkRateLimit(env, `auth:reset:ip:${ip}`, { max: 20, windowSec: 60 });
   await checkRateLimit(env, `auth:reset:id:${type}:${value}`, { max: 5, windowSec: 600 });
 
-  // 5. Find user
+  // 7. ПОИСК ПОЛЬЗОВАТЕЛЯ
+
   let user: {
     id: number;
     email: string;
@@ -99,9 +124,9 @@ app.post("/", async (c) => {
     return c.json({ status: "ok" });
   }
 
-  // 6. OAuth-only пользователь: пароля нет, вход через провайдера
+  // 8. OAuth-only ПОЛЬЗОВАТЕЛЬ
+
   if (user.oauth_provider && !user.password_hash) {
-    // Форматируем название провайдера для UI
     const providerNames: Record<string, string> = {
       google: "Google",
       github: "GitHub",
@@ -111,7 +136,6 @@ app.post("/", async (c) => {
 
     const providerDisplay = providerNames[user.oauth_provider] || user.oauth_provider;
 
-    // Логируем попытку reset для OAuth-only
     try {
       await logEvent(env, {
         event_type: "update",
@@ -129,7 +153,6 @@ app.post("/", async (c) => {
       console.error("[AUDIT ERROR]", e);
     }
 
-    // Возвращаем информативный ответ
     return c.json({
       status: "oauth_only",
       provider: user.oauth_provider,
@@ -137,14 +160,16 @@ app.post("/", async (c) => {
     });
   }
 
-  // 7. Проверка email_verified (только в prod)
+  // 9. ПРОВЕРКА email_verified (prod only)
+
   if (type === "email" && !isDev) {
     if (!user.email_verified) {
       throw new HTTPException(400, { message: "email_not_verified" });
     }
   }
 
-  // 8. Создаём OmniToken для reset с CSRF в payload
+  // 10. СОЗДАНИЕ OmniToken с CSRF
+
   const csrfToken = crypto.randomUUID();
 
   const omniResult = await createOmniToken(env, {
@@ -153,22 +178,25 @@ app.post("/", async (c) => {
     channel: type,
     payload: { csrf_token: csrfToken },
     otp: type !== "email",
-    ttl: 900, // 15 минут
+    ttl: 900,
   });
 
   const token = omniResult.token;
-  const code = omniResult.code; // OTP для tg/sms
+  const code = omniResult.code;
 
-  // 9. Отправка email/TG/SMS через универсальный sender
+  // 11. ОТПРАВКА СООБЩЕНИЯ (с origin!)
+
   await sendOmniMessage(env, {
     channel: type as "email" | "telegram" | "sms",
     identifier: value,
     token,
     code,
     template: "reset",
+    origin,
   });
 
-  // 10. Audit
+  // 12. AUDIT LOG
+
   try {
     await logEvent(env, {
       event_type: "update",
@@ -179,29 +207,26 @@ app.post("/", async (c) => {
       details: {
         action: "reset_password_request",
         channel: type,
+        origin,
       },
     });
   } catch (e) {
     console.error("[AUDIT ERROR]", e);
   }
 
-  // 11. DEV response (показываем токены для тестирования)
-  if (isDev) {
-    const resetLink =
-      type === "email"
-        ? `${env.OAUTH_REDIRECT_BASE}/auth/verify?type=reset&token=${token}`
-        : null;
+  // 13. ОТВЕТ
 
+  if (isDev) {
     return c.json({
       status: "ok",
       token,
-      code, // OTP для tg/sms
-      reset_link: resetLink,
+      code,
+      reset_link: `${origin}/auth/verify?type=reset&token=${token}`,
       csrf_token: csrfToken,
+      origin,
     });
   }
 
-  // 12. PROD response (не раскрываем детали)
   return c.json({ status: "ok" });
 });
 
