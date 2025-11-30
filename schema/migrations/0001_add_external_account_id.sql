@@ -3,6 +3,7 @@
 --              для хранения ID аккаунта у внешнего провайдера
 -- Date: 2025-11-30
 
+
 -- Применение:
 --   npx wrangler d1 execute DB301 --remote --file schema/migrations/001_add_external_account_id.sql
 
