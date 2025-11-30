@@ -1,15 +1,13 @@
-name: Deploy D1 Schema
+name: Deploy D1 Migrations
 
 on:
   push:
     branches: [ main ]
     paths:
-      - 'schema/301_d1.sql'
-      - '.github/workflows/deploy_d1.yml'
+      - 'schema/migrations/*.sql'    # запускать только на миграции!
 
 jobs:
-  apply-d1-schema:
-    name: Apply Cloudflare D1 schema
+  apply-d1-migrations:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,11 +17,13 @@ jobs:
       - name: Install Wrangler
         run: npm install -g wrangler
 
-      - name: Apply D1 schema to Cloudflare
+      - name: Apply D1 migrations (remote)
+        working-directory: ./src/api
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: |
-          echo "Applying D1 schema to Cloudflare..."
-          wrangler d1 execute 301 --file=schema/301_d1.sql --remote
-          echo "Schema applied successfully."
+          echo "Running D1 migrations from ./schema/migrations ..."
+          wrangler d1 migrations apply 301 --remote
+          echo "Migrations complete."
+
