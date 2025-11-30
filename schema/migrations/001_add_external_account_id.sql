@@ -5,7 +5,7 @@
 -- 
 -- Применение:
 --   npx wrangler d1 execute DB301 --remote --file schema/migrations/001_add_external_account_id.sql
---
+
 -- Откат:
 --   SQLite не поддерживает DROP COLUMN напрямую
 --   Требуется пересоздание таблицы (см. rollback в конце файла)
