@@ -28,7 +28,11 @@ jobs:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
 
         run: |
-          echo "Running D1 migrations (binding: DB301)..."
-          wrangler d1 migrations apply DB301 --remote
-          echo "Migrations OK."
+          echo "PWD: $(pwd)"
+          echo "--- wrangler.toml ---"
+          head -20 wrangler.toml
+          echo "--- migrations dir ---"
+          ls -la ../../schema/migrations/ || echo "NOT FOUND"
+          echo "--- running migrations ---"
+          wrangler d1 migrations apply DB301 --remote    
 
