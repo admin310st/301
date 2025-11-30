@@ -23,4 +23,3 @@ ALTER TABLE account_keys ADD COLUMN external_account_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_account_keys_provider_external 
 ON account_keys(provider, external_account_id);
 
-
