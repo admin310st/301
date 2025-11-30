@@ -20,7 +20,7 @@ jobs:
       - name: Apply SQL migrations (no wrangler.toml)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
         run: |
           set -e
           DB_NAME="301"
