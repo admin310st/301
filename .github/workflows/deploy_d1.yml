@@ -4,35 +4,29 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'schema/migrations/*.sql'   # Запускать ТОЛЬКО при изменении миграций
+      - 'schema/migrations/*.sql'
 
 jobs:
   apply-d1-migrations:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository into ./repo
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          path: repo
 
       - name: Install Wrangler
         run: npm install -g wrangler
 
-      - name: Apply D1 migrations (remote)
-        # Указываем ПОЛНЫЙ путь к wrangler.toml — иначе GHA не видит D1 binding
-        working-directory: ./repo/src/api
-
+      - name: Apply SQL migrations (no wrangler.toml required)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-
+          CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
+          D1_DATABASE_ID:       ${{ secrets.D1_DATABASE_ID }}
         run: |
-          echo "PWD: $(pwd)"
-          echo "--- wrangler.toml ---"
-          head -20 wrangler.toml
-          echo "--- migrations dir ---"
-          ls -la ../../schema/migrations/ || echo "NOT FOUND"
-          echo "--- running migrations ---"
-          wrangler d1 migrations apply DB301 --remote    
+          echo "Applying SQL migrations..."
+          for f in schema/migrations/*.sql; do
+            echo "--- $f"
+            wrangler d1 execute $D1_DATABASE_ID --remote --file="$f"
+          done
+          echo "Done."
 
