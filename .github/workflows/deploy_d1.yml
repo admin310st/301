@@ -17,16 +17,18 @@ jobs:
       - name: Install Wrangler
         run: npm install -g wrangler
 
-      - name: Apply SQL migrations (no wrangler.toml required)
+      - name: Apply SQL migrations (no wrangler.toml)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
-          D1_DATABASE_ID:       ${{ secrets.D1_DATABASE_ID }}
         run: |
-          echo "Applying SQL migrations..."
+          set -e
+          DB_NAME="301"
+
+          echo "Applying SQL migrations to D1 DB '$DB_NAME'..."
           for f in schema/migrations/*.sql; do
             echo "--- $f"
-            wrangler d1 execute $D1_DATABASE_ID --remote --file="$f"
+            wrangler d1 execute "$DB_NAME" --remote --file="$f"
           done
           echo "Done."
 
