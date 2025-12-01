@@ -252,6 +252,7 @@ CREATE TABLE IF NOT EXISTS account_keys (
     expires_at TIMESTAMP,
     last_used TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    external_account_id TEXT,
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
 
@@ -268,6 +269,7 @@ COMMENT ON COLUMN account_keys.status IS 'Статус ключа (active, revok
 COMMENT ON COLUMN account_keys.expires_at IS 'Срок действия ключа.';
 COMMENT ON COLUMN account_keys.last_used IS 'Дата последнего использования ключа.';
 COMMENT ON COLUMN account_keys.created_at IS 'Дата добавления ключа.';
+COMMENT ON COLUMN account_keys.external_account_id TEXT IS 'Внешний id.';
 
 -- ======================================================
 -- III. PROJECTS
