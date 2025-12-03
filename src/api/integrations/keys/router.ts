@@ -1,5 +1,7 @@
 // src/api/integrations/keys/router.ts
 
+//HTTP: GET/DELETE /integrations/keys
+
 import { Hono } from "hono";
 import { createKey, updateKey, deleteKey, listKeys, getKey } from "../../integrations";
 
