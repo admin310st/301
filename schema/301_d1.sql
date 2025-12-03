@@ -154,6 +154,7 @@ CREATE TABLE IF NOT EXISTS account_keys (
     expires_at TEXT,
     last_used TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    external_account_id TEXT,
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_account_keys_account_id ON account_keys(account_id);
