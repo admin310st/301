@@ -7,12 +7,15 @@ export * from "./providers/registry";
 // Keys: хранение шифрованных API-ключей
 export * from "./keys/storage";
 
-// Cloudflare 
+// Cloudflare
 export { handleInitKeyCF } from "./providers/cloudflare/initkey";
 export * from "./providers/cloudflare/permissions";
 
+// Namecheap
+export { handleInitKeyNamecheap } from "./providers/namecheap/initkey";
+
 // Адаптеры (по необходимости)
-export * as Namecheap from "./providers/namecheap";
+export * as Namecheap from "./providers/namecheap/namecheap";
 export * as Namesilo from "./providers/namesilo";
 export * as Hosttracker from "./providers/hosttracker";
 export * as GoogleAnalytics from "./providers/google_analytics";

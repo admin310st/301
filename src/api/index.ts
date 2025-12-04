@@ -13,6 +13,8 @@ import googleStart from "./auth/oauth/google/start";
 import googleCallback from "./auth/oauth/google/callback";
 import githubStart from "./auth/oauth/github/start";
 import githubCallback from "./auth/oauth/github/callback";
+import { handleInitKeyCF } from "./integrations/providers/cloudflare/initkey";
+import { handleInitKeyNamecheap } from "./integrations/providers/namecheap/initkey";
 
 
 const app = new Hono<{ Bindings: Env }>();
@@ -33,7 +35,9 @@ app.route("/auth/oauth/google/callback", googleCallback);
 app.route("/auth/oauth/github/start", githubStart);
 app.route("/auth/oauth/github/callback", githubCallback);
 
-// --- Key endpoint ---
+// --- Integrations ---
 app.route("/integrations/keys", keysRouter);
+app.post("/integrations/cloudflare/init", handleInitKeyCF);
+app.post("/integrations/namecheap/init", handleInitKeyNamecheap);
 
 export default app;
