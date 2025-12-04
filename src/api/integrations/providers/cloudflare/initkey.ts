@@ -1,13 +1,12 @@
 // src/api/integrations/providers/cloudflare/initkey.ts
 
 import { Context } from "hono";
-import { Env } from "../../../../types";
+import { Env } from "../../../types/worker";
 import { createKey } from "../../keys/storage";
 import { CF_REQUIRED_PERMISSIONS } from "./permissions";
+import { requireAuth } from "../../../lib/auth";
 
-// ============================================================
 // TYPES
-// ============================================================
 
 interface InitKeyRequest {
   cf_account_id: string;
@@ -38,9 +37,7 @@ interface CreatedToken {
   value: string;
 }
 
-// ============================================================
 // CF API HELPERS
-// ============================================================
 
 const CF_API_BASE = "https://api.cloudflare.com/client/v4";
 
@@ -272,9 +269,7 @@ async function deleteCFToken(
   }
 }
 
-// ============================================================
 // MAIN HANDLER
-// ============================================================
 
 /**
  * POST /integrations/initkey/cf
@@ -283,9 +278,16 @@ async function deleteCFToken(
  */
 export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   const env = c.env;
-  const accountId = c.get("accountId") as number;
 
-  // 1. Парсим request
+  // 1. Auth — проверяем JWT и получаем account_id
+  const auth = await requireAuth(c, env);
+  if (!auth) {
+    return c.json({ ok: false, error: "unauthorized" }, 401);
+  }
+
+  const { account_id: accountId } = auth;
+
+  // 2. Парсим request
   let body: InitKeyRequest;
   try {
     body = await c.req.json();
@@ -303,7 +305,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
     }, 400);
   }
 
-  // 2. Verify bootstrap → получаем token_id
+  // 3. Verify bootstrap → получаем token_id
   const bootstrapVerify = await verifyToken(cf_account_id, bootstrap_token);
 
   if (!bootstrapVerify.ok) {
@@ -324,7 +326,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
 
   const bootstrapTokenId = bootstrapVerify.tokenId;
 
-  // 3. GET permission_groups → полный список (200+)
+  // 4. GET permission_groups → полный список (200+)
   const permGroupsResult = await getPermissionGroups(cf_account_id, bootstrap_token);
 
   if (!permGroupsResult.ok) {
@@ -335,7 +337,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
     }, 400);
   }
 
-  // 4. Сверяем нужные permissions по name
+  // 5. Сверяем нужные permissions по name
   const resolveResult = resolvePermissions(permGroupsResult.groups);
 
   if (!resolveResult.ok) {
@@ -346,7 +348,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
     }, 400);
   }
 
-  // 5. Генерируем имя и даты для working token
+  // 6. Генерируем имя и даты для working token
   const now = new Date();
   const tokenName = key_alias || 
     `301st-${now.toISOString().slice(0, 10).replace(/-/g, "")}-${now.toISOString().slice(11, 19).replace(/:/g, "")}`;
@@ -357,7 +359,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   expiresAt.setFullYear(expiresAt.getFullYear() + 5);
   const expiresOn = expiresAt.toISOString();
 
-  // 6. Формируем payload и создаём working token
+  // 7. Формируем payload и создаём working token
   const payload = buildCreateTokenPayload(
     cf_account_id,
     tokenName,
@@ -378,7 +380,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
 
   const workingToken = createResult.token;
 
-  // 7. Verify working token
+  // 8. Verify working token
   const workingVerify = await verifyToken(cf_account_id, workingToken.value);
 
   if (!workingVerify.ok) {
@@ -391,7 +393,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
     }, 500);
   }
 
-  // 8. Сохраняем working token в storage
+  // 9. Сохраняем working token в storage
   const storageResult = await createKey(env, {
     account_id: accountId,
     provider: "cloudflare",
@@ -417,7 +419,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
     }, 500);
   }
 
-  // 9. Удаляем bootstrap token (используем сам bootstrap для удаления)
+  // 10. Удаляем bootstrap token (используем сам bootstrap для удаления)
   const deleteResult = await deleteCFToken(cf_account_id, bootstrapTokenId, bootstrap_token);
 
   if (!deleteResult.ok) {
@@ -425,7 +427,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
     console.error(`Failed to delete bootstrap token: ${deleteResult.error}`);
   }
 
-  // 10. Успех
+  // 11. Успех
   return c.json({
     ok: true,
     key_id: storageResult.key_id,
