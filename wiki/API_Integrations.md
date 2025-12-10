@@ -1,0 +1,385 @@
+# API — Интеграции
+
+## Базовый URL
+
+```
+https://api.301.st/integrations
+```
+
+---
+
+## 1. Обзор
+
+API интеграций отвечает за:
+- Безопасное хранение API-ключей внешних сервисов
+- Инициализацию подключений к провайдерам
+- CRUD операции с ключами
+
+### Поддерживаемые провайдеры
+
+| Provider | ID | Описание | Статус |
+|----------|-----|----------|--------|
+| Cloudflare | `cloudflare` | DNS, Workers, KV, Redirects | ✅ Реализован |
+| Namecheap | `namecheap` | Регистратор доменов | ✅ Реализован |
+| Namesilo | `namesilo` | Регистратор доменов | 🔜 Planned |
+| HostTracker | `hosttracker` | Мониторинг доступности | 🔜 Planned |
+| Google Analytics | `google_analytics` | Аналитика | 🔜 Planned |
+| Yandex Metrica | `yandex_metrica` | Аналитика | 🔜 Planned |
+
+### Архитектура хранения
+
+```mermaid
+flowchart TB
+    subgraph Storage["Архитектура хранения ключей"]
+        direction LR
+        D1[(D1<br/>account_keys<br/>- id, provider<br/> - kv_key, status<br/> - cexpires_at)]
+        KV[(KV_CREDENTIALS<br/>- encrypted JSON<br/>- AES-GCM-256)]
+        D1 -->|"kv_key"| KV
+    end
+    
+    API[API Worker] --> Storage
+```
+
+> **Безопасность:** Все secrets шифруются AES-GCM-256 перед сохранением в KV. См. [Security.md](Security.md#5-хранение-секретов).
+
+---
+
+## 2. Cloudflare Integration
+
+### 2.1 POST /integrations/cloudflare/init
+
+Инициализация интеграции с Cloudflare. Использует **bootstrap → working token** flow.
+
+**Требует:** `Authorization: Bearer <access_token>`
+
+**Параметры запроса:**
+
+| Поле | Тип | Обязательно | Описание |
+|------|-----|-------------|----------|
+| `cf_account_id` | string | да | ID аккаунта Cloudflare |
+| `bootstrap_token` | string | да | Временный токен с правами создания токенов |
+| `key_alias` | string | нет | Название для UI (по умолчанию: `301st-YYYYMMDD-HHMMSS`) |
+
+**Пример запроса:**
+
+```bash
+curl -X POST https://api.301.st/integrations/cloudflare/init \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cf_account_id": "abc123def456",
+    "bootstrap_token": "temp_token_with_create_permissions",
+    "key_alias": "Main CF Account"
+  }'
+```
+
+**Успешный ответ:**
+
+```json
+{
+  "ok": true,
+  "key_id": 42
+}
+```
+
+**Flow:**
+
+```mermaid
+sequenceDiagram
+    participant UI
+    participant API as API Worker
+    participant CF as Cloudflare API
+    participant KV as KV_CREDENTIALS
+    participant D1
+
+    UI->>API: POST /integrations/cloudflare/init
+    API->>CF: Verify bootstrap token
+    CF-->>API: OK + token_id
+    API->>CF: Get permission groups
+    CF-->>API: 200+ groups
+    API->>API: Map required permissions
+    API->>CF: Create working token
+    CF-->>API: New token + value
+    API->>CF: Verify working token
+    CF-->>API: OK
+    API->>KV: PUT encrypted(working_token)
+    API->>D1: INSERT account_keys
+    API->>CF: DELETE bootstrap token
+    API-->>UI: { ok: true, key_id }
+```
+
+**Ошибки:**
+
+| Код | HTTP | Описание |
+|-----|------|----------|
+| `cf_account_id_required` | 400 | Не передан cf_account_id |
+| `bootstrap_token_required` | 400 | Не передан bootstrap_token |
+| `bootstrap_token_invalid` | 400 | Токен невалиден или истёк |
+| `insufficient_permissions` | 403 | Bootstrap token не имеет прав на создание токенов |
+| `cf_key_already_exists` | 409 | Ключ для этого CF аккаунта уже существует |
+| `working_token_invalid` | 500 | Созданный токен не прошёл верификацию |
+| `storage_failed` | 500 | Ошибка сохранения в KV/D1 |
+
+### 2.2 Требуемые права Cloudflare
+
+Bootstrap token должен иметь право создавать токены. Working token создаётся с permissions:
+
+| Permission | Scope | Описание |
+|------------|-------|----------|
+| Zone Read | Account | Чтение списка зон |
+| Zone Settings Read | Account | Чтение настроек зон |
+| Zone Settings Write | Account | Изменение настроек |
+| DNS Read | Account | Чтение DNS записей |
+| DNS Write | Account | Создание/изменение DNS |
+| Workers Scripts Read | Account | Чтение воркеров |
+| Workers Scripts Write | Account | Деплой воркеров |
+| Workers KV Storage Read | Account | Чтение KV |
+| Workers KV Storage Write | Account | Запись в KV |
+| Workers Routes Read | Account | Чтение маршрутов |
+| Workers Routes Write | Account | Создание маршрутов |
+| Rules Read | Zone | Чтение Redirect Rules |
+| Rules Write | Zone | Создание Redirect Rules |
+
+---
+
+## 3. Namecheap Integration
+
+### 3.1 POST /integrations/namecheap/init
+
+Инициализация интеграции с Namecheap.
+
+**Требует:** `Authorization: Bearer <access_token>`
+
+**Параметры запроса:**
+
+| Поле | Тип | Обязательно | Описание |
+|------|-----|-------------|----------|
+| `username` | string | да | Namecheap username |
+| `api_key` | string | да | API Key из Namecheap Dashboard |
+| `key_alias` | string | нет | Название для UI |
+
+**Пример запроса:**
+
+```bash
+curl -X POST https://api.301.st/integrations/namecheap/init \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "myuser",
+    "api_key": "abc123secretkey",
+    "key_alias": "Personal Namecheap"
+  }'
+```
+
+**Успешный ответ:**
+
+```json
+{
+  "ok": true,
+  "key_id": 15,
+  "message": "Namecheap integration configured successfully",
+  "balance": "125.50"
+}
+```
+
+**Ошибки:**
+
+| Код | HTTP | Описание |
+|-----|------|----------|
+| `username_required` | 400 | Не передан username |
+| `api_key_required` | 400 | Не передан api_key |
+| `invalid_api_key` | 400 | Неверный API key |
+| `ip_not_whitelisted` | 400 | IP не в whitelist Namecheap |
+| `namecheap_key_already_exists` | 409 | Ключ для этого username уже существует |
+
+**Особенность — IP Whitelist:**
+
+Namecheap требует whitelist IP адресов. При ошибке `ip_not_whitelisted` API возвращает список IP для добавления:
+
+```json
+{
+  "ok": false,
+  "error": "ip_not_whitelisted",
+  "message": "Add these IPs to your Namecheap API whitelist",
+  "ips": "1.2.3.4, 5.6.7.8"
+}
+```
+
+---
+
+## 4. Keys API (CRUD)
+
+### 4.1 GET /integrations/keys
+
+Список всех ключей аккаунта.
+
+**Требует:** `Authorization: Bearer <access_token>`
+
+**Query параметры:**
+
+| Параметр | Тип | Описание |
+|----------|-----|----------|
+| `account_id` | number | ID аккаунта (из JWT) |
+| `provider` | string | Фильтр по провайдеру (опционально) |
+
+**Пример запроса:**
+
+```bash
+curl -X GET "https://api.301.st/integrations/keys?account_id=1" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Пример ответа:**
+
+```json
+{
+  "ok": true,
+  "keys": [
+    {
+      "id": 42,
+      "account_id": 1,
+      "provider": "cloudflare",
+      "key_alias": "Main CF Account",
+      "external_account_id": "abc123def456",
+      "status": "active",
+      "expires_at": "2030-01-15T12:00:00Z",
+      "last_used": "2025-01-17T10:30:00Z",
+      "created_at": "2025-01-10T08:00:00Z"
+    },
+    {
+      "id": 15,
+      "account_id": 1,
+      "provider": "namecheap",
+      "key_alias": "Personal Namecheap",
+      "external_account_id": "myuser",
+      "status": "active",
+      "expires_at": null,
+      "last_used": "2025-01-16T14:20:00Z",
+      "created_at": "2025-01-12T09:15:00Z"
+    }
+  ]
+}
+```
+
+> **Важно:** Secrets (токены, API keys) никогда не возвращаются в ответах.
+
+---
+
+### 4.2 GET /integrations/keys/:id
+
+Получить информацию о конкретном ключе.
+
+**Пример запроса:**
+
+```bash
+curl -X GET https://api.301.st/integrations/keys/42 \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Пример ответа:**
+
+```json
+{
+  "ok": true,
+  "key": {
+    "id": 42,
+    "account_id": 1,
+    "provider": "cloudflare",
+    "provider_scope": {
+      "cf_token_id": "token_abc123",
+      "cf_token_name": "301st-20250110-080000"
+    },
+    "key_alias": "Main CF Account",
+    "external_account_id": "abc123def456",
+    "status": "active",
+    "expires_at": "2030-01-15T12:00:00Z",
+    "last_used": "2025-01-17T10:30:00Z",
+    "created_at": "2025-01-10T08:00:00Z"
+  }
+}
+```
+
+---
+
+### 4.3 PATCH /integrations/keys/:id
+
+Обновить метаданные ключа.
+
+**Параметры запроса:**
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `key_alias` | string | Новое название |
+| `status` | string | Новый статус: `active`, `revoked` |
+
+**Пример запроса:**
+
+```bash
+curl -X PATCH https://api.301.st/integrations/keys/42 \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key_alias": "Production CF"
+  }'
+```
+
+**Пример ответа:**
+
+```json
+{
+  "ok": true
+}
+```
+
+---
+
+### 4.4 DELETE /integrations/keys/:id
+
+Удалить ключ полностью (KV + D1).
+
+**Пример запроса:**
+
+```bash
+curl -X DELETE https://api.301.st/integrations/keys/42 \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Пример ответа:**
+
+```json
+{
+  "ok": true
+}
+```
+
+**Что происходит:**
+1. Удаляется запись из KV_CREDENTIALS
+2. Удаляется запись из D1 account_keys
+3. Токен у провайдера НЕ удаляется (ответственность пользователя)
+
+---
+
+## 5. Статусы ключей
+
+| Статус | Описание |
+|--------|----------|
+| `active` | Ключ активен и готов к использованию |
+| `expired` | Срок действия истёк (автоматически при проверке) |
+| `revoked` | Отозван пользователем |
+
+---
+
+## 6. Таблица endpoints
+
+| Endpoint | Метод | Auth | Описание |
+|----------|-------|------|----------|
+| `/integrations/cloudflare/init` | POST | ✅ JWT | Инициализация Cloudflare |
+| `/integrations/namecheap/init` | POST | ✅ JWT | Инициализация Namecheap |
+| `/integrations/keys` | GET | ✅ JWT | Список ключей |
+| `/integrations/keys/:id` | GET | ✅ JWT | Получить ключ |
+| `/integrations/keys/:id` | PATCH | ✅ JWT | Обновить ключ |
+| `/integrations/keys/:id` | DELETE | ✅ JWT | Удалить ключ |
+
+---
+
+© 301.st — API Integrations Documentation

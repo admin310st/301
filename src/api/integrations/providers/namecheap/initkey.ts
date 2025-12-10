@@ -3,11 +3,9 @@
 import { Context } from "hono";
 import { Env } from "../../../types/worker";
 import { encrypt } from "../../../lib/crypto";
-import { requireAuth } from "../../../lib/auth";
+import { requireOwner } from "../../../lib/auth";
 
-// ============================================================
 // TYPES
-// ============================================================
 
 interface InitKeyRequest {
   username: string;
@@ -28,9 +26,7 @@ interface NamecheapResponse {
   balance?: string;
 }
 
-// ============================================================
 // PROXY HELPERS
-// ============================================================
 
 /**
  * Парсит строку прокси формата "IP:PORT:USER:PASS"
@@ -135,9 +131,7 @@ async function fetchWithProxyFallback(
   return { ok: false, error: "all_proxies_failed" };
 }
 
-// ============================================================
 // NAMECHEAP API HELPERS
-// ============================================================
 
 const NAMECHEAP_API_URL = "https://api.namecheap.com/xml.response";
 
@@ -231,9 +225,7 @@ async function verifyNamecheapKey(
   };
 }
 
-// ============================================================
 // MAIN HANDLER
-// ============================================================
 
 /**
  * POST /integrations/namecheap/init
@@ -273,9 +265,9 @@ export async function handleInitKeyNamecheap(c: Context<{ Bindings: Env }>): Pro
   }
 
   // 2. Auth — проверяем JWT и получаем account_id
-  const auth = await requireAuth(c, env);
+  const auth = await requireOwner(c, env);
   if (!auth) {
-    return c.json({ ok: false, error: "unauthorized" }, 401);
+    return c.json({ ok: false, error: "owner_required" }, 403);
   }
 
   const { account_id: accountId } = auth;

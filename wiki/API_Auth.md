@@ -1749,14 +1749,14 @@ async function handleRefresh() {
 
 ### Перед релизом
 
-- [ ] access_token хранится **только в памяти**
+**Перед релизом:**
+- [ ] access_token хранится только в памяти
 - [ ] Все запросы используют `credentials: 'include'`
-- [ ] Turnstile интегрирован на register/login/reset
-- [ ] Таймер OTP работает (60 сек блокировка)
-- [ ] CSRF токен передаётся в confirm_password
-- [ ] Обработаны все ошибки безопасности
-- [ ] При logout очищается access_token из памяти
-- [ ] Нет токенов в URL параметрах
+- [ ] Turnstile на register/login/reset
+- [ ] Таймер OTP (60 сек)
+- [ ] CSRF токен в confirm_password
+- [ ] При logout очищается access_token
+- [ ] Нет токенов в URL
 - [ ] Нет токенов в localStorage/sessionStorage
 - [ ] Console.log не выводит токены в production
 

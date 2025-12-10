@@ -4,7 +4,7 @@ import { Context } from "hono";
 import { Env } from "../../../types/worker";
 import { createKey } from "../../keys/storage";
 import { CF_REQUIRED_PERMISSIONS } from "./permissions";
-import { requireAuth } from "../../../lib/auth";
+import { requireOwner } from "../../../lib/auth";
 
 // TYPES
 
@@ -280,9 +280,9 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   const env = c.env;
 
   // 1. Auth — проверяем JWT и получаем account_id
-  const auth = await requireAuth(c, env);
+  const auth = await requireOwner(c, env);
   if (!auth) {
-    return c.json({ ok: false, error: "unauthorized" }, 401);
+    return c.json({ ok: false, error: "owner_required" }, 403);
   }
 
   const { account_id: accountId } = auth;
