@@ -27,7 +27,7 @@ export const Providers = {
     id: "cloudflare",
     name: "Cloudflare",
     description: "DNS, Workers, KV, D1, WAF, Redirects",
-    initEndpoint: "/integrations/initkey/cf",
+    initEndpoint: "/integrations/cloudflare/init",
     
     // Поля которые ШИФРУЮТСЯ и хранятся в KV_CREDENTIALS
     fields: {
@@ -64,7 +64,7 @@ export const Providers = {
     id: "namecheap",
     name: "Namecheap",
     description: "Domain registrar — список доменов, смена NS",
-    initEndpoint: "/integrations/initkey/namecheap",
+    initEndpoint: "/integrations/namecheap/init",
     
     fields: {
       apiKey: { 
@@ -99,7 +99,7 @@ export const Providers = {
     id: "namesilo",
     name: "Namesilo",
     description: "Domain registrar — список доменов, смена NS",
-    initEndpoint: "/integrations/initkey/namesilo",
+    initEndpoint: "/integrations/namesilo/init",
     
     fields: {
       apiKey: { 
@@ -129,7 +129,7 @@ export const Providers = {
     id: "hosttracker",
     name: "HostTracker",
     description: "Мониторинг доступности доменов",
-    initEndpoint: "/integrations/initkey/hosttracker",
+    initEndpoint: "/integrations/hosttracker/init",
     
     fields: {
       login: {
@@ -169,7 +169,7 @@ export const Providers = {
     id: "google_analytics",
     name: "Google Analytics",
     description: "Веб-аналитика Google",
-    initEndpoint: "/integrations/initkey/ga",
+    initEndpoint: "/integrations/ga/init",
     
     fields: {
       accessToken: { 
@@ -206,7 +206,7 @@ export const Providers = {
     id: "yandex_metrica",
     name: "Yandex Metrica",
     description: "Веб-аналитика Яндекс",
-    initEndpoint: "/integrations/initkey/ym",
+    initEndpoint: "/integrations/ym/init",
     
     fields: {
       token: { 

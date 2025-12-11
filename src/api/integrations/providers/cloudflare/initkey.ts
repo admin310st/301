@@ -184,7 +184,9 @@ function buildCreateTokenPayload(
       {
         effect: "allow",
         resources: {
-          "com.cloudflare.api.account.zone.*": "*",
+          [`com.cloudflare.api.account.${cfAccountId}`]: {
+            "com.cloudflare.api.account.zone.*": "*",
+          },
         },
         permission_groups: zonePermissions,
       },
@@ -350,14 +352,13 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
 
   // 6. Генерируем имя и даты для working token
   const now = new Date();
-  const tokenName = key_alias || 
-    `301st-${now.toISOString().slice(0, 10).replace(/-/g, "")}-${now.toISOString().slice(11, 19).replace(/:/g, "")}`;
+  const tokenName = `301st-${now.toISOString().slice(0, 10).replace(/-/g, "")}-${now.toISOString().slice(11, 19).replace(/:/g, "")}`;
   
-  const notBefore = now.toISOString();
+  const notBefore = now.toISOString().split('.')[0] + 'Z';
   
   const expiresAt = new Date();
   expiresAt.setFullYear(expiresAt.getFullYear() + 5);
-  const expiresOn = expiresAt.toISOString();
+  const expiresOn = expiresAt.toISOString().split('.')[0] + 'Z';
 
   // 7. Формируем payload и создаём working token
   const payload = buildCreateTokenPayload(
