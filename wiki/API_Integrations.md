@@ -29,15 +29,19 @@ API интеграций отвечает за:
 ### Архитектура хранения
 
 ```mermaid
-flowchart TB
-    subgraph Storage["Архитектура хранения ключей"]
-        direction LR
-        D1[(D1<br/>account_keys<br/>- id, provider<br/> - kv_key, status<br/> - cexpires_at)]
-        KV[(KV_CREDENTIALS<br/>- encrypted JSON<br/>- AES-GCM-256)]
-        D1 -->|"kv_key"| KV
+flowchart LR
+    API[API Worker] --> D1[(D1<br/>account_keys)]
+    API --> KV[(KV_CREDENTIALS)]
+    
+    D1 -- "kv_key" --> KV
+    
+    subgraph D1_data[" "]
+        D1_fields["id, provider<br/>kv_key, status<br/>expires_at"]
     end
     
-    API[API Worker] --> Storage
+    subgraph KV_data[" "]
+        KV_fields["encrypted JSON<br/>AES-GCM-256"]
+    end
 ```
 
 > **Безопасность:** Все secrets шифруются AES-GCM-256 перед сохранением в KV. См. [Security.md](Security.md#5-хранение-секретов).
@@ -71,6 +75,7 @@ curl -X POST https://api.301.st/integrations/cloudflare/init \
     "bootstrap_token": "temp_token_with_create_permissions",
     "key_alias": "Main CF Account"
   }'
+
 ```
 
 **Успешный ответ:**
@@ -112,13 +117,128 @@ sequenceDiagram
 
 | Код | HTTP | Описание |
 |-----|------|----------|
-| `cf_account_id_required` | 400 | Не передан cf_account_id |
-| `bootstrap_token_required` | 400 | Не передан bootstrap_token |
-| `bootstrap_token_invalid` | 400 | Токен невалиден или истёк |
-| `insufficient_permissions` | 403 | Bootstrap token не имеет прав на создание токенов |
+| `missing_fields` | 400 | Не переданы обязательные поля (см. `fields` в ответе) |
+| `bootstrap_invalid` | 400 | Bootstrap token невалиден |
+| `bootstrap_not_active` | 400 | Bootstrap token не активен (см. `status` в ответе) |
+| `permission_groups_failed` | 400 | Не удалось получить permission groups от CF |
+| `permissions_missing` | 400 | Bootstrap не имеет нужных прав (см. `missing` в ответе) |
 | `cf_key_already_exists` | 409 | Ключ для этого CF аккаунта уже существует |
+| `token_creation_failed` | 500 | Ошибка создания working token |
 | `working_token_invalid` | 500 | Созданный токен не прошёл верификацию |
 | `storage_failed` | 500 | Ошибка сохранения в KV/D1 |
+
+**Примеры ошибок:**
+
+```json
+// Отсутствуют поля
+{
+  "ok": false,
+  "error": "missing_fields",
+  "fields": ["cf_account_id", "bootstrap_token"]
+}
+
+// Недостаточно прав у bootstrap
+{
+  "ok": false,
+  "error": "permissions_missing",
+  "missing": ["D1 Read", "D1 Write", "Workers KV Storage Read"]
+}
+
+// Bootstrap истёк
+{
+  "ok": false,
+  "error": "bootstrap_not_active",
+  "status": "expired"
+}
+```
+
+```
+# ============================================================
+# POST /integrations/cloudflare/init
+# Создание working token из bootstrap token
+# ============================================================
+
+# Переменные (заменить на свои)
+API_URL="https://api.301.st"
+JWT_TOKEN="your_jwt_token"
+CF_ACCOUNT_ID="your_cloudflare_account_id"
+CF_BOOTSTRAP_TOKEN="your_bootstrap_token"
+KEY_ALIAS="my-cloudflare-key"  # опционально
+
+curl -X POST https://api.301.st/integrations/cloudflare/init \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cf_account_id": "abc123def456",
+    "bootstrap_token": "temp_token_with_create_permissions",
+    "key_alias": "Main CF Account"
+  }'
+
+# ============================================================
+# RESPONSES
+# ============================================================
+
+# SUCCESS (200)
+# {
+#   "ok": true,
+#   "key_id": 123
+# }
+
+# ERROR: Missing fields (400)
+# {
+#   "ok": false,
+#   "error": "missing_fields",
+#   "fields": ["cf_account_id", "bootstrap_token"]
+# }
+
+# ERROR: Invalid bootstrap token (400)
+# {
+#   "ok": false,
+#   "error": "bootstrap_invalid",
+#   "message": "Invalid API Token"
+# }
+
+# ERROR: Bootstrap not active (400)
+# {
+#   "ok": false,
+#   "error": "bootstrap_not_active",
+#   "status": "expired"
+# }
+
+# ERROR: Permission groups failed (400)
+# {
+#   "ok": false,
+#   "error": "permission_groups_failed",
+#   "message": "Authentication error"
+# }
+
+# ERROR: Missing permissions (400)
+# {
+#   "ok": false,
+#   "error": "permissions_missing",
+#   "missing": ["D1 Read", "D1 Write", "Workers KV Storage Read"]
+# }
+
+# ERROR: Token creation failed (500)
+# {
+#   "ok": false,
+#   "error": "token_creation_failed",
+#   "message": "..."
+# }
+
+# ERROR: Working token invalid (500)
+# {
+#   "ok": false,
+#   "error": "working_token_invalid",
+#   "message": "..."
+# }
+
+# ERROR: Storage failed (500)
+# {
+#   "ok": false,
+#   "error": "storage_failed"
+# }
+```
 
 ### 2.2 Требуемые права Cloudflare
 
@@ -203,6 +323,99 @@ Namecheap требует whitelist IP адресов. При ошибке `ip_no
   "message": "Add these IPs to your Namecheap API whitelist",
   "ips": "1.2.3.4, 5.6.7.8"
 }
+```
+
+```
+Добавить прокси в KV
+
+wrangler kv:key put --binding=KV_CREDENTIALS "proxies:namecheap" \
+  '["185.238.1.96:4219:user3:5544fds12"]'
+
+Тест
+
+# ============================================================
+# POST /integrations/namecheap/init
+# Добавление ключа Namecheap
+# ============================================================
+
+# Переменные
+API_URL="https://api.301.st"
+JWT_TOKEN="your_jwt_token"
+NC_USERNAME="your_namecheap_username"
+NC_API_KEY="your_namecheap_api_key"
+KEY_ALIAS="my-namecheap-key"  # опционально
+
+curl -X POST "$API_URL/integrations/namecheap/init" \
+  -H "Authorization: Bearer $JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "'"$NC_USERNAME"'",
+    "api_key": "'"$NC_API_KEY"'",
+    "key_alias": "'"$KEY_ALIAS"'"
+  }'
+
+# ============================================================
+# RESPONSES
+# ============================================================
+
+# SUCCESS (200)
+# {
+#   "ok": true,
+#   "key_id": 123,
+#   "message": "Namecheap integration configured successfully",
+#   "balance": "125.50"
+# }
+
+# ERROR: Missing fields (400)
+# {
+#   "ok": false,
+#   "error": "username_required"
+# }
+
+# ERROR: Unauthorized (401)
+# {
+#   "ok": false,
+#   "error": "unauthorized"
+# }
+
+# ERROR: Not owner (403)
+# {
+#   "ok": false,
+#   "error": "owner_required"
+# }
+
+# ERROR: Invalid API key (400)
+# {
+#   "ok": false,
+#   "error": "invalid_api_key"
+# }
+
+# ERROR: IP not whitelisted (400)
+# {
+#   "ok": false,
+#   "error": "ip_not_whitelisted",
+#   "message": "Add these IPs to your Namecheap API whitelist",
+#   "ips": "185.238.1.96, 172.252.57.114"
+# }
+
+# ERROR: No proxies configured (400)
+# {
+#   "ok": false,
+#   "error": "no_proxies_configured"
+# }
+
+# ERROR: All proxies failed (400)
+# {
+#   "ok": false,
+#   "error": "all_proxies_failed"
+# }
+
+# ERROR: Key already exists (409)
+# {
+#   "ok": false,
+#   "error": "namecheap_key_already_exists",
+#   "existing_key_id": 45
+# }
 ```
 
 ---
@@ -383,3 +596,4 @@ curl -X DELETE https://api.301.st/integrations/keys/42 \
 ---
 
 © 301.st — API Integrations Documentation
+
