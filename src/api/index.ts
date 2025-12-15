@@ -16,6 +16,8 @@ import githubCallback from "./auth/oauth/github/callback";
 import { handleInitKeyCF } from "./integrations/providers/cloudflare/initkey";
 import { handleInitKeyNamecheap } from "./integrations/providers/namecheap/initkey";
 
+// Cron
+import cronHandler from "../system/cron";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -40,4 +42,7 @@ app.route("/integrations/keys", keysRouter);
 app.post("/integrations/cloudflare/init", handleInitKeyCF);
 app.post("/integrations/namecheap/init", handleInitKeyNamecheap);
 
-export default app;
+export default {
+  fetch: app.fetch,
+  scheduled: cronHandler.scheduled,
+};

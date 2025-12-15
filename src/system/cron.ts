@@ -10,8 +10,8 @@
 import { Env } from "../types/worker";
 
 // Cloudflare providers
-import { checkPendingZones } from "../integrations/providers/cloudflare/zones";
-import { verifyAccountKeys as verifyCFKeys } from "../integrations/providers/cloudflare/keys";
+import { checkPendingZones } from "../api/integrations/providers/cloudflare/zones";
+import { verifyAccountKeys as verifyCFKeys } from "../api/integrations/providers/cloudflare/keys";
 
 // TODO: Namecheap providers
 // import { checkDomainExpiration } from "../integrations/providers/namecheap/domains";
