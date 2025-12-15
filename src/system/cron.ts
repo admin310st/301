@@ -10,6 +10,7 @@
 import { Env } from "../types/worker";
 
 // Cloudflare providers
+import { Env } from "../api/types/worker";
 import { checkPendingZones } from "../api/integrations/providers/cloudflare/zones";
 import { verifyAccountKeys as verifyCFKeys } from "../api/integrations/providers/cloudflare/keys";
 
