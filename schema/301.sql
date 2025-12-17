@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT,
     oauth_provider TEXT,
     oauth_id TEXT,
+    phone TEXT,
     tg_id TEXT,
     name TEXT,
     user_type TEXT DEFAULT 'client' CHECK(user_type IN ('admin', 'client')),
@@ -26,6 +27,7 @@ COMMENT ON COLUMN users.email_verified IS 'Верификация Email поль
 COMMENT ON COLUMN users.password_hash IS 'Хеш пароля (bcrypt/scrypt). NULL для OAuth-пользователей.';
 COMMENT ON COLUMN users.oauth_provider IS 'Провайдер OAuth (google, github).';
 COMMENT ON COLUMN users.oauth_id IS 'Уникальный идентификатор пользователя от OAuth-провайдера. Используется для поиска существующего пользователя при повторном логине.';
+COMMENT ON COLUMN users.phone IS 'Телефон пользователя.';
 COMMENT ON COLUMN users.tg_id IS 'Telegram ID пользователя для уведомлений и рассылок.';
 COMMENT ON COLUMN users.name IS 'Имя пользователя или организация.';
 COMMENT ON COLUMN users.user_type IS 'Системная роль: admin (администратор платформы 301.st с доступом ко всем аккаунтам), client (обычный пользователь). Роли owner/editor/viewer определяются через связи с аккаунтами.';
