@@ -331,4 +331,3 @@ export async function verifyAccountKeys(env: Env): Promise<{
 
   return stats;
 }
-

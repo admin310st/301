@@ -773,4 +773,3 @@ export async function handlePurgeCache(c: Context<{ Bindings: Env }>) {
     purged: body.files ? body.files.length : "all",
   });
 }
-

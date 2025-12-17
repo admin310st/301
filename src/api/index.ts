@@ -16,8 +16,28 @@ import githubCallback from "./auth/oauth/github/callback";
 import { handleInitKeyCF } from "./integrations/providers/cloudflare/initkey";
 import { handleInitKeyNamecheap } from "./integrations/providers/namecheap/initkey";
 
+// Cloudflare Zones
+import {
+  handleListZones,
+  handleGetZone,
+  handleCreateZone,
+  handleDeleteZone,
+  handleSyncZones,
+  handleSyncZone,
+  handleCheckActivation,
+} from "./integrations/providers/cloudflare/zones";
+
+// Cloudflare Zone Config (DNS, SSL, Cache, WAF)
+import {
+  handleListDNS,
+  handleBatchDNS,
+  handleGetZoneSettings,
+  handleUpdateZoneSettings,
+  handlePurgeCache,
+} from "./integrations/providers/cloudflare/zoneconf";
+
 // Cron
-import cronHandler from "../system/cron";
+import cronHandler from "./jobs/cron";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -41,6 +61,22 @@ app.route("/auth/oauth/github/callback", githubCallback);
 app.route("/integrations/keys", keysRouter);
 app.post("/integrations/cloudflare/init", handleInitKeyCF);
 app.post("/integrations/namecheap/init", handleInitKeyNamecheap);
+
+// --- Cloudflare Zones ---
+app.get("/zones", handleListZones);
+app.get("/zones/:id", handleGetZone);
+app.post("/zones", handleCreateZone);
+app.delete("/zones/:id", handleDeleteZone);
+app.post("/zones/sync", handleSyncZones);
+app.post("/zones/:id/sync", handleSyncZone);
+app.post("/zones/:id/check-activation", handleCheckActivation);
+
+// --- Cloudflare Zone Config ---
+app.get("/zones/:id/dns", handleListDNS);
+app.post("/zones/:id/dns/batch", handleBatchDNS);
+app.get("/zones/:id/settings", handleGetZoneSettings);
+app.patch("/zones/:id/settings", handleUpdateZoneSettings);
+app.post("/zones/:id/purge-cache", handlePurgeCache);
 
 export default {
   fetch: app.fetch,
