@@ -1,45 +1,48 @@
 // src/api/integrations/keys/storage.ts
+
 /**
  * Storage для ключей интеграций
- * 
+ *
  * Ответственность:
  * - Шифрование secrets (AES-GCM-256) → KV_CREDENTIALS
  * - Хранение metadata → D1 account_keys
- * - CRUD операции
- * 
+ * - CRUD операции с retry для D1
+ *
  * НЕ содержит логику провайдеров — только хранение!
  * Валидация и подготовка данных — в initkey.ts каждого провайдера.
  */
 
 import { nanoid } from "nanoid";
 import { encrypt, decrypt } from "../../lib/crypto";
+import { withRetry } from "../../lib/retry";
 import { isValidProvider } from "../providers/registry";
 import type { Env } from "../../types/worker";
 import type { ProviderId } from "../providers/registry";
 
-
+// ============================================================
 // TYPES
+// ============================================================
 
 /** Параметры для создания ключа */
 export interface CreateKeyParams {
   /** ID аккаунта 301.st */
   account_id: number;
-  
+
   /** ID провайдера (cloudflare, namecheap, ...) */
   provider: ProviderId;
-  
+
   /** Название ключа для UI */
   key_alias: string;
-  
+
   /** Sensitive данные для шифрования (token, apiKey, etc.) */
   secrets: Record<string, string>;
-  
+
   /** ID аккаунта у провайдера (CF Account ID, etc.) */
   external_account_id?: string | null;
-  
+
   /** Metadata для provider_scope (cf_token_id, cf_token_name, etc.) */
   provider_scope?: Record<string, unknown>;
-  
+
   /** Срок действия ISO string */
   expires_at?: string | null;
 }
@@ -48,19 +51,19 @@ export interface CreateKeyParams {
 export interface UpdateKeyParams {
   /** ID ключа в account_keys */
   key_id: number;
-  
+
   /** Новые secrets (перезаписывают полностью) */
   secrets?: Record<string, string>;
-  
+
   /** Новый alias */
   key_alias?: string;
-  
+
   /** Новый статус */
   status?: "active" | "expired" | "revoked";
-  
+
   /** Merge в provider_scope */
   provider_scope?: Record<string, unknown>;
-  
+
   /** Новый срок действия */
   expires_at?: string | null;
 }
@@ -87,20 +90,28 @@ export interface DecryptedKey {
   scope: Record<string, unknown>;
 }
 
-
+// ============================================================
 // CREATE
+// ============================================================
 
 /**
  * Создать новый ключ интеграции
+ *
+ * Порядок операций:
+ * 1. Валидация
+ * 2. KV_CREDENTIALS.put (encrypted secrets)
+ * 3. D1 INSERT (metadata) — с retry
+ *
+ * При ошибке D1 — откатываем KV
  */
 export async function createKey(
   env: Env,
   params: CreateKeyParams
-): Promise<{ ok: true; key_id: number; kv_key: string }> {
-  const { 
-    account_id, 
-    provider, 
-    key_alias, 
+): Promise<{ ok: true; key_id: number; kv_key: string } | { ok: false; error: string }> {
+  const {
+    account_id,
+    provider,
+    key_alias,
     secrets,
     external_account_id = null,
     provider_scope = {},
@@ -109,68 +120,97 @@ export async function createKey(
 
   // 1. Валидация провайдера
   if (!isValidProvider(provider)) {
-    throw new Error("unknown_provider");
+    return { ok: false, error: "unknown_provider" };
   }
 
   // 2. Проверка secrets
   if (!secrets || Object.keys(secrets).length === 0) {
-    throw new Error("secrets_required");
+    return { ok: false, error: "secrets_required" };
   }
 
   // 3. Генерируем ключ для KV
   const kvKey = `${provider}:${account_id}:${nanoid(12)}`;
 
   // 4. Шифруем secrets
-  const encrypted = await encrypt(secrets, env.MASTER_SECRET);
+  let encrypted: string;
+  try {
+    const encryptedData = await encrypt(secrets, env.MASTER_SECRET);
+    encrypted = JSON.stringify(encryptedData);
+  } catch (e) {
+    console.error("Encryption failed:", e);
+    return { ok: false, error: "encryption_failed" };
+  }
 
   // 5. Сохраняем в KV_CREDENTIALS
-  await env.KV_CREDENTIALS.put(kvKey, JSON.stringify(encrypted));
+  try {
+    await env.KV_CREDENTIALS.put(kvKey, encrypted);
+  } catch (e) {
+    console.error("KV write failed:", e);
+    return { ok: false, error: "kv_write_failed" };
+  }
 
-  // 6. Сохраняем в D1
-  const result = await env.DB301.prepare(`
-    INSERT INTO account_keys (
-      account_id,
-      provider,
-      provider_scope,
-      key_alias,
-      kv_key,
-      status,
-      expires_at,
-      external_account_id
-    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
-  `).bind(
-    account_id,      
-    provider,         
-    JSON.stringify(provider_scope), 
-    key_alias,        
-    kvKey,             
-    // status = 'active'
-    expires_at,         
-    external_account_id  
-  ).run();
+  // 6. Сохраняем в D1 (с retry)
+  let keyId: number;
+  try {
+    keyId = await withRetry(async () => {
+      const result = await env.DB301.prepare(
+        `
+        INSERT INTO account_keys (
+          account_id,
+          provider,
+          provider_scope,
+          key_alias,
+          kv_key,
+          status,
+          expires_at,
+          external_account_id
+        ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+        `
+      )
+        .bind(
+          account_id,
+          provider,
+          JSON.stringify(provider_scope),
+          key_alias,
+          kvKey,
+          expires_at,
+          external_account_id
+        )
+        .run();
 
-  const keyId = result.meta?.last_row_id as number;
+      return result.meta?.last_row_id as number;
+    });
+  } catch (e) {
+    // Rollback: удаляем из KV
+    console.error("D1 insert failed, rolling back KV:", e);
+    await env.KV_CREDENTIALS.delete(kvKey).catch((err) =>
+      console.warn("KV rollback failed:", err)
+    );
+    return { ok: false, error: "db_write_failed" };
+  }
 
   return { ok: true, key_id: keyId, kv_key: kvKey };
 }
 
-
+// ============================================================
 // READ
+// ============================================================
 
 /**
  * Получить ключ по ID (без secrets)
  */
-export async function getKey(
-  env: Env, 
-  keyId: number
-): Promise<KeyRecord | null> {
-  const row = await env.DB301.prepare(`
+export async function getKey(env: Env, keyId: number): Promise<KeyRecord | null> {
+  const row = await env.DB301.prepare(
+    `
     SELECT 
       id, account_id, provider, provider_scope, key_alias,
       external_account_id, kv_key, status, expires_at, last_used, created_at
     FROM account_keys
     WHERE id = ?
-  `).bind(keyId).first<KeyRecord>();
+    `
+  )
+    .bind(keyId)
+    .first<KeyRecord>();
 
   return row ?? null;
 }
@@ -179,10 +219,7 @@ export async function getKey(
  * Получить ключ с расшифрованными secrets
  * Использовать ТОЛЬКО для выполнения API запросов!
  */
-export async function getDecryptedKey(
-  env: Env,
-  keyId: number
-): Promise<DecryptedKey | null> {
+export async function getDecryptedKey(env: Env, keyId: number): Promise<DecryptedKey | null> {
   // 1. Получаем запись
   const record = await getKey(env, keyId);
   if (!record) return null;
@@ -194,9 +231,9 @@ export async function getDecryptedKey(
 
   // 3. Проверяем срок действия
   if (record.expires_at && new Date(record.expires_at) < new Date()) {
-    await env.DB301.prepare(
-      `UPDATE account_keys SET status = 'expired' WHERE id = ?`
-    ).bind(keyId).run();
+    await env.DB301.prepare(`UPDATE account_keys SET status = 'expired' WHERE id = ?`)
+      .bind(keyId)
+      .run();
     throw new Error("key_expired");
   }
 
@@ -208,19 +245,18 @@ export async function getDecryptedKey(
 
   // 5. Расшифровываем
   const secrets = await decrypt<Record<string, string>>(
-    JSON.parse(encryptedRaw), 
+    JSON.parse(encryptedRaw),
     env.MASTER_SECRET
   );
 
   // 6. Парсим scope
-  const scope = record.provider_scope 
-    ? JSON.parse(record.provider_scope) 
-    : {};
+  const scope = record.provider_scope ? JSON.parse(record.provider_scope) : {};
 
-  // 7. Обновляем last_used
-  await env.DB301.prepare(
-    `UPDATE account_keys SET last_used = CURRENT_TIMESTAMP WHERE id = ?`
-  ).bind(keyId).run();
+  // 7. Обновляем last_used (best effort, без retry)
+  await env.DB301.prepare(`UPDATE account_keys SET last_used = CURRENT_TIMESTAMP WHERE id = ?`)
+    .bind(keyId)
+    .run()
+    .catch((e) => console.warn("Failed to update last_used:", e));
 
   return { record, secrets, scope };
 }
@@ -229,7 +265,7 @@ export async function getDecryptedKey(
  * Список ключей аккаунта (без secrets)
  */
 export async function listKeys(
-  env: Env, 
+  env: Env,
   accountId: number,
   provider?: ProviderId
 ): Promise<KeyRecord[]> {
@@ -240,14 +276,14 @@ export async function listKeys(
     FROM account_keys
     WHERE account_id = ?
   `;
-  
+
   const bindings: (number | string)[] = [accountId];
-  
+
   if (provider) {
     query += ` AND provider = ?`;
     bindings.push(provider);
   }
-  
+
   query += ` ORDER BY created_at DESC`;
 
   const result = await env.DB301.prepare(query).bind(...bindings).all<KeyRecord>();
@@ -263,44 +299,58 @@ export async function findKeyByExternalId(
   provider: ProviderId,
   externalAccountId: string
 ): Promise<KeyRecord | null> {
-  const row = await env.DB301.prepare(`
+  const row = await env.DB301.prepare(
+    `
     SELECT 
       id, account_id, provider, provider_scope, key_alias,
       external_account_id, kv_key, status, expires_at, last_used, created_at
     FROM account_keys
     WHERE account_id = ? AND provider = ? AND external_account_id = ?
     LIMIT 1
-  `).bind(accountId, provider, externalAccountId).first<KeyRecord>();
+    `
+  )
+    .bind(accountId, provider, externalAccountId)
+    .first<KeyRecord>();
 
   return row ?? null;
 }
 
-
+// ============================================================
 // UPDATE
+// ============================================================
 
 /**
- * Обновить ключ
+ * Обновить ключ (secrets и/или metadata)
+ *
+ * Порядок операций:
+ * 1. KV_CREDENTIALS.put (если secrets переданы)
+ * 2. D1 UPDATE (metadata) — с retry
  */
 export async function updateKey(
   env: Env,
   params: UpdateKeyParams
-): Promise<{ ok: true }> {
+): Promise<{ ok: true } | { ok: false; error: string }> {
   const { key_id, secrets, key_alias, status, provider_scope, expires_at } = params;
 
   // 1. Получаем текущую запись
   const record = await getKey(env, key_id);
   if (!record) {
-    throw new Error("key_not_found");
+    return { ok: false, error: "key_not_found" };
   }
 
   // 2. Обновляем secrets в KV если переданы
   if (secrets && Object.keys(secrets).length > 0) {
-    const encrypted = await encrypt(secrets, env.MASTER_SECRET);
-    await env.KV_CREDENTIALS.put(record.kv_key, JSON.stringify(encrypted));
+    try {
+      const encryptedData = await encrypt(secrets, env.MASTER_SECRET);
+      await env.KV_CREDENTIALS.put(record.kv_key, JSON.stringify(encryptedData));
+    } catch (e) {
+      console.error("KV update failed:", e);
+      return { ok: false, error: "kv_write_failed" };
+    }
   }
 
   // 3. Собираем UPDATE для D1
-  const updates: string[] = [];
+  const updates: string[] = ["updated_at = CURRENT_TIMESTAMP"];
   const bindings: (string | number | null)[] = [];
 
   if (key_alias !== undefined) {
@@ -319,47 +369,66 @@ export async function updateKey(
   }
 
   if (provider_scope !== undefined) {
-    const currentScope = record.provider_scope 
-      ? JSON.parse(record.provider_scope) 
-      : {};
+    const currentScope = record.provider_scope ? JSON.parse(record.provider_scope) : {};
     const mergedScope = { ...currentScope, ...provider_scope };
     updates.push("provider_scope = ?");
     bindings.push(JSON.stringify(mergedScope));
   }
 
-  // 4. Выполняем UPDATE
-  if (updates.length > 0) {
+  // 4. Выполняем UPDATE (с retry)
+  if (updates.length > 1) {
     bindings.push(key_id);
-    await env.DB301.prepare(`
-      UPDATE account_keys SET ${updates.join(", ")} WHERE id = ?
-    `).bind(...bindings).run();
+    try {
+      await withRetry(async () => {
+        await env.DB301.prepare(`UPDATE account_keys SET ${updates.join(", ")} WHERE id = ?`)
+          .bind(...bindings)
+          .run();
+      });
+    } catch (e) {
+      console.error("D1 update failed:", e);
+      return { ok: false, error: "db_write_failed" };
+    }
   }
 
   return { ok: true };
 }
 
-
+// ============================================================
 // DELETE
+// ============================================================
 
 /**
- * Удалить ключ полностью (KV + D1)
+ * Удалить ключ полностью (D1 + KV)
+ *
+ * Порядок операций:
+ * 1. Получаем запись (нужен kv_key)
+ * 2. D1 DELETE (с retry)
+ * 3. KV_CREDENTIALS.delete (best effort)
  */
 export async function deleteKey(
-  env: Env, 
+  env: Env,
   keyId: number
-): Promise<{ ok: true }> {
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  // 1. Получаем запись (нужен kv_key)
   const record = await getKey(env, keyId);
   if (!record) {
-    throw new Error("key_not_found");
+    return { ok: false, error: "key_not_found" };
   }
 
-  // KV
-  await env.KV_CREDENTIALS.delete(record.kv_key);
+  // 2. D1 DELETE (с retry)
+  try {
+    await withRetry(async () => {
+      await env.DB301.prepare(`DELETE FROM account_keys WHERE id = ?`).bind(keyId).run();
+    });
+  } catch (e) {
+    console.error("D1 delete failed:", e);
+    return { ok: false, error: "db_delete_failed" };
+  }
 
-  // D1
-  await env.DB301.prepare(
-    `DELETE FROM account_keys WHERE id = ?`
-  ).bind(keyId).run();
+  // 3. KV DELETE (best effort)
+  await env.KV_CREDENTIALS.delete(record.kv_key).catch((e) =>
+    console.warn("KV delete failed (best effort):", e)
+  );
 
   return { ok: true };
 }
@@ -370,16 +439,24 @@ export async function deleteKey(
 export async function revokeKey(
   env: Env,
   keyId: number
-): Promise<{ ok: true }> {
-  await env.DB301.prepare(
-    `UPDATE account_keys SET status = 'revoked' WHERE id = ?`
-  ).bind(keyId).run();
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    await withRetry(async () => {
+      await env.DB301.prepare(`UPDATE account_keys SET status = 'revoked' WHERE id = ?`)
+        .bind(keyId)
+        .run();
+    });
+  } catch (e) {
+    console.error("D1 revoke failed:", e);
+    return { ok: false, error: "db_write_failed" };
+  }
 
   return { ok: true };
 }
 
-
+// ============================================================
 // HELPERS
+// ============================================================
 
 /**
  * Проверить владение ключом
@@ -391,7 +468,9 @@ export async function verifyKeyOwnership(
 ): Promise<boolean> {
   const row = await env.DB301.prepare(
     `SELECT 1 FROM account_keys WHERE id = ? AND account_id = ?`
-  ).bind(keyId, accountId).first();
+  )
+    .bind(keyId, accountId)
+    .first();
 
   return row !== null;
 }
@@ -404,11 +483,15 @@ export async function hasActiveKey(
   accountId: number,
   provider: ProviderId
 ): Promise<boolean> {
-  const row = await env.DB301.prepare(`
+  const row = await env.DB301.prepare(
+    `
     SELECT 1 FROM account_keys 
     WHERE account_id = ? AND provider = ? AND status = 'active'
     LIMIT 1
-  `).bind(accountId, provider).first();
+    `
+  )
+    .bind(accountId, provider)
+    .first();
 
   return row !== null;
 }

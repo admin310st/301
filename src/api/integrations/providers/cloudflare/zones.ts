@@ -9,10 +9,10 @@
  * - Учёт квот
  */
 
-import { Context } from "hono";
-import { Env } from "../../../types/worker";
+import type { Context } from "hono";
+import type { Env } from "../../../types/worker";
 import { requireAuth, requireOwner } from "../../../lib/auth";
-import { decrypt } from "../../../lib/crypto";
+import { getDecryptedKey } from "../../keys/storage";
 
 // ============================================================
 // TYPES
@@ -76,50 +76,6 @@ interface QuotaUsage {
 const CF_API_BASE = "https://api.cloudflare.com/client/v4";
 
 // ============================================================
-// HELPERS: CF API
-// ============================================================
-
-/**
- * Получить расшифрованный токен из KV
- */
-async function getDecryptedToken(
-  env: Env,
-  kvKey: string
-): Promise<string | null> {
-  const encrypted = await env.KV_CREDENTIALS.get(kvKey);
-  if (!encrypted) return null;
-  
-  try {
-    const data = JSON.parse(encrypted);
-    return await decrypt(data.token, env.ENCRYPTION_KEY);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Получить данные ключа из D1 + расшифрованный токен
- */
-async function getAccountKey(
-  env: Env,
-  keyId: number,
-  accountId: number
-): Promise<{ token: string; cfAccountId: string; keyId: number } | null> {
-  const key = await env.DB301.prepare(
-    `SELECT id, kv_key, provider_scope FROM account_keys 
-     WHERE id = ? AND account_id = ? AND provider = 'cloudflare' AND status = 'active'`
-  ).bind(keyId, accountId).first<{ id: number; kv_key: string; provider_scope: string }>();
-
-  if (!key) return null;
-
-  const token = await getDecryptedToken(env, key.kv_key);
-  if (!token) return null;
-
-  const scope = JSON.parse(key.provider_scope || "{}");
-  return { token, cfAccountId: scope.cf_account_id, keyId: key.id };
-}
-
-// ============================================================
 // HELPERS: QUOTA
 // ============================================================
 
@@ -135,12 +91,12 @@ async function getQuota(
        ql.max_zones, ql.max_domains,
        qu.zones_used, qu.domains_used
      FROM accounts a
-     JOIN quota_limits ql ON a.plan_tier = ql.plan_tier
+     LEFT JOIN quota_limits ql ON a.plan_id = ql.plan_id
      LEFT JOIN quota_usage qu ON a.id = qu.account_id
      WHERE a.id = ?`
   ).bind(accountId).first<{
-    max_zones: number;
-    max_domains: number;
+    max_zones: number | null;
+    max_domains: number | null;
     zones_used: number | null;
     domains_used: number | null;
   }>();
@@ -149,12 +105,12 @@ async function getQuota(
 
   return {
     limits: {
-      max_zones: result.max_zones,
-      max_domains: result.max_domains,
+      max_zones: result.max_zones ?? 100,
+      max_domains: result.max_domains ?? 1000,
     },
     usage: {
-      zones_used: result.zones_used || 0,
-      domains_used: result.domains_used || 0,
+      zones_used: result.zones_used ?? 0,
+      domains_used: result.domains_used ?? 0,
     },
   };
 }
@@ -183,9 +139,12 @@ async function canCreateZone(
  */
 async function incrementZonesUsed(env: Env, accountId: number, count: number = 1): Promise<void> {
   await env.DB301.prepare(
-    `UPDATE quota_usage SET zones_used = zones_used + ?, updated_at = CURRENT_TIMESTAMP
-     WHERE account_id = ?`
-  ).bind(count, accountId).run();
+    `INSERT INTO quota_usage (account_id, zones_used, domains_used)
+     VALUES (?, ?, 0)
+     ON CONFLICT(account_id) DO UPDATE SET 
+       zones_used = zones_used + ?, 
+       updated_at = CURRENT_TIMESTAMP`
+  ).bind(accountId, count, count).run();
 }
 
 /**
@@ -193,9 +152,12 @@ async function incrementZonesUsed(env: Env, accountId: number, count: number = 1
  */
 async function incrementDomainsUsed(env: Env, accountId: number, count: number = 1): Promise<void> {
   await env.DB301.prepare(
-    `UPDATE quota_usage SET domains_used = domains_used + ?, updated_at = CURRENT_TIMESTAMP
-     WHERE account_id = ?`
-  ).bind(count, accountId).run();
+    `INSERT INTO quota_usage (account_id, zones_used, domains_used)
+     VALUES (?, 0, ?)
+     ON CONFLICT(account_id) DO UPDATE SET 
+       domains_used = domains_used + ?, 
+       updated_at = CURRENT_TIMESTAMP`
+  ).bind(accountId, count, count).run();
 }
 
 /**
@@ -276,13 +238,13 @@ async function cfListZones(
       `${CF_API_BASE}/zones?account.id=${cfAccountId}&per_page=50`,
       {
         headers: {
-          "Authorization": `Bearer ${token}`,
+          Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
       }
     );
 
-    const data = await response.json() as CFApiResponse<CFZone[]>;
+    const data = (await response.json()) as CFApiResponse<CFZone[]>;
 
     if (!response.ok || !data.success) {
       return { ok: false, error: data.errors?.[0]?.message || "Failed to list zones" };
@@ -302,17 +264,14 @@ async function cfGetZone(
   token: string
 ): Promise<{ ok: true; zone: CFZone } | { ok: false; error: string }> {
   try {
-    const response = await fetch(
-      `${CF_API_BASE}/zones/${zoneId}`,
-      {
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
+    const response = await fetch(`${CF_API_BASE}/zones/${zoneId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+    });
 
-    const data = await response.json() as CFApiResponse<CFZone>;
+    const data = (await response.json()) as CFApiResponse<CFZone>;
 
     if (!response.ok || !data.success) {
       return { ok: false, error: data.errors?.[0]?.message || "Failed to get zone" };
@@ -333,23 +292,21 @@ async function cfCreateZone(
   token: string
 ): Promise<{ ok: true; zone: CFZone } | { ok: false; error: string }> {
   try {
-    const response = await fetch(
-      `${CF_API_BASE}/zones`,
-      {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          name: domain,
-          account: { id: cfAccountId },
-          type: "full",
-        }),
-      }
-    );
+    const response = await fetch(`${CF_API_BASE}/zones`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: domain,
+        account: { id: cfAccountId },
+        type: "full",
+        jump_start: false,
+      }),
+    });
 
-    const data = await response.json() as CFApiResponse<CFZone>;
+    const data = (await response.json()) as CFApiResponse<CFZone>;
 
     if (!response.ok || !data.success) {
       return { ok: false, error: data.errors?.[0]?.message || "Failed to create zone" };
@@ -367,20 +324,17 @@ async function cfCreateZone(
 async function cfDeleteZone(
   zoneId: string,
   token: string
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: boolean; error?: string }> {
   try {
-    const response = await fetch(
-      `${CF_API_BASE}/zones/${zoneId}`,
-      {
-        method: "DELETE",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
+    const response = await fetch(`${CF_API_BASE}/zones/${zoneId}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+    });
 
-    const data = await response.json() as CFApiResponse<{ id: string }>;
+    const data = (await response.json()) as CFApiResponse<unknown>;
 
     if (!response.ok || !data.success) {
       return { ok: false, error: data.errors?.[0]?.message || "Failed to delete zone" };
@@ -393,16 +347,172 @@ async function cfDeleteZone(
 }
 
 // ============================================================
-// HANDLERS: CRUD
+// INTERNAL: SYNC ZONES (for initkey.ts)
+// ============================================================
+
+/**
+ * Синхронизация зон из CF → D1
+ * Вызывается из initkey.ts после создания ключа
+ * 
+ * @param env - Environment
+ * @param accountId - ID аккаунта 301.st
+ * @param keyId - ID ключа в account_keys
+ * @param cfAccountId - CF Account ID
+ * @param token - Working token (уже расшифрован)
+ */
+export async function syncZonesInternal(
+  env: Env,
+  accountId: number,
+  keyId: number,
+  cfAccountId: string,
+  token: string
+): Promise<{
+  ok: boolean;
+  zones_synced: number;
+  domains_synced: number;
+  errors?: string[];
+}> {
+  const stats = {
+    zones_found: 0,
+    zones_created: 0,
+    zones_updated: 0,
+    domains_created: 0,
+    domains_updated: 0,
+    skipped_quota: 0,
+    errors: [] as string[],
+  };
+
+  // Получаем квоты
+  const quota = await getQuota(env, accountId);
+  if (!quota) {
+    return { ok: false, zones_synced: 0, domains_synced: 0, errors: ["quota_not_found"] };
+  }
+
+  // Запрашиваем список зон из CF
+  const cfResult = await cfListZones(cfAccountId, token);
+  if (!cfResult.ok) {
+    return { ok: false, zones_synced: 0, domains_synced: 0, errors: [cfResult.error] };
+  }
+
+  stats.zones_found = cfResult.zones.length;
+
+  for (const cfZone of cfResult.zones) {
+    try {
+      const nsExpected = cfZone.name_servers.join(",");
+      const status = mapCFStatus(cfZone.status);
+      const plan = mapCFPlan(cfZone.plan);
+      const verified = status === "active" ? 1 : 0;
+
+      // Проверяем существует ли зона в D1
+      const existingZone = await env.DB301.prepare(
+        `SELECT id FROM zones WHERE cf_zone_id = ? AND account_id = ?`
+      )
+        .bind(cfZone.id, accountId)
+        .first<{ id: number }>();
+
+      let zoneId: number;
+
+      if (existingZone) {
+        // UPDATE существующей зоны
+        zoneId = existingZone.id;
+        await env.DB301.prepare(
+          `UPDATE zones 
+           SET key_id = ?, status = ?, plan = ?, ns_expected = ?, verified = ?, 
+               last_sync_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`
+        )
+          .bind(keyId, status, plan, nsExpected, verified, zoneId)
+          .run();
+        stats.zones_updated++;
+      } else {
+        // Проверяем квоту перед созданием
+        const currentZones = quota.usage.zones_used + stats.zones_created;
+        if (currentZones >= quota.limits.max_zones) {
+          stats.skipped_quota++;
+          continue;
+        }
+
+        // INSERT новой зоны
+        const insertResult = await env.DB301.prepare(
+          `INSERT INTO zones (account_id, key_id, cf_zone_id, status, plan, ns_expected, verified, last_sync_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+        )
+          .bind(accountId, keyId, cfZone.id, status, plan, nsExpected, verified)
+          .run();
+
+        zoneId = insertResult.meta.last_row_id as number;
+        stats.zones_created++;
+      }
+
+      // Обрабатываем root domain
+      const existingDomain = await env.DB301.prepare(
+        `SELECT id FROM domains WHERE domain_name = ? AND account_id = ?`
+      )
+        .bind(cfZone.name, accountId)
+        .first<{ id: number }>();
+
+      if (existingDomain) {
+        // UPDATE существующего домена
+        await env.DB301.prepare(
+          `UPDATE domains 
+           SET zone_id = ?, key_id = ?, ns = ?, ns_verified = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`
+        )
+          .bind(zoneId, keyId, nsExpected, verified, existingDomain.id)
+          .run();
+        stats.domains_updated++;
+      } else {
+        // Проверяем квоту доменов
+        const currentDomains = quota.usage.domains_used + stats.domains_created;
+        if (currentDomains >= quota.limits.max_domains) {
+          // Зону создали, но домен не влезает в квоту — пропускаем домен
+          continue;
+        }
+
+        // INSERT нового домена (root)
+        await env.DB301.prepare(
+          `INSERT INTO domains (account_id, zone_id, key_id, domain_name, ns, ns_verified, role, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'reserve', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+        )
+          .bind(accountId, zoneId, keyId, cfZone.name, nsExpected, verified)
+          .run();
+        stats.domains_created++;
+      }
+    } catch (e) {
+      stats.errors.push(`Zone ${cfZone.name}: ${String(e)}`);
+    }
+  }
+
+  // Обновляем quota_usage
+  if (stats.zones_created > 0) {
+    await incrementZonesUsed(env, accountId, stats.zones_created);
+  }
+  if (stats.domains_created > 0) {
+    await incrementDomainsUsed(env, accountId, stats.domains_created);
+  }
+
+  // Инвалидируем кэш
+  await invalidateZonesCache(env, accountId);
+
+  return {
+    ok: stats.errors.length === 0,
+    zones_synced: stats.zones_created + stats.zones_updated,
+    domains_synced: stats.domains_created + stats.domains_updated,
+    errors: stats.errors.length > 0 ? stats.errors : undefined,
+  };
+}
+
+// ============================================================
+// HANDLERS: LIST
 // ============================================================
 
 /**
  * GET /zones
- * Список зон аккаунта (из D1)
+ * Список зон аккаунта из D1
  */
 export async function handleListZones(c: Context<{ Bindings: Env }>) {
   const env = c.env;
-  
+
   const auth = await requireAuth(c, env);
   if (!auth) {
     return c.json({ ok: false, error: "unauthorized" }, 401);
@@ -410,19 +520,22 @@ export async function handleListZones(c: Context<{ Bindings: Env }>) {
 
   const { account_id: accountId } = auth;
 
-  // Получаем зоны из D1
   const zones = await env.DB301.prepare(
-    `SELECT z.*, ak.key_alias as key_name
+    `SELECT z.id, z.cf_zone_id, z.status, z.plan, z.ns_expected, z.verified, 
+            z.ssl_status, z.ssl_mode, z.auto_https, z.caching_level, z.waf_mode,
+            z.last_sync_at, z.created_at,
+            d.domain_name as root_domain
      FROM zones z
-     JOIN account_keys ak ON z.key_id = ak.id
-     WHERE z.account_id = ? AND z.status != 'deleted'
+     LEFT JOIN domains d ON d.zone_id = z.id AND d.domain_name = (
+       SELECT MIN(domain_name) FROM domains WHERE zone_id = z.id
+     )
+     WHERE z.account_id = ?
      ORDER BY z.created_at DESC`
-  ).bind(accountId).all();
+  )
+    .bind(accountId)
+    .all();
 
-  return c.json({
-    ok: true,
-    zones: zones.results,
-  });
+  return c.json({ ok: true, zones: zones.results });
 }
 
 /**
@@ -440,27 +553,37 @@ export async function handleGetZone(c: Context<{ Bindings: Env }>) {
 
   const { account_id: accountId } = auth;
 
-  // Получаем зону из D1
   const zone = await env.DB301.prepare(
-    `SELECT z.*, ak.key_alias as key_name, ak.kv_key, ak.provider_scope
+    `SELECT z.*, ak.key_alias as key_name
      FROM zones z
-     JOIN account_keys ak ON z.key_id = ak.id
+     LEFT JOIN account_keys ak ON z.key_id = ak.id
      WHERE z.id = ? AND z.account_id = ?`
-  ).bind(zoneId, accountId).first();
+  )
+    .bind(zoneId, accountId)
+    .first();
 
   if (!zone) {
     return c.json({ ok: false, error: "zone_not_found" }, 404);
   }
 
-  return c.json({
-    ok: true,
-    zone,
-  });
+  // Получаем домены зоны
+  const domains = await env.DB301.prepare(
+    `SELECT id, domain_name, role, ns, ns_verified, proxied, blocked, blocked_reason, ssl_status
+     FROM domains WHERE zone_id = ?`
+  )
+    .bind(zoneId)
+    .all();
+
+  return c.json({ ok: true, zone, domains: domains.results });
 }
+
+// ============================================================
+// HANDLERS: CREATE
+// ============================================================
 
 /**
  * POST /zones
- * Создать зону
+ * Создать зону в CF и D1
  */
 export async function handleCreateZone(c: Context<{ Bindings: Env }>) {
   const env = c.env;
@@ -480,7 +603,7 @@ export async function handleCreateZone(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: false, error: "invalid_json" }, 400);
   }
 
-  const { domain, account_key_id, registrar_key_id, auto_update_ns } = body;
+  const { domain, account_key_id } = body;
 
   if (!domain || !account_key_id) {
     return c.json({ ok: false, error: "missing_fields", fields: ["domain", "account_key_id"] }, 400);
@@ -493,60 +616,75 @@ export async function handleCreateZone(c: Context<{ Bindings: Env }>) {
   }
 
   // Получаем ключ CF
-  const keyData = await getAccountKey(env, account_key_id, accountId);
-  if (!keyData) {
+  const keyData = await getDecryptedKey(env, account_key_id);
+  if (!keyData || keyData.record.account_id !== accountId) {
     return c.json({ ok: false, error: "key_not_found" }, 404);
   }
 
+  const token = keyData.secrets.token;
+  const scope = keyData.scope as { cf_account_id?: string };
+  const cfAccountId = keyData.record.external_account_id || scope.cf_account_id;
+
+  if (!cfAccountId) {
+    return c.json({ ok: false, error: "cf_account_id_missing" }, 400);
+  }
+
   // Создаём зону в CF
-  const cfResult = await cfCreateZone(keyData.cfAccountId, domain, keyData.token);
+  const cfResult = await cfCreateZone(cfAccountId, domain, token);
   if (!cfResult.ok) {
     return c.json({ ok: false, error: "cf_create_failed", message: cfResult.error }, 500);
   }
 
   const cfZone = cfResult.zone;
-  const nsRecords = cfZone.name_servers.join(",");
+  const nsExpected = cfZone.name_servers.join(",");
+  const status = mapCFStatus(cfZone.status);
+  const plan = mapCFPlan(cfZone.plan);
 
-  // Сохраняем в D1
+  // Сохраняем зону в D1
   const insertResult = await env.DB301.prepare(
-    `INSERT INTO zones (account_id, key_id, cf_zone_id, status, ns_expected, plan, last_sync_at, created_at, updated_at)
-     VALUES (?, ?, ?, 'pending', ?, 'free', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-  ).bind(accountId, account_key_id, cfZone.id, nsRecords).run();
+    `INSERT INTO zones (account_id, key_id, cf_zone_id, status, plan, ns_expected, verified, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+  )
+    .bind(accountId, account_key_id, cfZone.id, status, plan, nsExpected)
+    .run();
 
-  const zoneId = insertResult.meta.last_row_id;
+  const zoneId = insertResult.meta.last_row_id as number;
 
-  // Создаём root domain в domains
+  // Создаём root домен
   await env.DB301.prepare(
     `INSERT INTO domains (account_id, zone_id, key_id, domain_name, ns, ns_verified, role, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, 0, 'reserve', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-  ).bind(accountId, zoneId, account_key_id, cfZone.name, nsRecords).run();
+  )
+    .bind(accountId, zoneId, account_key_id, domain, nsExpected)
+    .run();
 
-  // Инкрементим квоты
+  // Обновляем квоты
   await incrementZonesUsed(env, accountId);
   await incrementDomainsUsed(env, accountId);
 
   // Инвалидируем кэш
   await invalidateZonesCache(env, accountId);
 
-  // Если есть интеграция с регистратором — обновляем NS
-  let nsUpdated = false;
-  if (registrar_key_id && auto_update_ns) {
-    // TODO: вызов Namecheap API для обновления NS
-    // nsUpdated = await updateRegistrarNS(env, registrar_key_id, accountId, domain, cfZone.name_servers);
-  }
-
   return c.json({
     ok: true,
-    zone_id: zoneId,
-    cf_zone_id: cfZone.id,
-    ns_records: cfZone.name_servers,
-    ns_updated: nsUpdated,
+    zone: {
+      id: zoneId,
+      cf_zone_id: cfZone.id,
+      domain,
+      status,
+      plan,
+      name_servers: cfZone.name_servers,
+    },
   });
 }
 
+// ============================================================
+// HANDLERS: DELETE
+// ============================================================
+
 /**
  * DELETE /zones/:id
- * Удалить зону
+ * Удалить зону из CF и D1
  */
 export async function handleDeleteZone(c: Context<{ Bindings: Env }>) {
   const env = c.env;
@@ -561,41 +699,41 @@ export async function handleDeleteZone(c: Context<{ Bindings: Env }>) {
 
   // Получаем зону
   const zone = await env.DB301.prepare(
-    `SELECT z.cf_zone_id, z.account_id, ak.kv_key
+    `SELECT z.id, z.cf_zone_id, z.key_id
      FROM zones z
-     JOIN account_keys ak ON z.key_id = ak.id
      WHERE z.id = ? AND z.account_id = ?`
-  ).bind(zoneId, accountId).first<{ cf_zone_id: string; account_id: number; kv_key: string }>();
+  )
+    .bind(zoneId, accountId)
+    .first<{ id: number; cf_zone_id: string; key_id: number }>();
 
   if (!zone) {
     return c.json({ ok: false, error: "zone_not_found" }, 404);
   }
 
   // Получаем токен
-  const token = await getDecryptedToken(env, zone.kv_key);
-  if (!token) {
+  const keyData = await getDecryptedKey(env, zone.key_id);
+  if (!keyData) {
     return c.json({ ok: false, error: "key_invalid" }, 500);
   }
 
-  // Удаляем в CF
-  const cfResult = await cfDeleteZone(zone.cf_zone_id, token);
+  // Удаляем зону в CF
+  const cfResult = await cfDeleteZone(zone.cf_zone_id, keyData.secrets.token);
   if (!cfResult.ok) {
-    return c.json({ ok: false, error: "cf_delete_failed", message: cfResult.error }, 500);
+    // Логируем ошибку, но продолжаем удаление из D1
+    console.error(`Failed to delete zone in CF: ${cfResult.error}`);
   }
 
-  // Помечаем как удалённую в D1
-  await env.DB301.prepare(
-    `UPDATE zones SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-  ).bind(zoneId).run();
+  // Удаляем домены зоны
+  await env.DB301.prepare(`DELETE FROM domains WHERE zone_id = ?`).bind(zoneId).run();
 
-  // Декрементим квоту
+  // Удаляем зону
+  await env.DB301.prepare(`DELETE FROM zones WHERE id = ?`).bind(zoneId).run();
+
+  // Обновляем квоты
   await decrementZonesUsed(env, accountId);
 
-  // Инвалидируем кэш зон
+  // Инвалидируем кэш
   await invalidateZonesCache(env, accountId);
-
-  // Инвалидируем кэш DNS (в KV)
-  await env.KV_CREDENTIALS.delete(`cache:dns:${zone.cf_zone_id}`);
 
   return c.json({ ok: true });
 }
@@ -607,7 +745,6 @@ export async function handleDeleteZone(c: Context<{ Bindings: Env }>) {
 /**
  * POST /zones/sync
  * Синхронизация зон из CF → D1
- * Опрашивает CF API, создаёт/обновляет записи в zones и domains (root)
  */
 export async function handleSyncZones(c: Context<{ Bindings: Env }>) {
   const env = c.env;
@@ -634,122 +771,26 @@ export async function handleSyncZones(c: Context<{ Bindings: Env }>) {
   }
 
   // Получаем ключ CF
-  const keyData = await getAccountKey(env, account_key_id, accountId);
-  if (!keyData) {
+  const keyData = await getDecryptedKey(env, account_key_id);
+  if (!keyData || keyData.record.account_id !== accountId) {
     return c.json({ ok: false, error: "key_not_found" }, 404);
   }
 
-  // Получаем квоты
-  const quota = await getQuota(env, accountId);
-  if (!quota) {
-    return c.json({ ok: false, error: "quota_not_found" }, 500);
+  const token = keyData.secrets.token;
+  const cfAccountId = keyData.record.external_account_id;
+
+  if (!cfAccountId) {
+    return c.json({ ok: false, error: "cf_account_id_missing" }, 400);
   }
 
-  // Запрашиваем список зон из CF
-  const cfResult = await cfListZones(keyData.cfAccountId, keyData.token);
-  if (!cfResult.ok) {
-    return c.json({ ok: false, error: "cf_list_failed", message: cfResult.error }, 500);
-  }
-
-  const stats = {
-    zones_found: cfResult.zones.length,
-    zones_created: 0,
-    zones_updated: 0,
-    domains_created: 0,
-    domains_updated: 0,
-    skipped_quota: 0,
-    errors: [] as string[],
-  };
-
-  for (const cfZone of cfResult.zones) {
-    try {
-      const nsExpected = cfZone.name_servers.join(",");
-      const status = mapCFStatus(cfZone.status);
-      const plan = mapCFPlan(cfZone.plan);
-      const verified = status === "active" ? 1 : 0;
-
-      // Проверяем существует ли зона в D1
-      const existingZone = await env.DB301.prepare(
-        `SELECT id FROM zones WHERE cf_zone_id = ? AND account_id = ?`
-      ).bind(cfZone.id, accountId).first<{ id: number }>();
-
-      let zoneId: number;
-
-      if (existingZone) {
-        // UPDATE существующей зоны
-        zoneId = existingZone.id;
-        await env.DB301.prepare(
-          `UPDATE zones 
-           SET status = ?, plan = ?, ns_expected = ?, verified = ?, last_sync_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-           WHERE id = ?`
-        ).bind(status, plan, nsExpected, verified, zoneId).run();
-        stats.zones_updated++;
-      } else {
-        // Проверяем квоту перед созданием
-        const currentZones = quota.usage.zones_used + stats.zones_created;
-        if (currentZones >= quota.limits.max_zones) {
-          stats.skipped_quota++;
-          continue;
-        }
-
-        // INSERT новой зоны
-        const insertResult = await env.DB301.prepare(
-          `INSERT INTO zones (account_id, key_id, cf_zone_id, status, plan, ns_expected, verified, last_sync_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-        ).bind(accountId, keyData.keyId, cfZone.id, status, plan, nsExpected, verified).run();
-        
-        zoneId = insertResult.meta.last_row_id as number;
-        stats.zones_created++;
-      }
-
-      // Обрабатываем root domain
-      const existingDomain = await env.DB301.prepare(
-        `SELECT id FROM domains WHERE domain_name = ? AND account_id = ?`
-      ).bind(cfZone.name, accountId).first<{ id: number }>();
-
-      if (existingDomain) {
-        // UPDATE существующего домена
-        await env.DB301.prepare(
-          `UPDATE domains 
-           SET zone_id = ?, key_id = ?, ns = ?, ns_verified = ?, updated_at = CURRENT_TIMESTAMP
-           WHERE id = ?`
-        ).bind(zoneId, keyData.keyId, nsExpected, verified, existingDomain.id).run();
-        stats.domains_updated++;
-      } else {
-        // Проверяем квоту доменов
-        const currentDomains = quota.usage.domains_used + stats.domains_created;
-        if (currentDomains >= quota.limits.max_domains) {
-          // Зону создали, но домен не влезает в квоту — пропускаем домен
-          continue;
-        }
-
-        // INSERT нового домена (root)
-        await env.DB301.prepare(
-          `INSERT INTO domains (account_id, zone_id, key_id, domain_name, ns, ns_verified, role, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'reserve', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-        ).bind(accountId, zoneId, keyData.keyId, cfZone.name, nsExpected, verified).run();
-        stats.domains_created++;
-      }
-
-    } catch (e) {
-      stats.errors.push(`Zone ${cfZone.name}: ${String(e)}`);
-    }
-  }
-
-  // Обновляем quota_usage
-  if (stats.zones_created > 0) {
-    await incrementZonesUsed(env, accountId, stats.zones_created);
-  }
-  if (stats.domains_created > 0) {
-    await incrementDomainsUsed(env, accountId, stats.domains_created);
-  }
-
-  // Инвалидируем кэш
-  await invalidateZonesCache(env, accountId);
+  // Вызываем внутреннюю функцию синхронизации
+  const result = await syncZonesInternal(env, accountId, account_key_id, cfAccountId, token);
 
   return c.json({
-    ok: stats.errors.length === 0,
-    stats,
+    ok: result.ok,
+    zones_synced: result.zones_synced,
+    domains_synced: result.domains_synced,
+    errors: result.errors,
   });
 }
 
@@ -770,24 +811,25 @@ export async function handleSyncZone(c: Context<{ Bindings: Env }>) {
 
   // Получаем зону из D1
   const zone = await env.DB301.prepare(
-    `SELECT z.id, z.cf_zone_id, ak.kv_key
+    `SELECT z.id, z.cf_zone_id, z.key_id
      FROM zones z
-     JOIN account_keys ak ON z.key_id = ak.id
      WHERE z.id = ? AND z.account_id = ?`
-  ).bind(zoneId, accountId).first<{ id: number; cf_zone_id: string; kv_key: string }>();
+  )
+    .bind(zoneId, accountId)
+    .first<{ id: number; cf_zone_id: string; key_id: number }>();
 
   if (!zone) {
     return c.json({ ok: false, error: "zone_not_found" }, 404);
   }
 
   // Получаем токен
-  const token = await getDecryptedToken(env, zone.kv_key);
-  if (!token) {
+  const keyData = await getDecryptedKey(env, zone.key_id);
+  if (!keyData) {
     return c.json({ ok: false, error: "key_invalid" }, 500);
   }
 
   // Запрашиваем детали зоны из CF
-  const cfResult = await cfGetZone(zone.cf_zone_id, token);
+  const cfResult = await cfGetZone(zone.cf_zone_id, keyData.secrets.token);
   if (!cfResult.ok) {
     return c.json({ ok: false, error: "cf_get_failed", message: cfResult.error }, 500);
   }
@@ -803,14 +845,18 @@ export async function handleSyncZone(c: Context<{ Bindings: Env }>) {
     `UPDATE zones 
      SET status = ?, plan = ?, ns_expected = ?, verified = ?, last_sync_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
      WHERE id = ?`
-  ).bind(status, plan, nsExpected, verified, zone.id).run();
+  )
+    .bind(status, plan, nsExpected, verified, zone.id)
+    .run();
 
   // Обновляем ns_verified для доменов этой зоны
   const domainsResult = await env.DB301.prepare(
     `UPDATE domains 
      SET ns_verified = CASE WHEN ns = ? THEN 1 ELSE 0 END, updated_at = CURRENT_TIMESTAMP
      WHERE zone_id = ?`
-  ).bind(nsExpected, zone.id).run();
+  )
+    .bind(nsExpected, zone.id)
+    .run();
 
   return c.json({
     ok: true,
@@ -850,24 +896,25 @@ export async function handleCheckActivation(c: Context<{ Bindings: Env }>) {
 
   // Получаем зону
   const zone = await env.DB301.prepare(
-    `SELECT z.id, z.cf_zone_id, z.ns_expected, ak.kv_key
+    `SELECT z.id, z.cf_zone_id, z.ns_expected, z.key_id
      FROM zones z
-     JOIN account_keys ak ON z.key_id = ak.id
      WHERE z.id = ? AND z.account_id = ?`
-  ).bind(zoneId, accountId).first<{ id: number; cf_zone_id: string; ns_expected: string; kv_key: string }>();
+  )
+    .bind(zoneId, accountId)
+    .first<{ id: number; cf_zone_id: string; ns_expected: string; key_id: number }>();
 
   if (!zone) {
     return c.json({ ok: false, error: "zone_not_found" }, 404);
   }
 
   // Получаем токен
-  const token = await getDecryptedToken(env, zone.kv_key);
-  if (!token) {
+  const keyData = await getDecryptedKey(env, zone.key_id);
+  if (!keyData) {
     return c.json({ ok: false, error: "key_invalid" }, 500);
   }
 
   // Запрашиваем актуальный статус зоны из CF
-  const cfResult = await cfGetZone(zone.cf_zone_id, token);
+  const cfResult = await cfGetZone(zone.cf_zone_id, keyData.secrets.token);
   if (!cfResult.ok) {
     return c.json({ ok: false, error: "cf_get_failed", message: cfResult.error }, 500);
   }
@@ -881,7 +928,9 @@ export async function handleCheckActivation(c: Context<{ Bindings: Env }>) {
 
   await env.DB301.prepare(
     `UPDATE zones SET status = ?, verified = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-  ).bind(newStatus, verified, zone.id).run();
+  )
+    .bind(newStatus, verified, zone.id)
+    .run();
 
   // Если зона активирована — пересчитываем ns_verified для доменов
   let domainsUpdated = 0;
@@ -894,7 +943,9 @@ export async function handleCheckActivation(c: Context<{ Bindings: Env }>) {
        END,
        updated_at = CURRENT_TIMESTAMP
        WHERE zone_id = ?`
-    ).bind(zone.ns_expected, zone.id).run();
+    )
+      .bind(zone.ns_expected, zone.id)
+      .run();
     domainsUpdated = updateResult.meta.changes;
   }
 
@@ -926,47 +977,54 @@ export async function checkPendingZones(env: Env): Promise<{
 
   // Получаем все pending зоны
   const pendingZones = await env.DB301.prepare(
-    `SELECT z.id, z.cf_zone_id, z.ns_expected, ak.kv_key
+    `SELECT z.id, z.cf_zone_id, z.ns_expected, z.key_id
      FROM zones z
-     JOIN account_keys ak ON z.key_id = ak.id
      WHERE z.status = 'pending'
      LIMIT 50`
-  ).all<{ id: number; cf_zone_id: string; ns_expected: string; kv_key: string }>();
+  ).all<{ id: number; cf_zone_id: string; ns_expected: string; key_id: number }>();
 
   for (const zone of pendingZones.results) {
     stats.checked++;
 
-    const token = await getDecryptedToken(env, zone.kv_key);
-    if (!token) {
+    try {
+      const keyData = await getDecryptedKey(env, zone.key_id);
+      if (!keyData) {
+        stats.errors++;
+        continue;
+      }
+
+      const cfResult = await cfGetZone(zone.cf_zone_id, keyData.secrets.token);
+      if (!cfResult.ok) {
+        stats.errors++;
+        continue;
+      }
+
+      if (cfResult.zone.status === "active") {
+        // Обновляем статус зоны
+        await env.DB301.prepare(
+          `UPDATE zones SET status = 'active', verified = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+        )
+          .bind(zone.id)
+          .run();
+
+        // Пересчитываем ns_verified для доменов этой зоны
+        const updateResult = await env.DB301.prepare(
+          `UPDATE domains 
+           SET ns_verified = CASE 
+             WHEN ns = ? THEN 1 
+             ELSE 0 
+           END,
+           updated_at = CURRENT_TIMESTAMP
+           WHERE zone_id = ?`
+        )
+          .bind(zone.ns_expected, zone.id)
+          .run();
+
+        stats.activated++;
+        stats.domains_updated += updateResult.meta.changes;
+      }
+    } catch {
       stats.errors++;
-      continue;
-    }
-
-    const cfResult = await cfGetZone(zone.cf_zone_id, token);
-    if (!cfResult.ok) {
-      stats.errors++;
-      continue;
-    }
-
-    if (cfResult.zone.status === "active") {
-      // Обновляем статус зоны
-      await env.DB301.prepare(
-        `UPDATE zones SET status = 'active', verified = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-      ).bind(zone.id).run();
-
-      // Пересчитываем ns_verified для доменов этой зоны
-      const updateResult = await env.DB301.prepare(
-        `UPDATE domains 
-         SET ns_verified = CASE 
-           WHEN ns = ? THEN 1 
-           ELSE 0 
-         END,
-         updated_at = CURRENT_TIMESTAMP
-         WHERE zone_id = ?`
-      ).bind(zone.ns_expected, zone.id).run();
-
-      stats.activated++;
-      stats.domains_updated += updateResult.meta.changes;
     }
   }
 
