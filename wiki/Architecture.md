@@ -156,6 +156,146 @@ _reserve_ — в резерве (NS настроены, но не использ
 
 **Никакие операции в Cloudflare НЕ выполняются автоматически.**
 
+**Принципы взаимодействия UI ↔ Back ↔ External API**
+
+---
+
+## 3.1 Порядок операций
+
+| Шаг | Действие | При ошибке |
+|-----|----------|------------|
+| 1 | External API (CF, Namecheap) | Вернуть ошибку UI, ничего не делать |
+| 2 | D1 (запись/обновление) | Retry → Rollback External → Вернуть ошибку с context |
+| 3 | KV (кэш, сессии) | Retry → Игнорировать (не критично) |
+| 4 | Ответ UI | Только после успеха шагов 1-2 |
+
+---
+
+## 3.2 Стратегии обработки ошибок
+
+| Стратегия | Когда применять | Описание |
+|-----------|-----------------|----------|
+| **Fail Fast** | Критичные операции (создание ключа) | При любой ошибке — откат и возврат ошибки |
+| **Retry + Backoff** | Временные сбои (D1, KV) | 3 попытки с увеличивающейся задержкой (100ms, 200ms, 300ms) |
+| **Partial Success** | Batch операции (sync zones, batch DNS) | Продолжаем остальные, собираем ошибки в массив |
+| **Best Effort Rollback** | После успеха External, но сбоя D1 | Пытаемся откатить External, не гарантируем успех |
+| **Orphan Cleanup** | Не удалось откатить | Cron задача периодически чистит "сироты" |
+
+---
+
+## 3.3 Структура ответа UI
+
+| Сценарий | Структура ответа |
+|----------|------------------|
+| **Полный успех** | `{ ok: true, data: {...} }` |
+| **Полный провал** | `{ ok: false, error: "error_code", message: "Human readable" }` |
+| **Частичный успех (batch)** | `{ ok: false, stats: { success: N, errors: [...] }, data: [...] }` |
+| **Провал с context** | `{ ok: false, error: "db_failed", cf_token_id: "xxx", message: "Created in CF but..." }` |
+
+---
+
+## 3.4 Правила для конкретных операций
+
+| Операция | External API | D1 | При сбое D1 |
+|----------|--------------|----|--------------|
+| **Init Key** | CF: создать token | Записать ключ | Rollback: удалить token в CF |
+| **Create Zone** | CF: создать zone | Записать zone + domain | Rollback: удалить zone в CF |
+| **Delete Zone** | CF: удалить zone | Пометить deleted | Игнорировать (zone уже удалена в CF) |
+| **Sync Zones** | CF: list zones | Upsert каждую | Partial Success: продолжить остальные |
+| **Batch DNS** | CF: create/update/delete | Инвалидировать кэш | Игнорировать (кэш не критичен) |
+
+---
+
+## 3.5 Таймауты и лимиты
+
+| Параметр | Значение | Причина |
+|----------|----------|---------|
+| External API timeout | 30 сек | CF/Namecheap могут быть медленными |
+| D1 retry attempts | 3 | Достаточно для временных сбоев |
+| D1 retry backoff | 100ms, 200ms, 300ms | Экспоненциальный рост |
+| Batch операции max | 100 | Лимит CF API |
+| Cron orphan cleanup | 24 часа | Не критично, но регулярно |
+
+---
+
+## 3.6 Логирование ошибок
+
+| Уровень | Что логируем | Где |
+|---------|--------------|-----|
+| **ERROR** | Сбой External API, сбой D1 после retry | console.error + (опционально) external logging |
+| **WARN** | Частичный успех, orphan создан | console.warn |
+| **INFO** | Успешные операции с метриками | console.log (только в dev) |
+
+---
+
+## 3.7 Пример кода: безопасная операция
+
+```typescript
+async function safeExternalOperation<T>(
+  externalCall: () => Promise<T>,
+  dbCall: (result: T) => Promise<void>,
+  rollbackCall?: (result: T) => Promise<void>
+): Promise<{ ok: true; result: T } | { ok: false; error: string; context?: unknown }> {
+
+  // 1. External API
+  let externalResult: T;
+  try {
+    externalResult = await externalCall();
+  } catch (e) {
+    return { ok: false, error: "external_failed", context: String(e) };
+  }
+
+  // 2. D1 с retry
+  let dbSuccess = false;
+  for (let i = 0; i < 3; i++) {
+    try {
+      await dbCall(externalResult);
+      dbSuccess = true;
+      break;
+    } catch {
+      await new Promise(r => setTimeout(r, 100 * (i + 1)));
+    }
+  }
+
+  // 3. Rollback если D1 упал
+  if (!dbSuccess) {
+    if (rollbackCall) {
+      await rollbackCall(externalResult).catch(() => {});
+    }
+    return { ok: false, error: "db_failed", context: externalResult };
+  }
+
+  return { ok: true, result: externalResult };
+}
+```
+
+---
+
+## 3.8 Диаграмма потока
+
+```mermaid
+flowchart TD
+    UI[UI] --> Back[Back API]
+    Back --> ExtAPI[External API<br/>CF / Namecheap]
+
+    ExtAPI --> CheckExt{Success?}
+    CheckExt -->|No| ErrExt[Return error to UI]
+
+    CheckExt -->|Yes| WriteD1[Write D1]
+    WriteD1 --> CheckD1{Success?}
+
+    CheckD1 -->|No| Retry[Retry 3x<br/>with backoff]
+    Retry --> CheckRetry{Still fails?}
+
+    CheckRetry -->|Yes| Rollback[Rollback External<br/>best effort]
+    Rollback --> ErrCtx[Return error + context]
+
+    CheckRetry -->|No| WriteKV
+    CheckD1 -->|Yes| WriteKV[Write KV<br/>best effort]
+
+    WriteKV --> ReturnOK[Return OK to UI]
+```
+
 ### Apply Pipeline
 
 Изменения применяются только по явному действию пользователя — кнопка "ПРИМЕНИТЬ":
