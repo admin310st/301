@@ -288,35 +288,46 @@ async function deleteExistingCFIntegration(
 }
 
 /**
- * Проверка тарифного лимита
+ * Проверка лимита CF ключей
+ * 
+ * Логика:
+ * - free: 1 CF аккаунт
+ * - pro/buss: без лимита (пока)
  */
 async function checkCFKeyQuota(
   env: Env,
   accountId: number
 ): Promise<{ limit: number; current: number; plan: string }> {
-  const quotaRow = await env.DB301.prepare(
-    `
-    SELECT ql.max_cf_accounts, p.name as plan_name
-    FROM accounts a
-    LEFT JOIN quota_limits ql ON a.plan_id = ql.plan_id
-    LEFT JOIN plans p ON a.plan_id = p.id
-    WHERE a.id = ?
-    `
+  // Получаем plan_tier аккаунта
+  const accountRow = await env.DB301.prepare(
+    `SELECT plan_tier FROM accounts WHERE id = ?`
   )
     .bind(accountId)
-    .first<{ max_cf_accounts: number | null; plan_name: string | null }>();
+    .first<{ plan_tier: string }>();
 
+  const plan = accountRow?.plan_tier ?? "free";
+
+  // Лимит CF аккаунтов по тарифу
+  const limitByPlan: Record<string, number> = {
+    free: 1,
+    pro: 10,
+    buss: 100,
+  };
+  const limit = limitByPlan[plan] ?? 1;
+
+  // Считаем текущие активные CF ключи
   const countRow = await env.DB301.prepare(
-    `SELECT COUNT(*) as count FROM account_keys 
+    `SELECT COUNT(DISTINCT external_account_id) as count 
+     FROM account_keys 
      WHERE account_id = ? AND provider = 'cloudflare' AND status = 'active'`
   )
     .bind(accountId)
     .first<{ count: number }>();
 
   return {
-    limit: quotaRow?.max_cf_accounts ?? 1,
+    limit,
     current: countRow?.count ?? 0,
-    plan: quotaRow?.plan_name ?? "free",
+    plan,
   };
 }
 
@@ -491,7 +502,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 11. Delete old working token (rotate scenario)
+  // 11. Delete old working token + cleanup duplicates (rotate scenario)
   // ─────────────────────────────────────────────────────────
 
   if (scenario === "rotate" && existingSameAccount) {
@@ -501,6 +512,30 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
     if (oldScope.cf_token_id) {
       await deleteCFToken(cf_account_id, oldScope.cf_token_id, bootstrap_token).catch((e) =>
         console.warn("Failed to delete old working token:", e)
+      );
+    }
+
+    // Чистка дубликатов: удаляем ВСЕ другие ключи с этим external_account_id
+    // Правило: 1 CF аккаунт = 1 ключ в 301.st
+    const duplicates = existingCFKeys.filter(
+      (k) =>
+        k.external_account_id === cf_account_id &&
+        k.id !== existingSameAccount.id &&
+        k.status === "active"
+    );
+
+    for (const dup of duplicates) {
+      console.warn(`Cleaning duplicate CF key: id=${dup.id}`);
+      const dupScope = dup.provider_scope ? JSON.parse(dup.provider_scope) : {};
+
+      // Удаляем токен в CF (best effort)
+      if (dupScope.cf_token_id) {
+        await deleteCFToken(cf_account_id, dupScope.cf_token_id, bootstrap_token).catch(() => {});
+      }
+
+      // Удаляем ключ из storage (D1 + KV)
+      await deleteKey(env, dup.id).catch((e) =>
+        console.error(`Failed to delete duplicate key ${dup.id}:`, e)
       );
     }
   }

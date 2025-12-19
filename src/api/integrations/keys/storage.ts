@@ -350,7 +350,7 @@ export async function updateKey(
   }
 
   // 3. Собираем UPDATE для D1
-  const updates: string[] = ["updated_at = CURRENT_TIMESTAMP"];
+  const updates: string[] = [];
   const bindings: (string | number | null)[] = [];
 
   if (key_alias !== undefined) {
@@ -376,7 +376,7 @@ export async function updateKey(
   }
 
   // 4. Выполняем UPDATE (с retry)
-  if (updates.length > 1) {
+  if (updates.length > 0) {
     bindings.push(key_id);
     try {
       await withRetry(async () => {

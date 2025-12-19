@@ -88,13 +88,15 @@ async function getQuota(
 ): Promise<{ limits: QuotaLimits; usage: QuotaUsage } | null> {
   const result = await env.DB301.prepare(
     `SELECT 
+       a.plan_tier,
        ql.max_zones, ql.max_domains,
        qu.zones_used, qu.domains_used
      FROM accounts a
-     LEFT JOIN quota_limits ql ON a.plan_id = ql.plan_id
+     LEFT JOIN quota_limits ql ON a.plan_tier = ql.plan_tier
      LEFT JOIN quota_usage qu ON a.id = qu.account_id
      WHERE a.id = ?`
   ).bind(accountId).first<{
+    plan_tier: string | null;
     max_zones: number | null;
     max_domains: number | null;
     zones_used: number | null;
@@ -105,8 +107,8 @@ async function getQuota(
 
   return {
     limits: {
-      max_zones: result.max_zones ?? 100,
-      max_domains: result.max_domains ?? 1000,
+      max_zones: result.max_zones ?? 10,
+      max_domains: result.max_domains ?? 10,
     },
     usage: {
       zones_used: result.zones_used ?? 0,
