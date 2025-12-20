@@ -588,12 +588,19 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   );
 
   // ─────────────────────────────────────────────────────────
-  // 14. Sync zones (create/replace scenarios)
+  // 14. Sync zones (if no zones exist for this key)
   // ─────────────────────────────────────────────────────────
 
   let syncResult: { zones: number; domains: number } | undefined;
 
-  if (scenario === "create" || scenario === "replace") {
+  // Проверяем есть ли зоны у этого ключа
+  const zonesCount = await env.DB301.prepare(
+    "SELECT COUNT(*) as cnt FROM zones WHERE key_id = ?"
+  )
+    .bind(keyId)
+    .first<{ cnt: number }>();
+
+  if (!zonesCount || zonesCount.cnt === 0) {
     try {
       const { syncZonesInternal } = await import("./zones");
       const sync = await syncZonesInternal(env, accountId, keyId, cf_account_id, workingToken.value);
