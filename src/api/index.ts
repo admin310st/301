@@ -36,6 +36,15 @@ import {
   handlePurgeCache,
 } from "./integrations/providers/cloudflare/zoneconf";
 
+// Domains
+import {
+  handleListDomains,
+  handleGetDomain,
+  handleCreateDomain,
+  handleUpdateDomain,
+  handleDeleteDomain,
+} from "./domains/domains";
+
 // Cron
 import cronHandler from "./jobs/cron";
 
@@ -77,6 +86,13 @@ app.post("/zones/:id/dns/batch", handleBatchDNS);
 app.get("/zones/:id/settings", handleGetZoneSettings);
 app.patch("/zones/:id/settings", handleUpdateZoneSettings);
 app.post("/zones/:id/purge-cache", handlePurgeCache);
+
+// --- Domains ---
+app.get("/domains", handleListDomains);
+app.get("/domains/:id", handleGetDomain);
+app.post("/domains", handleCreateDomain);
+app.patch("/domains/:id", handleUpdateDomain);
+app.delete("/domains/:id", handleDeleteDomain);
 
 export default {
   fetch: app.fetch,
