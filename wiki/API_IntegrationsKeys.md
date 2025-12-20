@@ -56,6 +56,15 @@ flowchart LR
 
 **Требует:** `Authorization: Bearer <access_token>`
 
+Логика:
+
+create → syncZones 
+replace → syncZones 
+rotate → syncZones 
+УсловиеДействие
+`zones.count === 0` syncZones ✅
+`zones.count > 0` Пропустить sync (экономия API)
+
 **Параметры запроса:**
 
 | Поле | Тип | Обязательно | Описание |
@@ -63,6 +72,7 @@ flowchart LR
 | `cf_account_id` | string | да | ID аккаунта Cloudflare |
 | `bootstrap_token` | string | да | Временный токен с правами создания токенов |
 | `key_alias` | string | нет | Название для UI (по умолчанию: `301st-YYYYMMDD-HHMMSS`) |
+| `confirm_replace` | boolean | нет | Подтверждение замены CF аккаунта (для free плана) |
 
 **Пример запроса:**
 
@@ -81,11 +91,25 @@ curl -X POST https://api.301.st/integrations/cloudflare/init \
 **Успешный ответ:**
 
 ```json
+**Успешный ответ:**
+```json
 {
   "ok": true,
-  "key_id": 42
+  "key_id": 42,
+  "is_rotation": false,
+  "sync": {
+    "zones": 5,
+    "domains": 12
+  }
 }
 ```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `key_id` | number | ID созданного/обновлённого ключа |
+| `is_rotation` | boolean | `true` — обновлён существующий ключ, `false` — создан новый |
+| `sync` | object | Результат синхронизации зон (только при create/replace) |
+
 
 **Flow:**
 
@@ -98,37 +122,70 @@ sequenceDiagram
     participant D1
 
     UI->>API: POST /integrations/cloudflare/init
+    API->>API: Check quota & plan
+    API->>D1: Find existing keys
+    API->>API: Determine scenario (create/rotate/replace)
+    
+    alt cf_account_conflict (free plan)
+        API-->>UI: 409 cf_account_conflict
+        UI->>UI: Show confirmation dialog
+        UI->>API: Retry with confirm_replace=true
+    end
+    
     API->>CF: Verify bootstrap token
     CF-->>API: OK + token_id
     API->>CF: Get permission groups
     CF-->>API: 200+ groups
-    API->>API: Map required permissions
+    API->>API: Validate required permissions
     API->>CF: Create working token
     CF-->>API: New token + value
     API->>CF: Verify working token
     CF-->>API: OK
+    
+    alt rotate scenario
+        API->>CF: Delete old working token
+        API->>D1: Delete duplicate keys
+    end
+    
+    alt replace scenario
+        API->>CF: Delete old working token
+        API->>D1: Delete old zones & domains
+        API->>D1: Delete old key
+    end
+    
     API->>KV: PUT encrypted(working_token)
-    API->>D1: INSERT account_keys
+    API->>D1: INSERT/UPDATE account_keys
     API->>CF: DELETE bootstrap token
-    API-->>UI: { ok: true, key_id }
+    
+    alt create or replace
+        API->>CF: List zones
+        API->>D1: Sync zones & domains
+    end
+    
+    API-->>UI: { ok: true, key_id, is_rotation, sync }
 ```
 
 **Ошибки:**
 
-| Код | HTTP | Описание |
-|-----|------|----------|
-| `missing_fields` | 400 | Не переданы обязательные поля (см. `fields` в ответе) |
-| `bootstrap_invalid` | 400 | Bootstrap token невалиден |
-| `bootstrap_not_active` | 400 | Bootstrap token не активен (см. `status` в ответе) |
-| `permission_groups_failed` | 400 | Не удалось получить permission groups от CF |
-| `permissions_missing` | 400 | Bootstrap не имеет нужных прав (см. `missing` в ответе) |
-| `cf_key_already_exists` | 409 | Ключ для этого CF аккаунта уже существует |
-| `token_creation_failed` | 500 | Ошибка создания working token |
-| `working_token_invalid` | 500 | Созданный токен не прошёл верификацию |
-| `storage_failed` | 500 | Ошибка сохранения в KV/D1 |
+| Код | HTTP | recoverable | Описание |
+|-----|------|-------------|----------|
+| `invalid_json` | 400 | ✗ | Невалидный JSON в теле запроса |
+| `missing_fields` | 400 | ✗ | Не переданы обязательные поля |
+| `owner_required` | 403 | ✗ | Требуются права owner |
+| `quota_exceeded` | 403 | ✗ | Превышен лимит CF аккаунтов для тарифа |
+| `cf_account_conflict` | 409 | ✗ | На free плане уже есть другой CF аккаунт |
+| `bootstrap_invalid` | 400 | ✗ | Bootstrap token невалиден |
+| `bootstrap_expired` | 400 | ✗ | Bootstrap token истёк |
+| `bootstrap_not_active` | 400 | ✗ | Bootstrap token не активен |
+| `permissions_missing` | 400 | ✗ | Недостаточно прав у bootstrap |
+| `cf_rejected` | 400 | ✗ | CF API отклонил запрос |
+| `cf_unavailable` | 503 | ✓ | CF API недоступен (можно retry) |
+| `storage_failed` | 500 | ✓ | Ошибка сохранения (context содержит данные для cleanup) |
+| `cleanup_failed` | 500 | ✗ | Ошибка очистки старой интеграции |
 
 **Примеры ошибок:**
 
+**Примеры ошибок:**
 ```json
 // Отсутствуют поля
 {
@@ -137,21 +194,67 @@ sequenceDiagram
   "fields": ["cf_account_id", "bootstrap_token"]
 }
 
+// Превышена квота
+{
+  "ok": false,
+  "error": "quota_exceeded",
+  "recoverable": false,
+  "context": {
+    "limit": 1,
+    "current": 1,
+    "plan": "free"
+  }
+}
+
+// Конфликт CF аккаунтов (требуется подтверждение замены)
+{
+  "ok": false,
+  "error": "cf_account_conflict",
+  "recoverable": false,
+  "context": {
+    "existing_account_id": "abc123def456",
+    "existing_key_id": 45,
+    "new_account_id": "xyz789new123",
+    "resolution": "confirm_replace"
+  }
+}
+
 // Недостаточно прав у bootstrap
 {
   "ok": false,
   "error": "permissions_missing",
-  "missing": ["D1 Read", "D1 Write", "Workers KV Storage Read"]
+  "missing": ["Zone Read", "DNS Write", "Workers Scripts Write"]
 }
 
-// Bootstrap истёк
+// Bootstrap не активен
 {
   "ok": false,
   "error": "bootstrap_not_active",
   "status": "expired"
 }
-```
 
+// Ошибка CF API
+{
+  "ok": false,
+  "error": "cf_rejected",
+  "recoverable": false,
+  "context": {
+    "code": 1000,
+    "message": "Invalid API Token"
+  }
+}
+
+// Ошибка сохранения (с контекстом для ручного cleanup)
+{
+  "ok": false,
+  "error": "storage_failed",
+  "recoverable": true,
+  "context": {
+    "cf_token_id": "token_abc123",
+    "cf_account_id": "abc123def456"
+  }
+}
+```
 ```
 # ============================================================
 # POST /integrations/cloudflare/init
@@ -259,6 +362,92 @@ Bootstrap token должен иметь право создавать токен
 | Workers Routes Write | Account | Создание маршрутов |
 | Rules Read | Zone | Чтение Redirect Rules |
 | Rules Write | Zone | Создание Redirect Rules |
+
+---
+### 2.3 Сценарии инициализации
+
+#### Определение сценария
+
+| Сценарий | Условие | Действие |
+|----------|---------|----------|
+| **CREATE** | Нет активных CF ключей ИЛИ новый CF аккаунт (paid план в пределах лимита) | Создать ключ → syncZones |
+| **ROTATE** | Есть активный ключ с тем же `cf_account_id` | Обновить токен, удалить дубликаты |
+| **REPLACE** | Free план + другой CF аккаунт + `confirm_replace=true` | Удалить старый → создать новый → syncZones |
+
+#### Лимиты по тарифам
+
+| План | Макс. CF аккаунтов | Описание |
+|------|-------------------|----------|
+| free | 1 | Один CF аккаунт, один ключ |
+| pro | 10 | До 10 разных CF аккаунтов |
+| buss | 100 | До 100 разных CF аккаунтов |
+
+> **Правило:** 1 CF аккаунт = 1 ключ в 301.st (дубликаты автоматически удаляются при ротации)
+
+#### Пример: Замена CF аккаунта на free плане
+
+**Шаг 1:** Запрос без подтверждения
+```bash
+curl -X POST https://api.301.st/integrations/cloudflare/init \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cf_account_id": "new_cf_account_id",
+    "bootstrap_token": "bootstrap_for_new_account"
+  }'
+```
+
+**Ответ:** 409 Conflict
+```json
+{
+  "ok": false,
+  "error": "cf_account_conflict",
+  "recoverable": false,
+  "context": {
+    "existing_account_id": "old_cf_account_id",
+    "existing_key_id": 45,
+    "new_account_id": "new_cf_account_id",
+    "resolution": "confirm_replace"
+  }
+}
+```
+
+**Шаг 2:** UI показывает диалог
+
+> ⚠️ У вас уже подключён CF аккаунт `old_cf_account_id`.
+> На бесплатном плане можно использовать только 1 аккаунт.
+> 
+> При замене будут удалены:
+> - Текущий ключ интеграции
+> - Все синхронизированные зоны
+> - Все связанные домены
+>
+> [Отмена] [Заменить аккаунт]
+
+**Шаг 3:** Запрос с подтверждением
+```bash
+curl -X POST https://api.301.st/integrations/cloudflare/init \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cf_account_id": "new_cf_account_id",
+    "bootstrap_token": "bootstrap_for_new_account",
+    "confirm_replace": true
+  }'
+```
+
+**Ответ:** 200 OK
+```json
+{
+  "ok": true,
+  "key_id": 46,
+  "is_rotation": false,
+  "sync": {
+    "zones": 3,
+    "domains": 7
+  }
+}
+```
 
 ---
 
@@ -594,6 +783,7 @@ curl -X DELETE https://api.301.st/integrations/keys/42 \
 | `/integrations/keys/:id` | DELETE | ✅ JWT | Удалить ключ |
 
 ---
+
 
 © 301.st — API Integrations Documentation
 
