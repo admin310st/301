@@ -13,7 +13,7 @@
 import { Context } from "hono";
 import { Env } from "../../../types/worker";
 import { requireAuth, requireEditor } from "../../../lib/auth";
-import { decrypt } from "../../../lib/crypto";
+import { getDecryptedKey } from "../../keys/storage";
 
 // ============================================================
 // TYPES
@@ -105,24 +105,6 @@ const CACHE_TTL_DEFAULT = 15 * 60; // 15 минут
 // ============================================================
 // HELPERS
 // ============================================================
-
-/**
- * Получить расшифрованный токен из KV
- */
-async function getDecryptedToken(
-  env: Env,
-  kvKey: string
-): Promise<string | null> {
-  const encrypted = await env.KV_CREDENTIALS.get(kvKey);
-  if (!encrypted) return null;
-  
-  try {
-    const data = JSON.parse(encrypted);
-    return await decrypt(data.token, env.ENCRYPTION_KEY);
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Получить TTL кэша из настроек
@@ -577,23 +559,24 @@ async function getZoneWithToken(
   zoneId: number,
   accountId: number
 ): Promise<{ ok: true; cfZoneId: string; token: string } | { ok: false; error: string; status: number }> {
+  // Получаем зону с key_id
   const zone = await env.DB301.prepare(
-    `SELECT z.cf_zone_id, ak.kv_key
+    `SELECT z.cf_zone_id, z.key_id
      FROM zones z
-     JOIN account_keys ak ON z.key_id = ak.id
      WHERE z.id = ? AND z.account_id = ?`
-  ).bind(zoneId, accountId).first<{ cf_zone_id: string; kv_key: string }>();
+  ).bind(zoneId, accountId).first<{ cf_zone_id: string; key_id: number }>();
 
   if (!zone) {
     return { ok: false, error: "zone_not_found", status: 404 };
   }
 
-  const token = await getDecryptedToken(env, zone.kv_key);
-  if (!token) {
+  // Используем getDecryptedKey из storage.ts
+  const keyData = await getDecryptedKey(env, zone.key_id);
+  if (!keyData) {
     return { ok: false, error: "key_invalid", status: 500 };
   }
 
-  return { ok: true, cfZoneId: zone.cf_zone_id, token };
+  return { ok: true, cfZoneId: zone.cf_zone_id, token: keyData.secrets.token };
 }
 
 // ============================================================
@@ -773,3 +756,4 @@ export async function handlePurgeCache(c: Context<{ Bindings: Env }>) {
     purged: body.files ? body.files.length : "all",
   });
 }
+
