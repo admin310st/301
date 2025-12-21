@@ -1,10 +1,12 @@
 /**
  * GitHub OAuth 2.0 Start
  * GitHub НЕ поддерживает PKCE — используем только state
+ * 
+ * GET /auth/oauth/github/start?redirect_host=app.301.st
  */
 
 import { Hono } from "hono";
-import { storeState, buildOAuthUrl } from "../../../lib/oauth";
+import { storeState, buildOAuthUrl, validateRedirectHost } from "../../../lib/oauth";
 
 const app = new Hono();
 
@@ -16,10 +18,15 @@ app.get("/", async (c) => {
     return c.text("OAuth misconfigured: missing GITHUB_CLIENT_ID", 500);
   }
 
+  // 1. Получение и валидация redirect_host
+  const rawRedirectHost = c.req.query("redirect_host");
+  const redirectHost = validateRedirectHost(rawRedirectHost);
+
+  // 2. Генерация state
   const state = crypto.randomUUID();
 
-  // Сохраняем state (verifier = "none" — GitHub не поддерживает PKCE)
-  await storeState(c.env, "github", state, "github-no-pkce");
+  // 3. Сохраняем state + redirect_host (verifier = placeholder, GitHub не поддерживает PKCE)
+  await storeState(c.env, "github", state, "github-no-pkce", redirectHost);
 
   const redirect_uri = `${redirect_base}/auth/oauth/github/callback`;
 
@@ -35,3 +42,4 @@ app.get("/", async (c) => {
 });
 
 export default app;
+

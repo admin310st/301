@@ -1,16 +1,22 @@
 /**
  * Endpoint:
- *   GET /auth/oauth/google/start
+ *   GET /auth/oauth/google/start?redirect_host=app.301.st
  *
  * Flow:
- * 1. Генерация state (CSRF protection)
- * 2. Генерация PKCE (verifier + challenge)
- * 3. Сохранение verifier в KV (ключ oauth:google:<state>, TTL 5 минут)
- * 4. Формирование URL авторизации Google и редирект пользователя
+ * 1. Получение и валидация redirect_host из query
+ * 2. Генерация state (CSRF protection)
+ * 3. Генерация PKCE (verifier + challenge)
+ * 4. Сохранение verifier + redirect_host в KV
+ * 5. Формирование URL авторизации Google и редирект пользователя
  */
 
 import { Hono } from "hono";
-import { generatePKCE, storeState, buildOAuthUrl } from "../../../lib/oauth";
+import { 
+  generatePKCE, 
+  storeState, 
+  buildOAuthUrl, 
+  validateRedirectHost 
+} from "../../../lib/oauth";
 
 const app = new Hono();
 
@@ -22,16 +28,20 @@ app.get("/", async (c) => {
     return c.text("OAuth misconfigured: missing GOOGLE_CLIENT_ID", 500);
   }
 
-  // 1. Генерация state (CSRF protection)
+  // 1. Получение и валидация redirect_host
+  const rawRedirectHost = c.req.query("redirect_host");
+  const redirectHost = validateRedirectHost(rawRedirectHost);
+
+  // 2. Генерация state (CSRF protection)
   const state = crypto.randomUUID();
 
-  // 2. Генерация PKCE параметров
+  // 3. Генерация PKCE параметров
   const { verifier, challenge } = await generatePKCE();
 
-  // 3. Сохранение verifier в KV под ключом oauth:google:<state>
-  await storeState(c.env, "google", state, verifier);
+  // 4. Сохранение verifier + redirect_host в KV
+  await storeState(c.env, "google", state, verifier, redirectHost);
 
-  // 4. Формирование redirect URL
+  // 5. Формирование redirect URL
   const redirect_uri = `${redirect_base}/auth/oauth/google/callback`;
   const authUrl = buildOAuthUrl("https://accounts.google.com/o/oauth2/v2/auth", {
     client_id,

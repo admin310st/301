@@ -260,12 +260,12 @@ curl -X POST https://api.301.st/auth/register \
 
 ```mermaid
 flowchart LR
-  UI -->|start| GStart[/GET \/auth\/oauth\/google\/start/]
+  UI -->|start + redirect_host| GStart[/GET \/auth\/oauth\/google\/start/]
   GStart --> Google[Google OAuth Screen]
   Google -->|redirect| GCallback[/GET \/auth\/oauth\/google\/callback/]
   GCallback --> VerifyUser[[Создание/поиск пользователя]]
   VerifyUser --> Login[[access_token + refresh_cookie]]
-  Login --> UI
+  Login -->|redirect to redirect_host| UI
 ```
 
 ### Описание
@@ -282,18 +282,25 @@ Google гарантирует подлинность email, поэтому:
 
 **Метод:** `GET /auth/oauth/google/start`
 
-UI перенаправляет пользователя:
+**Query параметры:**
+
+| Параметр | Тип | Обязательно | Описание |
+|----------|-----|-------------|----------|
+| `redirect_host` | string | нет | Хост для redirect после OAuth (по умолчанию `301.st`) |
+
+**Пример:**
 
 ```
-https://api.301.st/auth/oauth/google/start
+https://api.301.st/auth/oauth/google/start?redirect_host=app.301.st
 ```
 
 Сервер:
 
-1. создаёт `state` (CSRF protection)
-2. генерирует PKCE (code_verifier + code_challenge)
-3. сохраняет verifier в KV (TTL 5 минут)
-4. перенаправляет пользователя в Google OAuth
+1. получает и валидирует `redirect_host` по whitelist
+2. создаёт `state` (CSRF protection)
+3. генерирует PKCE (code_verifier + code_challenge)
+4. сохраняет verifier + redirect_host в KV (TTL 5 минут)
+5. перенаправляет пользователя в Google OAuth
 
 ### Шаг 2 — Callback
 
@@ -306,7 +313,7 @@ GET /auth/oauth/google/callback?code=...&state=...
 Сервер:
 
 1. проверяет `state` (CSRF)
-2. извлекает PKCE verifier из KV
+2. извлекает PKCE verifier и redirect_host из KV
 3. обменивает `code → id_token` с code_verifier
 4. **верифицирует id_token через Google JWKS**
 5. извлекает email и google_sub
@@ -315,17 +322,40 @@ GET /auth/oauth/google/callback?code=...&state=...
 8. создаёт аккаунт и membership (owner)
 9. создаёт refresh-cookie
 10. генерирует access_token с fingerprint (IP + UA)
-11. редиректит на `https://301.st/auth/success?token=...`
+11. редиректит на `https://{redirect_host}/auth/success?token=...`
+
+### Whitelist разрешённых хостов
+
+Финальный redirect выполняется только на разрешённые хосты.
+**Изменение whitelist требует редеплоя.**
+
+| Хост | Описание |
+|------|----------|
+| `app.301.st` | Production SaaS |
+| `dev.301.st` | Development/Staging |
+| `301.st` | Landing (fallback) |
+| `localhost:5173` | Local dev (Vite) |
+| `localhost:3000` | Local dev |
 
 ### Поведение UI
 
-1. UI открывает `https://api.301.st/auth/oauth/google/start` (redirect или popup).
-2. Пользователь авторизуется в Google.
-3. Google редиректит на callback → сервер обрабатывает.
-4. Браузер получает redirect на `https://301.st/auth/success?token=JWT`.
-5. UI извлекает `token` из URL.
-6. Сохраняет его в памяти.
-7. Делает redirect в личный кабинет.
+```javascript
+// Инициация OAuth с передачей текущего хоста
+function startGoogleOAuth() {
+  const host = window.location.host; // app.301.st | dev.301.st | localhost:5173
+  const url = `https://api.301.st/auth/oauth/google/start?redirect_host=${encodeURIComponent(host)}`;
+  window.location.href = url;
+}
+```
+
+1. UI вызывает `startGoogleOAuth()` при клике на кнопку "Войти через Google"
+2. Передаёт текущий `host` в параметре `redirect_host`
+3. Пользователь авторизуется в Google
+4. Google редиректит на callback → сервер обрабатывает
+5. Браузер получает redirect на `https://{тот же host}/auth/success?token=JWT`
+6. UI извлекает `token` из URL
+7. Сохраняет его в памяти
+8. Делает redirect в личный кабинет
 
 ---
 
@@ -333,12 +363,12 @@ GET /auth/oauth/google/callback?code=...&state=...
 
 ```mermaid
 flowchart LR
-  UI -->|start| GHStart[/GET \/auth\/oauth\/github\/start/]
+  UI -->|start + redirect_host| GHStart[/GET \/auth\/oauth\/github\/start/]
   GHStart --> GitHub[GitHub OAuth Screen]
   GitHub -->|redirect| GHCallback[/GET \/auth\/oauth\/github\/callback/]
   GHCallback --> VerifyUser[[Создание/поиск пользователя]]
   VerifyUser --> Login[[access_token + refresh_cookie]]
-  Login --> UI
+  Login -->|redirect to redirect_host| UI
 ```
 
 ### Описание
@@ -351,15 +381,24 @@ flowchart LR
 
 **Метод:** `GET /auth/oauth/github/start`
 
+**Query параметры:**
+
+| Параметр | Тип | Обязательно | Описание |
+|----------|-----|-------------|----------|
+| `redirect_host` | string | нет | Хост для redirect после OAuth (по умолчанию `301.st`) |
+
+**Пример:**
+
 ```
-https://api.301.st/auth/oauth/github/start
+https://api.301.st/auth/oauth/github/start?redirect_host=dev.301.st
 ```
 
 Сервер:
 
-1. создаёт `state` (CSRF protection)
-2. сохраняет state в KV (TTL 5 минут)
-3. перенаправляет на GitHub OAuth (scope: `read:user user:email`)
+1. получает и валидирует `redirect_host` по whitelist
+2. создаёт `state` (CSRF protection)
+3. сохраняет state + redirect_host в KV (TTL 5 минут)
+4. перенаправляет на GitHub OAuth (scope: `read:user user:email`)
 
 ### Шаг 2 — Callback
 
@@ -370,18 +409,30 @@ GET /auth/oauth/github/callback?code=...&state=...
 Сервер:
 
 1. проверяет `state`
-2. обменивает `code → access_token`
-3. запрашивает профиль GitHub (`/user`)
-4. запрашивает email (`/user/emails`) если скрыт
-5. создаёт/обновляет пользователя
-6. создаёт refresh-cookie + access_token
-7. редиректит на `https://301.st/auth/success?token=...`
+2. извлекает redirect_host из KV
+3. обменивает `code → access_token`
+4. запрашивает профиль GitHub (`/user`)
+5. запрашивает email (`/user/emails`) если скрыт
+6. создаёт/обновляет пользователя
+7. создаёт refresh-cookie + access_token
+8. редиректит на `https://{redirect_host}/auth/success?token=...`
 
 ### Особенности GitHub
 
 * Email может быть скрыт — делается дополнительный запрос к `/user/emails`
 * Если email полностью скрыт — генерируется `github_{id}@301.st`
 * GitHub API требует заголовок `User-Agent`
+
+### Поведение UI
+
+```javascript
+// Инициация OAuth с передачей текущего хоста
+function startGitHubOAuth() {
+  const host = window.location.host;
+  const url = `https://api.301.st/auth/oauth/github/start?redirect_host=${encodeURIComponent(host)}`;
+  window.location.href = url;
+}
+```
 
 ---
 
@@ -1773,17 +1824,18 @@ console.log(document.cookie);  // refresh_id НЕ должен быть виде
 
 ## 10.8 Краткая таблица endpoints
 
-| Endpoint | Метод | Turnstile | Cookie | CSRF |
-|----------|-------|-----------|--------|------|
-| `/auth/register` | POST | ✅ | — | — |
-| `/auth/login` | POST | ✅ | — | — |
-| `/auth/verify` | POST | — | `credentials` | — |
-| `/auth/refresh` | POST | — | `credentials` | — |
-| `/auth/logout` | POST | — | `credentials` | — |
-| `/auth/me` | GET | — | `Authorization` | — |
-| `/auth/reset_password` | POST | ✅ | — | — |
-| `/auth/confirm_password` | POST | — | `credentials` | ✅ |
-| `/auth/oauth/*/start` | GET | — | — | — |
+| Endpoint | Метод | Turnstile | Cookie | CSRF | Параметры |
+|----------|-------|-----------|--------|------|-----------|
+| `/auth/register` | POST | ✅ | — | — | body |
+| `/auth/login` | POST | ✅ | — | — | body |
+| `/auth/verify` | POST | — | `credentials` | — | body |
+| `/auth/refresh` | POST | — | `credentials` | — | — |
+| `/auth/logout` | POST | — | `credentials` | — | — |
+| `/auth/me` | GET | — | `Authorization` | — | — |
+| `/auth/reset_password` | POST | ✅ | — | — | body |
+| `/auth/confirm_password` | POST | — | `credentials` | ✅ | body |
+| `/auth/oauth/google/start` | GET | — | — | — | `?redirect_host=` |
+| `/auth/oauth/github/start` | GET | — | — | — | `?redirect_host=` |
 
 ---
 

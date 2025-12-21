@@ -6,7 +6,7 @@
  */
 
 import { Hono } from "hono";
-import { consumeState } from "../../../lib/oauth";
+import { consumeState, buildSuccessRedirectUrl } from "../../../lib/oauth";
 import { signJWT } from "../../../lib/jwt";
 import { logAuth } from "../../../lib/logger";
 import { createRefreshSession } from "../../../lib/session";
@@ -30,10 +30,12 @@ app.get("/", async (c) => {
     const { ip, ua } = extractRequestInfo(c);
 
     // 1. Проверка state (CSRF) — verifier игнорируется GitHub'ом
-    const verifier = await consumeState(c.env, "github", state);
-    if (!verifier) {
+    const stateData = await consumeState(c.env, "github", state);
+    if (!stateData) {
       return c.text("Invalid or expired state", 400);
     }
+    const { redirectHost } = stateData;
+    // verifier не используется для GitHub (не поддерживает PKCE)
 
     const client_id = c.env.GITHUB_CLIENT_ID;
     const client_secret = c.env.GITHUB_CLIENT_SECRET;
@@ -237,8 +239,9 @@ app.get("/", async (c) => {
       { ip, ua }
     );
 
-    // 9. Redirect
-    return Response.redirect(`https://301.st/auth/success?token=${jwt}`, 302);
+    // 9. Redirect на исходный хост
+    const redirectTo = buildSuccessRedirectUrl(redirectHost, jwt);
+    return Response.redirect(redirectTo, 302);
   } catch (err) {
     console.error("GitHub OAuth callback error:", err);
     return c.text("OAuth callback failed", 500);

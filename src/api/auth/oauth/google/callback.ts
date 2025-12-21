@@ -14,7 +14,7 @@
  */
 
 import { Hono } from "hono";
-import { consumeState } from "../../../lib/oauth";
+import { consumeState, buildSuccessRedirectUrl } from "../../../lib/oauth";
 import { signJWT } from "../../../lib/jwt";
 import { logAuth } from "../../../lib/logger";
 import { createRemoteJWKSet, jwtVerify } from "jose";
@@ -33,13 +33,11 @@ app.get("/", async (c) => {
     const { ip, ua } = extractRequestInfo(c);
 
     // 1) Проверка state (CSRF) и извлечение PKCE verifier
-    let verifier = await consumeState(c.env, "google", state);
-    if (!verifier) {
-      const fallbackKey = `oauth:google:state:${state}`;
-      verifier = await c.env.KV_SESSIONS.get(fallbackKey);
-      if (!verifier) return c.text("Invalid or expired state", 400);
-      await c.env.KV_SESSIONS.delete(fallbackKey);
+    const stateData = await consumeState(c.env, "google", state);
+    if (!stateData) {
+      return c.text("Invalid or expired state", 400);
     }
+    const { verifier, redirectHost } = stateData;
 
     const client_id = c.env.GOOGLE_CLIENT_ID;
     const client_secret = c.env.GOOGLE_CLIENT_SECRET;
@@ -203,8 +201,8 @@ app.get("/", async (c) => {
       { ip, ua }
     );
 
-    // 8) Redirect
-    const redirectTo = `https://301.st/auth/success?token=${jwt}`;
+    // 8) Redirect на исходный хост
+    const redirectTo = buildSuccessRedirectUrl(redirectHost, jwt);
     return Response.redirect(redirectTo, 302);
 
   } catch (err) {
