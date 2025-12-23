@@ -43,7 +43,10 @@ import {
   handleCreateDomain,
   handleUpdateDomain,
   handleDeleteDomain,
+  handleBatchCreateDomains, 
 } from "./domains/domains";
+
+import { handleBatchCreateZones } from "./domains/zones-batch";
 
 // Cron
 import cronHandler from "./jobs/cron";
@@ -91,8 +94,10 @@ app.post("/zones/:id/purge-cache", handlePurgeCache);
 app.get("/domains", handleListDomains);
 app.get("/domains/:id", handleGetDomain);
 app.post("/domains", handleCreateDomain);
+app.post("/domains/batch", handleBatchCreateDomains);
 app.patch("/domains/:id", handleUpdateDomain);
 app.delete("/domains/:id", handleDeleteDomain);
+app.post("/domains/zones/batch", handleBatchCreateZones);
 
 export default {
   fetch: app.fetch,
