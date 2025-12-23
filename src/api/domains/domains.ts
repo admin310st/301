@@ -1,15 +1,18 @@
-// src/api/domain/domains.ts
+// src/api/domains/domains.ts
 
 /**
  * Domains API
  *
  * CRUD операции с доменами
  * Группировка по root domain (2-го уровня)
+ * 
+ * Этап 3: Добавление поддоменов (после проверки NS)
  */
 
 import type { Context } from "hono";
 import type { Env } from "../types/worker";
 import { requireAuth, requireEditor } from "../lib/auth";
+import { getDecryptedKey } from "../integrations/keys/storage";
 
 // ============================================================
 // TYPES
@@ -53,6 +56,14 @@ interface CreateDomainRequest {
   role?: "acceptor" | "donor" | "reserve";
 }
 
+interface BatchCreateDomainsRequest {
+  zone_id: number;
+  domains: Array<{
+    name: string;  // короткое имя: www, api, blog
+    role?: "acceptor" | "donor" | "reserve";
+  }>;
+}
+
 interface UpdateDomainRequest {
   role?: "acceptor" | "donor" | "reserve";
   site_id?: number | null;
@@ -60,8 +71,82 @@ interface UpdateDomainRequest {
   blocked_reason?: "unavailable" | "ad_network" | "hosting_registrar" | "government" | "manual" | null;
 }
 
+interface ZoneData {
+  key_id: number;
+  ns_expected: string;
+  verified: number;
+  cf_zone_id: string;
+  root_domain: string;
+}
+
+interface CFApiResponse<T> {
+  success: boolean;
+  errors: Array<{ code: number; message: string }>;
+  result: T;
+}
+
+interface CFDNSRecord {
+  id: string;
+  type: string;
+  name: string;
+  content: string;
+}
+
 // ============================================================
-// HELPERS
+// CONSTANTS
+// ============================================================
+
+const CF_API_BASE = "https://api.cloudflare.com/client/v4";
+const MAX_DOMAINS_PER_BATCH = 10;
+
+// ============================================================
+// CF API HELPERS
+// ============================================================
+
+/**
+ * POST /zones/{zone_id}/dns_records — создать DNS запись
+ */
+async function cfCreateDNS(
+  cfZoneId: string,
+  record: { type: string; name: string; content: string; proxied?: boolean; ttl?: number },
+  token: string
+): Promise<{ ok: true; record: CFDNSRecord } | { ok: false; error: string }> {
+  try {
+    const response = await fetch(
+      `${CF_API_BASE}/zones/${cfZoneId}/dns_records`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          type: record.type,
+          name: record.name,
+          content: record.content,
+          proxied: record.proxied ?? true,
+          ttl: record.ttl ?? 1, // auto
+        }),
+      }
+    );
+
+    const data = (await response.json()) as CFApiResponse<CFDNSRecord>;
+
+    if (!response.ok || !data.success) {
+      return {
+        ok: false,
+        error: data.errors?.[0]?.message || "Failed to create DNS record",
+      };
+    }
+
+    return { ok: true, record: data.result };
+  } catch {
+    return { ok: false, error: "CF DNS API request failed" };
+  }
+}
+
+// ============================================================
+// D1 HELPERS
 // ============================================================
 
 /**
@@ -127,8 +212,95 @@ function groupByRoot(domains: DomainRecord[]): DomainGroup[] {
   return result;
 }
 
+/**
+ * Проверка квоты доменов
+ */
+async function checkDomainQuota(
+  env: Env,
+  accountId: number,
+  count: number
+): Promise<{ ok: true; remaining: number } | { ok: false; error: string; limit: number; used: number }> {
+  const quota = await env.DB301.prepare(
+    `SELECT 
+       ql.max_domains,
+       COALESCE(qu.domains_used, 0) as domains_used
+     FROM accounts a
+     JOIN quota_limits ql ON a.plan_tier = ql.plan_tier
+     LEFT JOIN quota_usage qu ON a.id = qu.account_id
+     WHERE a.id = ?`
+  )
+    .bind(accountId)
+    .first<{ max_domains: number; domains_used: number }>();
+
+  if (!quota) {
+    return { ok: false, error: "quota_not_found", limit: 0, used: 0 };
+  }
+
+  const remaining = quota.max_domains - quota.domains_used;
+
+  if (remaining < count) {
+    return {
+      ok: false,
+      error: "quota_exceeded",
+      limit: quota.max_domains,
+      used: quota.domains_used,
+    };
+  }
+
+  return { ok: true, remaining };
+}
+
+/**
+ * Инкремент использованных доменов
+ */
+async function incrementDomainsUsed(
+  env: Env,
+  accountId: number,
+  count: number = 1
+): Promise<void> {
+  await env.DB301.prepare(
+    `UPDATE quota_usage 
+     SET domains_used = domains_used + ?, updated_at = CURRENT_TIMESTAMP 
+     WHERE account_id = ?`
+  )
+    .bind(count, accountId)
+    .run();
+}
+
+/**
+ * Получить данные зоны с проверкой владения и verified
+ */
+async function getVerifiedZone(
+  env: Env,
+  zoneId: number,
+  accountId: number
+): Promise<{ ok: true; zone: ZoneData } | { ok: false; error: string }> {
+  const zone = await env.DB301.prepare(
+    `SELECT z.key_id, z.ns_expected, z.verified, z.cf_zone_id,
+            (SELECT domain_name FROM domains WHERE zone_id = z.id AND parent_id IS NULL LIMIT 1) as root_domain
+     FROM zones z
+     WHERE z.id = ? AND z.account_id = ?`
+  )
+    .bind(zoneId, accountId)
+    .first<ZoneData>();
+
+  if (!zone) {
+    return { ok: false, error: "zone_not_found" };
+  }
+
+  if (!zone.verified) {
+    return { ok: false, error: "zone_not_verified" };
+  }
+
+  if (!zone.cf_zone_id) {
+    return { ok: false, error: "zone_cf_id_missing" };
+  }
+
+  return { ok: true, zone };
+}
+
 // ============================================================
-// HANDLERS
+// HANDLERS: LIST & GET
 // ============================================================
 
 /**
@@ -146,11 +318,11 @@ export async function handleListDomains(c: Context<{ Bindings: Env }>) {
   const { account_id: accountId } = auth;
 
   // Query params
-  const role = c.req.query("role"); // фильтр по роли
-  const blocked = c.req.query("blocked"); // фильтр по блокировке
-  const zoneId = c.req.query("zone_id"); // фильтр по зоне
-  const siteId = c.req.query("site_id"); // фильтр по сайту
-  const projectId = c.req.query("project_id"); // фильтр по проекту
+  const role = c.req.query("role");
+  const blocked = c.req.query("blocked");
+  const zoneId = c.req.query("zone_id");
+  const siteId = c.req.query("site_id");
+  const projectId = c.req.query("project_id");
 
   // Собираем WHERE условия
   const conditions: string[] = ["d.account_id = ?"];
@@ -244,9 +416,18 @@ export async function handleGetDomain(c: Context<{ Bindings: Env }>) {
   return c.json({ ok: true, domain });
 }
 
+// ============================================================
+// HANDLERS: CREATE (single)
+// ============================================================
+
 /**
  * POST /domains
- * Создать домен (3-го/4-го уровня)
+ * Создать поддомен (3-го/4-го уровня)
+ * 
+ * Требования:
+ * - zones.verified = 1
+ * - Квота доменов не превышена
+ * - Создаётся DNS A запись в CF
  */
 export async function handleCreateDomain(c: Context<{ Bindings: Env }>) {
   const env = c.env;
@@ -271,13 +452,13 @@ export async function handleCreateDomain(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: false, error: "missing_fields", fields: ["domain_name"] }, 400);
   }
 
-  // Запрет создания root domain (2-го уровня) — они создаются через sync зон
+  // Запрет создания root domain (2-го уровня)
   const domainParts = domain_name.split(".");
   if (domainParts.length <= 2) {
     return c.json({
       ok: false,
       error: "cannot_create_root_domain",
-      message: "Root domains (2nd level) are created via zone sync. Use /zones/sync or add zone in Cloudflare.",
+      message: "Root domains (2nd level) are created via /domains/zones/batch.",
     }, 400);
   }
 
@@ -292,26 +473,37 @@ export async function handleCreateDomain(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: false, error: "domain_already_exists" }, 409);
   }
 
-  // Если указан zone_id — проверяем владение
-  let keyId: number | null = null;
-  let ns: string | null = null;
-
-  if (zone_id) {
-    const zone = await env.DB301.prepare(
-      "SELECT key_id, ns_expected FROM zones WHERE id = ? AND account_id = ?"
-    )
-      .bind(zone_id, accountId)
-      .first<{ key_id: number; ns_expected: string }>();
-
-    if (!zone) {
-      return c.json({ ok: false, error: "zone_not_found" }, 404);
-    }
-
-    keyId = zone.key_id;
-    ns = zone.ns_expected;
+  // Проверяем квоту
+  const quotaCheck = await checkDomainQuota(env, accountId, 1);
+  if (!quotaCheck.ok) {
+    return c.json({
+      ok: false,
+      error: quotaCheck.error,
+      limit: quotaCheck.limit,
+      used: quotaCheck.used,
+    }, 403);
   }
 
-  // Если указан parent_id — проверяем владение
+  // Получаем данные зоны (обязательно zone_id для поддоменов)
+  if (!zone_id) {
+    return c.json({ ok: false, error: "zone_id_required" }, 400);
+  }
+
+  const zoneResult = await getVerifiedZone(env, zone_id, accountId);
+  if (!zoneResult.ok) {
+    if (zoneResult.error === "zone_not_verified") {
+      return c.json({
+        ok: false,
+        error: "zone_not_verified",
+        message: "NS записи ещё не подтверждены. Проверьте статус зоны.",
+      }, 400);
+    }
+    return c.json({ ok: false, error: zoneResult.error }, 404);
+  }
+
+  const zone = zoneResult.zone;
+
+  // Проверяем parent_id если указан
   if (parent_id) {
     const parent = await env.DB301.prepare(
       "SELECT id FROM domains WHERE id = ? AND account_id = ?"
@@ -324,27 +516,240 @@ export async function handleCreateDomain(c: Context<{ Bindings: Env }>) {
     }
   }
 
-  // Создаём домен
+  // Получаем токен CF
+  const keyData = await getDecryptedKey(env, zone.key_id);
+  if (!keyData) {
+    return c.json({ ok: false, error: "key_invalid" }, 500);
+  }
+
+  // Создаём DNS A запись в CF
+  const dnsResult = await cfCreateDNS(
+    zone.cf_zone_id,
+    {
+      type: "A",
+      name: domain_name,
+      content: "1.1.1.1",
+      proxied: true,
+    },
+    keyData.secrets.token
+  );
+
+  if (!dnsResult.ok) {
+    return c.json({
+      ok: false,
+      error: "dns_create_failed",
+      message: dnsResult.error,
+    }, 500);
+  }
+
+  // Создаём домен в D1
   const result = await env.DB301.prepare(
-    `INSERT INTO domains (account_id, zone_id, key_id, parent_id, domain_name, role, ns, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+    `INSERT INTO domains (account_id, zone_id, key_id, parent_id, domain_name, role, ns, ns_verified, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
   )
-    .bind(accountId, zone_id || null, keyId, parent_id || null, domain_name, role, ns)
+    .bind(accountId, zone_id, zone.key_id, parent_id || null, domain_name, role, zone.ns_expected)
     .run();
 
   const newId = result.meta.last_row_id;
+
+  // Инкремент квоты
+  await incrementDomainsUsed(env, accountId, 1);
 
   return c.json({
     ok: true,
     domain: {
       id: newId,
       domain_name,
-      zone_id: zone_id || null,
+      zone_id,
       parent_id: parent_id || null,
       role,
+      cf_dns_record_id: dnsResult.record.id,
     },
   });
 }
+
+// ============================================================
+// HANDLERS: CREATE BATCH
+// ============================================================
+
+/**
+ * POST /domains/batch
+ * Batch создание поддоменов (до 10 за раз)
+ * 
+ * Требования:
+ * - zones.verified = 1
+ * - Квота доменов не превышена
+ * - Создаются DNS A записи в CF
+ */
+export async function handleBatchCreateDomains(c: Context<{ Bindings: Env }>) {
+  const env = c.env;
+
+  const auth = await requireEditor(c, env);
+  if (!auth) {
+    return c.json({ ok: false, error: "editor_required" }, 403);
+  }
+
+  const { account_id: accountId } = auth;
+
+  // Parse request
+  let body: BatchCreateDomainsRequest;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ ok: false, error: "invalid_json" }, 400);
+  }
+
+  const { zone_id, domains } = body;
+
+  // Validate input
+  if (!zone_id) {
+    return c.json({ ok: false, error: "missing_field", field: "zone_id" }, 400);
+  }
+
+  if (!domains || !Array.isArray(domains) || domains.length === 0) {
+    return c.json({ ok: false, error: "missing_field", field: "domains" }, 400);
+  }
+
+  if (domains.length > MAX_DOMAINS_PER_BATCH) {
+    return c.json({
+      ok: false,
+      error: "too_many_domains",
+      max: MAX_DOMAINS_PER_BATCH,
+      received: domains.length,
+    }, 400);
+  }
+
+  // Получаем данные зоны
+  const zoneResult = await getVerifiedZone(env, zone_id, accountId);
+  if (!zoneResult.ok) {
+    if (zoneResult.error === "zone_not_verified") {
+      return c.json({
+        ok: false,
+        error: "zone_not_verified",
+        message: "NS записи ещё не подтверждены. Проверьте статус зоны.",
+      }, 400);
+    }
+    return c.json({ ok: false, error: zoneResult.error }, 404);
+  }
+
+  const zone = zoneResult.zone;
+
+  if (!zone.root_domain) {
+    return c.json({ ok: false, error: "zone_root_domain_missing" }, 500);
+  }
+
+  // Проверяем квоту
+  const quotaCheck = await checkDomainQuota(env, accountId, domains.length);
+  if (!quotaCheck.ok) {
+    return c.json({
+      ok: false,
+      error: quotaCheck.error,
+      limit: quotaCheck.limit,
+      used: quotaCheck.used,
+      requested: domains.length,
+    }, 403);
+  }
+
+  // Получаем токен CF
+  const keyData = await getDecryptedKey(env, zone.key_id);
+  if (!keyData) {
+    return c.json({ ok: false, error: "key_invalid" }, 500);
+  }
+
+  const token = keyData.secrets.token;
+
+  // Получаем parent_id (root domain)
+  const rootDomain = await env.DB301.prepare(
+    "SELECT id FROM domains WHERE zone_id = ? AND parent_id IS NULL LIMIT 1"
+  )
+    .bind(zone_id)
+    .first<{ id: number }>();
+
+  const parentId = rootDomain?.id || null;
+
+  // Результаты
+  const results: {
+    success: Array<{ domain: string; id: number; cf_dns_record_id: string }>;
+    failed: Array<{ domain: string; error: string }>;
+  } = {
+    success: [],
+    failed: [],
+  };
+
+  let domainsCreated = 0;
+
+  for (const item of domains) {
+    const shortName = item.name.trim().toLowerCase();
+    const fullDomain = `${shortName}.${zone.root_domain}`;
+    const domainRole = item.role || "reserve";
+
+    // Проверяем уникальность
+    const existing = await env.DB301.prepare(
+      "SELECT id FROM domains WHERE domain_name = ?"
+    )
+      .bind(fullDomain)
+      .first();
+
+    if (existing) {
+      results.failed.push({ domain: fullDomain, error: "domain_already_exists" });
+      continue;
+    }
+
+    // Создаём DNS A запись в CF
+    const dnsResult = await cfCreateDNS(
+      zone.cf_zone_id,
+      {
+        type: "A",
+        name: shortName,  // CF сам добавит .root_domain
+        content: "1.1.1.1",
+        proxied: true,
+      },
+      token
+    );
+
+    if (!dnsResult.ok) {
+      results.failed.push({ domain: fullDomain, error: `dns_create_failed: ${dnsResult.error}` });
+      continue;
+    }
+
+    // Создаём домен в D1
+    try {
+      const insertResult = await env.DB301.prepare(
+        `INSERT INTO domains (account_id, zone_id, key_id, parent_id, domain_name, role, ns, ns_verified, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      )
+        .bind(accountId, zone_id, zone.key_id, parentId, fullDomain, domainRole, zone.ns_expected)
+        .run();
+
+      const newId = insertResult.meta.last_row_id as number;
+      domainsCreated++;
+
+      results.success.push({
+        domain: fullDomain,
+        id: newId,
+        cf_dns_record_id: dnsResult.record.id,
+      });
+    } catch (e) {
+      // DNS создан, но D1 упал — логируем
+      console.error(`D1 insert failed for ${fullDomain}:`, e);
+      results.failed.push({ domain: fullDomain, error: "db_write_failed" });
+    }
+  }
+
+  // Инкремент квоты
+  if (domainsCreated > 0) {
+    await incrementDomainsUsed(env, accountId, domainsCreated);
+  }
+
+  return c.json({
+    ok: results.success.length > 0,
+    results,
+  });
+}
+
+// ============================================================
+// HANDLERS: UPDATE
+// ============================================================
 
 /**
  * PATCH /domains/:id
@@ -418,9 +823,105 @@ export async function handleUpdateDomain(c: Context<{ Bindings: Env }>) {
   return c.json({ ok: true });
 }
 
+// ============================================================
+// CF API: DELETE DNS
+// ============================================================
+
+/**
+ * Найти DNS запись по имени
+ */
+async function cfFindDNSByName(
+  cfZoneId: string,
+  name: string,
+  token: string
+): Promise<{ ok: true; recordId: string } | { ok: false; error: string }> {
+  try {
+    const response = await fetch(
+      `${CF_API_BASE}/zones/${cfZoneId}/dns_records?name=${encodeURIComponent(name)}&type=A`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const data = (await response.json()) as CFApiResponse<CFDNSRecord[]>;
+
+    if (!response.ok || !data.success) {
+      return { ok: false, error: data.errors?.[0]?.message || "Failed to find DNS record" };
+    }
+
+    if (!data.result || data.result.length === 0) {
+      return { ok: false, error: "dns_record_not_found" };
+    }
+
+    return { ok: true, recordId: data.result[0].id };
+  } catch {
+    return { ok: false, error: "CF DNS API request failed" };
+  }
+}
+
+/**
+ * Удалить DNS запись
+ */
+async function cfDeleteDNS(
+  cfZoneId: string,
+  recordId: string,
+  token: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const response = await fetch(
+      `${CF_API_BASE}/zones/${cfZoneId}/dns_records/${recordId}`,
+      {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const data = (await response.json()) as CFApiResponse<unknown>;
+
+    if (!response.ok || !data.success) {
+      return { ok: false, error: data.errors?.[0]?.message || "Failed to delete DNS record" };
+    }
+
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "CF DNS API request failed" };
+  }
+}
+
+// ============================================================
+// D1 HELPERS: QUOTA DECREMENT
+// ============================================================
+
+/**
+ * Декремент использованных доменов
+ */
+async function decrementDomainsUsed(
+  env: Env,
+  accountId: number,
+  count: number = 1
+): Promise<void> {
+  await env.DB301.prepare(
+    `UPDATE quota_usage 
+     SET domains_used = MAX(0, domains_used - ?), updated_at = CURRENT_TIMESTAMP 
+     WHERE account_id = ?`
+  )
+    .bind(count, accountId)
+    .run();
+}
+
+// ============================================================
+// HANDLERS: DELETE
+// ============================================================
+
 /**
  * DELETE /domains/:id
- * Удалить домен
+ * Удалить домен (поддомен) + DNS запись в CF
  */
 export async function handleDeleteDomain(c: Context<{ Bindings: Env }>) {
   const env = c.env;
@@ -433,15 +934,21 @@ export async function handleDeleteDomain(c: Context<{ Bindings: Env }>) {
 
   const { account_id: accountId } = auth;
 
-  // Проверяем существование и что это не root domain зоны
+  // Проверяем существование и получаем данные для удаления DNS
   const domain = await env.DB301.prepare(
-    `SELECT d.id, d.domain_name, d.zone_id, z.cf_zone_id
+    `SELECT d.id, d.domain_name, d.zone_id, d.key_id, z.cf_zone_id
      FROM domains d
      LEFT JOIN zones z ON d.zone_id = z.id
      WHERE d.id = ? AND d.account_id = ?`
   )
     .bind(domainId, accountId)
-    .first<{ id: number; domain_name: string; zone_id: number | null; cf_zone_id: string | null }>();
+    .first<{ 
+      id: number; 
+      domain_name: string; 
+      zone_id: number | null; 
+      key_id: number | null;
+      cf_zone_id: string | null;
+    }>();
 
   if (!domain) {
     return c.json({ ok: false, error: "domain_not_found" }, 404);
@@ -459,9 +966,47 @@ export async function handleDeleteDomain(c: Context<{ Bindings: Env }>) {
     }
   }
 
-  // Удаляем
+  // Удаляем DNS запись в CF (если есть zone и key)
+  let dnsDeleted = false;
+  if (domain.cf_zone_id && domain.key_id) {
+    const keyData = await getDecryptedKey(env, domain.key_id);
+    
+    if (keyData) {
+      // Находим DNS запись по имени
+      const findResult = await cfFindDNSByName(
+        domain.cf_zone_id,
+        domain.domain_name,
+        keyData.secrets.token
+      );
+
+      if (findResult.ok) {
+        // Удаляем DNS запись
+        const deleteResult = await cfDeleteDNS(
+          domain.cf_zone_id,
+          findResult.recordId,
+          keyData.secrets.token
+        );
+        
+        dnsDeleted = deleteResult.ok;
+        
+        if (!deleteResult.ok) {
+          console.warn(`Failed to delete DNS for ${domain.domain_name}: ${deleteResult.error}`);
+        }
+      } else {
+        // DNS запись не найдена — не критично, продолжаем удаление из D1
+        console.warn(`DNS record not found for ${domain.domain_name}: ${findResult.error}`);
+      }
+    }
+  }
+
+  // Удаляем из D1
   await env.DB301.prepare("DELETE FROM domains WHERE id = ?").bind(domainId).run();
 
-  return c.json({ ok: true });
-}
+  // Декремент квоты
+  await decrementDomainsUsed(env, accountId, 1);
 
+  return c.json({ 
+    ok: true,
+    dns_deleted: dnsDeleted,
+  });
+}
