@@ -1,4 +1,4 @@
-##  Domains API
+## Domains API
 
 ### Базовый URL
 
@@ -47,7 +47,7 @@ curl -X GET "https://api.301.st/domains" \
           "site_id": 10,
           "zone_id": 1,
           "key_id": 42,
-          "parent_id": null,
+          "project_id": 5,
           "domain_name": "example.com",
           "role": "acceptor",
           "ns": "ns1.cloudflare.com,ns2.cloudflare.com",
@@ -61,7 +61,6 @@ curl -X GET "https://api.301.st/domains" \
           "updated_at": "2025-01-10T08:00:00Z",
           "site_name": "Main Landing",
           "site_status": "active",
-          "project_id": 5,
           "project_name": "Brand Campaign Q1"
         },
         {
@@ -69,7 +68,7 @@ curl -X GET "https://api.301.st/domains" \
           "site_id": 10,
           "zone_id": 1,
           "key_id": 42,
-          "parent_id": 1,
+          "project_id": 5,
           "domain_name": "api.example.com",
           "role": "acceptor",
           "ns": "ns1.cloudflare.com,ns2.cloudflare.com",
@@ -83,7 +82,6 @@ curl -X GET "https://api.301.st/domains" \
           "updated_at": "2025-01-11T09:00:00Z",
           "site_name": "Main Landing",
           "site_status": "active",
-          "project_id": 5,
           "project_name": "Brand Campaign Q1"
         },
         {
@@ -91,7 +89,7 @@ curl -X GET "https://api.301.st/domains" \
           "site_id": null,
           "zone_id": 1,
           "key_id": 42,
-          "parent_id": 1,
+          "project_id": null,
           "domain_name": "blog.example.com",
           "role": "reserve",
           "ns": "ns1.cloudflare.com,ns2.cloudflare.com",
@@ -105,7 +103,6 @@ curl -X GET "https://api.301.st/domains" \
           "updated_at": "2025-01-11T10:00:00Z",
           "site_name": null,
           "site_status": null,
-          "project_id": null,
           "project_name": null
         }
       ]
@@ -119,7 +116,7 @@ curl -X GET "https://api.301.st/domains" \
           "site_id": 10,
           "zone_id": 2,
           "key_id": 42,
-          "parent_id": null,
+          "project_id": 5,
           "domain_name": "promo-brand.io",
           "role": "donor",
           "ns": "ns3.cloudflare.com,ns4.cloudflare.com",
@@ -133,7 +130,6 @@ curl -X GET "https://api.301.st/domains" \
           "updated_at": "2025-01-12T08:00:00Z",
           "site_name": "Main Landing",
           "site_status": "active",
-          "project_id": 5,
           "project_name": "Brand Campaign Q1"
         }
       ]
@@ -188,7 +184,7 @@ curl -X GET "https://api.301.st/domains/2" \
     "site_id": 10,
     "zone_id": 1,
     "key_id": 42,
-    "parent_id": 1,
+    "project_id": 5,
     "domain_name": "api.example.com",
     "role": "acceptor",
     "ns": "ns1.cloudflare.com,ns2.cloudflare.com",
@@ -205,7 +201,6 @@ curl -X GET "https://api.301.st/domains/2" \
     "ns_expected": "ns1.cloudflare.com,ns2.cloudflare.com",
     "site_name": "Main Landing",
     "site_status": "active",
-    "project_id": 5,
     "project_name": "Brand Campaign Q1"
   }
 }
@@ -231,7 +226,7 @@ curl -X GET "https://api.301.st/domains/2" \
 > **Важно:** 
 > - Root домены (2-го уровня) создаются через `POST /domains/zones/batch`
 > - Зона должна быть верифицирована (`zones.verified = 1`)
-> - Создаётся DNS A запись в Cloudflare
+> - Создаётся DNS A запись в Cloudflare автоматически
 
 **Параметры запроса:**
 
@@ -239,7 +234,6 @@ curl -X GET "https://api.301.st/domains/2" \
 |------|-----|-------------|----------|
 | `domain_name` | string | да | Полное имя домена (только 3-й+ уровень) |
 | `zone_id` | number | **да** | ID зоны (должна быть verified) |
-| `parent_id` | number | нет | ID родительского домена |
 | `role` | string | нет | Роль: `acceptor`, `donor`, `reserve` (по умолчанию: `reserve`) |
 
 **Пример запроса:**
@@ -251,7 +245,6 @@ curl -X POST "https://api.301.st/domains" \
   -d '{
     "domain_name": "promo.example.com",
     "zone_id": 1,
-    "parent_id": 1,
     "role": "donor"
   }'
 ```
@@ -265,7 +258,6 @@ curl -X POST "https://api.301.st/domains" \
     "id": 6,
     "domain_name": "promo.example.com",
     "zone_id": 1,
-    "parent_id": 1,
     "role": "donor",
     "cf_dns_record_id": "abc123def456"
   }
@@ -307,12 +299,6 @@ curl -X POST "https://api.301.st/domains" \
   "error": "zone_not_found"
 }
 
-// Родительский домен не найден
-{
-  "ok": false,
-  "error": "parent_not_found"
-}
-
 // Превышена квота доменов
 {
   "ok": false,
@@ -343,6 +329,7 @@ curl -X POST "https://api.301.st/domains" \
 |------|-----|----------|
 | `role` | string | Новая роль: `acceptor`, `donor`, `reserve` |
 | `site_id` | number/null | Привязка к сайту |
+| `project_id` | number/null | Привязка к проекту |
 | `blocked` | boolean | Статус блокировки |
 | `blocked_reason` | string/null | Причина блокировки |
 
@@ -437,6 +424,7 @@ curl -X DELETE "https://api.301.st/domains/6" \
   "message": "Root domain is managed by zone. Delete the zone instead."
 }
 ```
+
 ---
 
 ### 6 Роли доменов
@@ -461,12 +449,13 @@ curl -X DELETE "https://api.301.st/domains/6" \
 
 ---
 
-### 8 Связь с Site/Project
+### 8 Связь с Project/Site
 
-Домены связаны с проектами через сайты:
+Домены привязываются напрямую к проектам и сайтам:
 
 ```
-Domain.site_id → Site.project_id → Project
+Domain.project_id → Project
+Domain.site_id → Site (тег = точка приёма трафика)
 ```
 
 **Поля из связанных таблиц:**
@@ -475,24 +464,31 @@ Domain.site_id → Site.project_id → Project
 |------|----------|----------|
 | `site_name` | sites.site_name | Название сайта |
 | `site_status` | sites.status | Статус сайта: `active`, `paused`, `archived` |
-| `project_id` | projects.id | ID проекта |
+| `project_id` | domains.project_id | ID проекта |
 | `project_name` | projects.project_name | Название проекта |
 
-> **Примечание:** Если `site_id = null`, домен находится в резерве (Free Domains) и не привязан к проекту.
+> **Примечание:** Если `site_id = null`, домен находится в резерве и не привязан к точке приёма трафика.
 
 ---
 
-### 9 Таблица endpoints
+### 9 Архитектура доменов
 
-| Endpoint | Метод | Auth | Описание |
-|----------|-------|------|----------|
-| `/domains` | GET | ✅ JWT | Список доменов с группировкой |
-| `/domains/:id` | GET | ✅ JWT | Детали домена |
-| `/domains` | POST | ✅ JWT (editor) | Создать поддомен + DNS |
-| `/domains/batch` | POST | ✅ JWT (editor) | **Batch поддомены (до 10)** |
-| `/domains/:id` | PATCH | ✅ JWT (editor) | Обновить домен |
-| `/domains/:id` | DELETE | ✅ JWT (editor) | Удалить домен + DNS |
-| `/domains/zones/batch` | POST | ✅ JWT (owner) | **Batch создание зон (до 10)** |
+```
+Project (логическая группа)
+    │
+    ├── Sites (теги = точки приёма трафика)
+    │     └── status: active/paused/archived
+    │
+    └── Domains (привязаны к проекту)
+          ├── role: acceptor (принимает трафик, имеет site_id)
+          ├── role: donor (редиректит на acceptor)
+          └── role: reserve (запас)
+```
+
+**Поведение при блокировке:**
+1. Домен `acceptor` получает soft-блок
+2. Тег `site` перевешивается на резервный домен
+3. Заблокированный становится `donor` → редиректит на новый `acceptor`
 
 ---
 
@@ -563,56 +559,18 @@ curl -X POST "https://api.301.st/domains/zones/batch" \
 }
 ```
 
-**Полный успех:**
-
-```json
-{
-  "ok": true,
-  "results": {
-    "success": [
-      {
-        "domain": "example.com",
-        "zone_id": 1,
-        "cf_zone_id": "abc123def456",
-        "name_servers": ["ns1.cloudflare.com", "ns2.cloudflare.com"],
-        "status": "pending"
-      }
-    ],
-    "failed": []
-  }
-}
-```
-
-**Полная ошибка:**
-
-```json
-{
-  "ok": false,
-  "results": {
-    "success": [],
-    "failed": [
-      {
-        "domain": "banned-domain.com",
-        "error": "zone_banned",
-        "error_message": "Домен заблокирован Cloudflare (blacklist)"
-      }
-    ]
-  }
-}
-```
-
 ---
 
 #### 10.1 Коды ошибок Cloudflare
 
 | CF Code | Наш код | Описание |
 |---------|---------|----------|
-| 1061 | `not_registrable` | Это поддомен, не регистрируемый домен. Сначала добавьте root domain |
-| 1097 | `zone_already_in_cf` | Зона уже существует в этом Cloudflare аккаунте |
+| 1061 | `not_registrable` | Это поддомен, не регистрируемый домен |
+| 1097 | `zone_already_in_cf` | Зона уже существует в этом CF аккаунте |
 | 1049 | `zone_banned` | Домен заблокирован Cloudflare (blacklist) |
 | 1099 | `zone_held` | Домен заблокирован (held) в Cloudflare |
-| 1105 | `zone_in_another_account` | Домен уже добавлен в другой Cloudflare аккаунт |
-| 1224 | `zone_already_pending` | Домен уже ожидает активации в этом аккаунте |
+| 1105 | `zone_in_another_account` | Домен в другом CF аккаунте |
+| 1224 | `zone_already_pending` | Домен уже ожидает активации |
 
 ---
 
@@ -620,112 +578,37 @@ curl -X POST "https://api.301.st/domains/zones/batch" \
 
 ```json
 // Не указан ключ
-{
-  "ok": false,
-  "error": "missing_field",
-  "field": "account_key_id"
-}
+{ "ok": false, "error": "missing_field", "field": "account_key_id" }
 
 // Пустой список доменов
-{
-  "ok": false,
-  "error": "missing_field",
-  "field": "domains"
-}
+{ "ok": false, "error": "missing_field", "field": "domains" }
 
-// Превышен лимит доменов
-{
-  "ok": false,
-  "error": "too_many_domains",
-  "max": 10,
-  "received": 15
-}
+// Превышен лимит
+{ "ok": false, "error": "too_many_domains", "max": 10, "received": 15 }
 
 // Ключ не найден
-{
-  "ok": false,
-  "error": "key_not_found"
-}
+{ "ok": false, "error": "key_not_found" }
 
 // Ключ не Cloudflare
-{
-  "ok": false,
-  "error": "key_not_cloudflare"
-}
-
-// Не указан CF Account ID
-{
-  "ok": false,
-  "error": "cf_account_id_missing"
-}
+{ "ok": false, "error": "key_not_cloudflare" }
 
 // Превышена квота зон
-{
-  "ok": false,
-  "error": "quota_exceeded:zones:need=5:available=2"
-}
+{ "ok": false, "error": "quota_exceeded:zones:need=5:available=2" }
 ```
 
 ---
 
-#### 10.3 Flow диаграмма
-
-```mermaid
-flowchart TD
-    subgraph UI["UI: Добавление доменов"]
-        A[Пользователь вводит<br>список доменов] --> B[POST /domains/zones/batch]
-    end
-
-    subgraph API["API: Обработка"]
-        B --> C{Валидация}
-        C -->|Ошибка| C1[400 Bad Request]
-        C -->|OK| D{Проверка квоты}
-        D -->|Превышена| D1[403 quota_exceeded]
-        D -->|OK| E[Цикл по доменам]
-    end
-
-    subgraph CF["Cloudflare API"]
-        E --> F[POST /zones<br>Создать зону]
-        F -->|Success| G[POST /dns_records<br>A запись 1.1.1.1]
-        F -->|Error| H[Маппинг ошибки CF]
-    end
-
-    subgraph D1["D1 Database"]
-        G --> I[INSERT zones<br>status=pending]
-        I --> J[INSERT domains<br>ns_verified=0]
-        J --> K[UPDATE quota_usage]
-    end
-
-    subgraph Response["Response"]
-        H --> L[failed array]
-        K --> M[success array]
-        L --> N{Есть успехи?}
-        M --> N
-        N -->|Да| O["ok: true"]
-        N -->|Нет| P["ok: false"]
-    end
-
-    style A fill:#e1f5fe
-    style O fill:#c8e6c9
-    style P fill:#ffcdd2
-    style C1 fill:#ffcdd2
-    style D1 fill:#ffcdd2
-```
-
----
-
-#### 10.4 UX Flow (3 этапа)
+#### 10.3 UX Flow (3 этапа)
 
 ```mermaid
 flowchart LR
     subgraph Stage1["Этап 1: Создание зон"]
         A1[POST /domains/zones/batch] --> A2[Получить NS]
-        A2 --> A3[Показать NS<br>пользователю]
     end
 
     subgraph Wait["Ожидание"]
-        A3 --> W1[Пользователь меняет NS<br>у регистратора]
-        W1 --> W2[1-7+ дней]
+        A2 --> W1[Пользователь меняет NS<br>у регистратора]
+        W1 --> W2[1-48 часов]
     end
 
     subgraph Stage2["Этап 2: Проверка NS"]
@@ -733,30 +616,18 @@ flowchart LR
         B1 --> B2[POST /zones/:id/check-activation]
         B2 --> B3{NS верны?}
         B3 -->|Нет| W1
-        B3 -->|Да| B4[zones.verified = 1<br>domains.ns_verified = 1]
+        B3 -->|Да| B4[zones.verified = 1]
     end
 
     subgraph Stage3["Этап 3: Поддомены"]
-        B4 --> C1[POST /domains]
-        C1 --> C2[Создать поддомены<br>www, api, blog...]
+        B4 --> C1[POST /domains/batch]
+        C1 --> C2[Создать www, api, blog...]
     end
 
     style Stage1 fill:#e3f2fd
     style Stage2 fill:#fff3e0
     style Stage3 fill:#e8f5e9
 ```
-
----
-
-#### 10.5 Что происходит при создании
-
-Для каждого домена в batch:
-
-1. **CF: Создание зоны** — `POST /zones`
-2. **CF: A запись** — `POST /zones/{id}/dns_records` с `1.1.1.1` (placeholder)
-3. **D1: zones** — `INSERT` с `status='pending'`, `verified=0`
-4. **D1: domains** — `INSERT` с `ns_verified=0`, `role='reserve'`
-5. **D1: quota_usage** — `UPDATE` инкремент `zones_used`, `domains_used`
 
 ---
 
@@ -775,14 +646,7 @@ Batch создание поддоменов (до 10 за раз).
 | `zone_id` | number | да | ID зоны (должна быть verified) |
 | `domains` | array | да | Массив поддоменов (max 10) |
 | `domains[].name` | string | да | Короткое имя: `www`, `api`, `blog` |
-| `domains[].role` | string | нет | Роль: `acceptor`, `donor`, `reserve` (по умолчанию: `reserve`) |
-
-**Лимиты:**
-
-| Параметр | Значение |
-|----------|----------|
-| Max доменов за запрос | 10 |
-| Проверка квоты | Перед созданием |
+| `domains[].role` | string | нет | Роль: `acceptor`, `donor`, `reserve` (default) |
 
 **Пример запроса:**
 
@@ -801,53 +665,20 @@ curl -X POST "https://api.301.st/domains/batch" \
   }'
 ```
 
-**Успешный ответ (partial success):**
+**Успешный ответ:**
 
 ```json
 {
   "ok": true,
   "results": {
     "success": [
-      {
-        "domain": "www.example.com",
-        "id": 10,
-        "cf_dns_record_id": "abc123"
-      },
-      {
-        "domain": "api.example.com",
-        "id": 11,
-        "cf_dns_record_id": "def456"
-      },
-      {
-        "domain": "promo.example.com",
-        "id": 12,
-        "cf_dns_record_id": "ghi789"
-      }
+      { "domain": "www.example.com", "id": 10, "cf_dns_record_id": "abc123" },
+      { "domain": "api.example.com", "id": 11, "cf_dns_record_id": "def456" },
+      { "domain": "promo.example.com", "id": 12, "cf_dns_record_id": "ghi789" }
     ],
     "failed": [
-      {
-        "domain": "blog.example.com",
-        "error": "domain_already_exists"
-      }
+      { "domain": "blog.example.com", "error": "domain_already_exists" }
     ]
-  }
-}
-```
-
-**Полный успех:**
-
-```json
-{
-  "ok": true,
-  "results": {
-    "success": [
-      {
-        "domain": "www.example.com",
-        "id": 10,
-        "cf_dns_record_id": "abc123"
-      }
-    ],
-    "failed": []
   }
 }
 ```
@@ -858,48 +689,13 @@ curl -X POST "https://api.301.st/domains/batch" \
 
 ```json
 // Не указан zone_id
-{
-  "ok": false,
-  "error": "missing_field",
-  "field": "zone_id"
-}
-
-// Пустой список доменов
-{
-  "ok": false,
-  "error": "missing_field",
-  "field": "domains"
-}
-
-// Превышен лимит
-{
-  "ok": false,
-  "error": "too_many_domains",
-  "max": 10,
-  "received": 15
-}
-
-// Зона не найдена
-{
-  "ok": false,
-  "error": "zone_not_found"
-}
+{ "ok": false, "error": "missing_field", "field": "zone_id" }
 
 // Зона не верифицирована
-{
-  "ok": false,
-  "error": "zone_not_verified",
-  "message": "NS записи ещё не подтверждены. Проверьте статус зоны."
-}
+{ "ok": false, "error": "zone_not_verified", "message": "NS записи ещё не подтверждены." }
 
 // Превышена квота
-{
-  "ok": false,
-  "error": "quota_exceeded",
-  "limit": 200,
-  "used": 195,
-  "requested": 10
-}
+{ "ok": false, "error": "quota_exceeded", "limit": 200, "used": 195, "requested": 10 }
 ```
 
 ---
@@ -909,18 +705,20 @@ curl -X POST "https://api.301.st/domains/batch" \
 | Код | Описание |
 |-----|----------|
 | `domain_already_exists` | Домен уже существует в D1 |
-| `dns_create_failed: <message>` | Ошибка создания DNS в CF |
-| `db_write_failed` | Ошибка записи в D1 (DNS создан) |
+| `dns_create_failed: <msg>` | Ошибка создания DNS в CF |
+| `db_write_failed` | Ошибка записи в D1 |
 
 ---
 
-#### 11.3 Что происходит при создании
+### 12 Таблица endpoints
 
-Для каждого поддомена в batch:
-
-1. **Валидация** — проверка уникальности в D1
-2. **CF: A запись** — `POST /zones/{id}/dns_records` с `1.1.1.1`
-3. **D1: domains** — `INSERT` с `ns_verified=1`, `parent_id` от root
-4. **Quota** — инкремент `domains_used` по завершению
-
+| Endpoint | Метод | Auth | Описание |
+|----------|-------|------|----------|
+| `/domains` | GET | JWT | Список доменов с группировкой |
+| `/domains/:id` | GET | JWT | Детали домена |
+| `/domains` | POST | editor | Создать поддомен + DNS |
+| `/domains/batch` | POST | editor | Batch поддомены (до 10) |
+| `/domains/:id` | PATCH | editor | Обновить домен |
+| `/domains/:id` | DELETE | editor | Удалить домен + DNS |
+| `/domains/zones/batch` | POST | owner | Batch создание зон (до 10) |
 
