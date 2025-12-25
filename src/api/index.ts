@@ -36,6 +36,29 @@ import {
   handlePurgeCache,
 } from "./integrations/providers/cloudflare/zoneconf";
 
+// Projects
+import {
+  handleListProjects,
+  handleGetProject,
+  handleCreateProject,
+  handleUpdateProject,
+  handleDeleteProject,
+  handleListProjectIntegrations,
+  handleAddProjectIntegration,
+  handleRemoveProjectIntegration,
+} from "./projects/projects";
+
+// Sites
+import {
+  handleListProjectSites,
+  handleGetSite,
+  handleCreateSite,
+  handleUpdateSite,
+  handleDeleteSite,
+  handleAssignDomainToSite,
+  handleUnassignDomainFromSite,
+} from "./sites/sites";
+
 // Domains
 import {
   handleListDomains,
@@ -89,6 +112,25 @@ app.post("/zones/:id/dns/batch", handleBatchDNS);
 app.get("/zones/:id/settings", handleGetZoneSettings);
 app.patch("/zones/:id/settings", handleUpdateZoneSettings);
 app.post("/zones/:id/purge-cache", handlePurgeCache);
+
+// --- Projects ---
+app.get("/projects", handleListProjects);
+app.get("/projects/:id", handleGetProject);
+app.post("/projects", handleCreateProject);
+app.patch("/projects/:id", handleUpdateProject);
+app.delete("/projects/:id", handleDeleteProject);
+app.get("/projects/:id/integrations", handleListProjectIntegrations);
+app.post("/projects/:id/integrations", handleAddProjectIntegration);
+app.delete("/projects/:id/integrations/:keyId", handleRemoveProjectIntegration);
+
+// --- Sites ---
+app.get("/projects/:id/sites", handleListProjectSites);
+app.post("/projects/:id/sites", handleCreateSite);
+app.get("/sites/:id", handleGetSite);
+app.patch("/sites/:id", handleUpdateSite);
+app.delete("/sites/:id", handleDeleteSite);
+app.post("/sites/:id/domains", handleAssignDomainToSite);
+app.delete("/sites/:id/domains/:domainId", handleUnassignDomainFromSite);
 
 // --- Domains ---
 app.get("/domains", handleListDomains);
