@@ -38,6 +38,9 @@ curl -X GET "https://api.301.st/zones" \
     {
       "id": 1,
       "cf_zone_id": "abc123def456",
+      "key_id": 42,
+      "key_alias": "Main CF Account",
+      "external_account_id": "7abc123def456789",
       "status": "active",
       "plan": "free",
       "ns_expected": "ns1.cloudflare.com,ns2.cloudflare.com",
@@ -54,6 +57,14 @@ curl -X GET "https://api.301.st/zones" \
   ]
 }
 ```
+
+**Поля ответа:**
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `key_id` | number | ID ключа в account_keys |
+| `key_alias` | string | Название ключа (для UI) |
+| `external_account_id` | string | Cloudflare Account ID |
 
 ---
 
@@ -79,6 +90,8 @@ curl -X GET "https://api.301.st/zones/1" \
     "id": 1,
     "account_id": 1,
     "key_id": 42,
+    "key_alias": "Main CF Account",
+    "external_account_id": "7abc123def456789",
     "cf_zone_id": "abc123def456",
     "status": "active",
     "plan": "free",
@@ -90,8 +103,7 @@ curl -X GET "https://api.301.st/zones/1" \
     "caching_level": "standard",
     "waf_mode": "medium",
     "last_sync_at": "2025-01-15T10:00:00Z",
-    "created_at": "2025-01-10T08:00:00Z",
-    "key_name": "Main CF Account"
+    "created_at": "2025-01-10T08:00:00Z"
   },
   "domains": [
     {
@@ -713,19 +725,22 @@ curl -X POST "https://api.301.st/zones/1/purge-cache" \
 
 ---
 
-## 9. Связь Zone ↔ Domain
+## 9. Связь Zone ↔ Domain ↔ Key
 
 ```
-Zone                     Domain
-────                     ──────
-id              ←────    zone_id
-key_id          ←────    key_id
-ns_expected     ←────    ns
-verified        ←────    ns_verified
+account_keys              zones                    domains
+────────────              ─────                    ───────
+id              ←────     key_id          ←────   key_id
+external_account_id       cf_zone_id              zone_id
+key_alias                 ns_expected     ←────   ns
+                          verified        ←────   ns_verified
 ```
 
+- `external_account_id` — Cloudflare Account ID (для UI)
+- `key_alias` — название ключа (для UI)
 - При создании/sync зоны автоматически создаётся root domain
 - `ns` домена копируется из `ns_expected` зоны
 - `ns_verified` обновляется при проверке активации зоны
 
 ---
+

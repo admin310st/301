@@ -504,6 +504,9 @@ export async function syncZonesInternal(
   };
 }
 
+// PATCH для src/api/integrations/providers/cloudflare/zones.ts
+// Заменить handleListZones и handleGetZone
+
 // ============================================================
 // HANDLERS: LIST
 // ============================================================
@@ -511,6 +514,7 @@ export async function syncZonesInternal(
 /**
  * GET /zones
  * Список зон аккаунта из D1
+ * Возвращает external_account_id и key_alias из account_keys
  */
 export async function handleListZones(c: Context<{ Bindings: Env }>) {
   const env = c.env;
@@ -523,11 +527,12 @@ export async function handleListZones(c: Context<{ Bindings: Env }>) {
   const { account_id: accountId } = auth;
 
   const zones = await env.DB301.prepare(
-    `SELECT z.id, z.cf_zone_id, z.status, z.plan, z.ns_expected, z.verified, 
-            z.ssl_status, z.ssl_mode, z.auto_https, z.caching_level, z.waf_mode,
-            z.last_sync_at, z.created_at,
+    `SELECT z.id, z.cf_zone_id, z.key_id, z.status, z.plan, z.ns_expected, z.verified,   z.ssl_status, 
+            z.ssl_mode, z.auto_https, z.caching_level, z.waf_mode, z.last_sync_at, 
+            z.created_at, ak.key_alias, ak.external_account_id,
             d.domain_name as root_domain
      FROM zones z
+     LEFT JOIN account_keys ak ON z.key_id = ak.id
      LEFT JOIN domains d ON d.zone_id = z.id AND d.domain_name = (
        SELECT MIN(domain_name) FROM domains WHERE zone_id = z.id
      )
@@ -543,6 +548,8 @@ export async function handleListZones(c: Context<{ Bindings: Env }>) {
 /**
  * GET /zones/:id
  * Детали зоны
+ * 
+ * Возвращает external_account_id и key_alias из account_keys
  */
 export async function handleGetZone(c: Context<{ Bindings: Env }>) {
   const env = c.env;
@@ -556,7 +563,7 @@ export async function handleGetZone(c: Context<{ Bindings: Env }>) {
   const { account_id: accountId } = auth;
 
   const zone = await env.DB301.prepare(
-    `SELECT z.*, ak.key_alias as key_name
+    `SELECT z.*, ak.key_alias, ak.external_account_id
      FROM zones z
      LEFT JOIN account_keys ak ON z.key_id = ak.id
      WHERE z.id = ? AND z.account_id = ?`
@@ -578,7 +585,6 @@ export async function handleGetZone(c: Context<{ Bindings: Env }>) {
 
   return c.json({ ok: true, zone, domains: domains.results });
 }
-
 // ============================================================
 // HANDLERS: CREATE
 // ============================================================
