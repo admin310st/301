@@ -689,7 +689,8 @@ curl -X GET https://api.301.st/integrations/keys/42 \
     "provider": "cloudflare",
     "provider_scope": {
       "cf_token_id": "token_abc123",
-      "cf_token_name": "301st-20250110-080000"
+      "cf_token_name": "301st-20250110-080000",
+      "cf_account_name": "user@example.com's Account"
     },
     "key_alias": "Main CF Account",
     "external_account_id": "abc123def456",

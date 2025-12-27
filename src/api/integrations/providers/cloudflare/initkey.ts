@@ -125,6 +125,34 @@ async function getPermissionGroups(
 }
 
 /**
+ * GET /accounts/{account_id}
+ * Получение информации об аккаунте (name для UI)
+ */
+async function getAccountInfo(
+  cfAccountId: string,
+  token: string
+): Promise<{ ok: true; name: string } | { ok: false; error: string }> {
+  try {
+    const response = await fetch(`${CF_API_BASE}/accounts/${cfAccountId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    const data = (await response.json()) as CFApiResponse<{ id: string; name: string }>;
+
+    if (!response.ok || !data.success) {
+      return { ok: false, error: data.errors?.[0]?.message || "Failed to get account info" };
+    }
+
+    return { ok: true, name: data.result.name };
+  } catch {
+    return { ok: false, error: "CF API request failed" };
+  }
+}
+
+/**
  * Сверить permissions из CF с нашими CF_REQUIRED_PERMISSIONS
  */
 function resolvePermissions(
@@ -428,7 +456,14 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   const bootstrapTokenId = bootstrapVerify.tokenId;
 
   // ─────────────────────────────────────────────────────────
-  // 6. Get & resolve permissions
+  // 6. Get account info (name для UI)
+  // ─────────────────────────────────────────────────────────
+
+  const accountInfoResult = await getAccountInfo(cf_account_id, bootstrap_token);
+  const cfAccountName = accountInfoResult.ok ? accountInfoResult.name : null;
+
+  // ─────────────────────────────────────────────────────────
+  // 7. Get & resolve permissions
   // ─────────────────────────────────────────────────────────
 
   const permGroupsResult = await getPermissionGroups(cf_account_id, bootstrap_token);
@@ -442,7 +477,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 7. Generate token name and dates
+  // 8. Generate token name and dates
   // ─────────────────────────────────────────────────────────
 
   const now = new Date();
@@ -459,7 +494,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   const expiresOn = expiresAt.toISOString().split(".")[0] + "Z";
 
   // ─────────────────────────────────────────────────────────
-  // 8. Create working token
+  // 9. Create working token
   // ─────────────────────────────────────────────────────────
 
   const payload = buildCreateTokenPayload(
@@ -478,7 +513,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   const workingToken = createResult.token;
 
   // ─────────────────────────────────────────────────────────
-  // 9. Verify working token
+  // 10. Verify working token
   // ─────────────────────────────────────────────────────────
 
   const workingVerify = await verifyToken(cf_account_id, workingToken.value);
@@ -490,7 +525,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 10. Delete old integration (replace scenario)
+  // 11. Delete old integration (replace scenario)
   // ─────────────────────────────────────────────────────────
 
   if (scenario === "replace" && oldKeyForCleanup) {
@@ -502,7 +537,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 11. Delete old working token + cleanup duplicates (rotate scenario)
+  // 12. Delete old working token + cleanup duplicates (rotate scenario)
   // ─────────────────────────────────────────────────────────
 
   if (scenario === "rotate" && existingSameAccount) {
@@ -541,7 +576,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 12. Save key via storage.ts
+  // 13. Save key via storage.ts
   // ─────────────────────────────────────────────────────────
 
   let keyId: number;
@@ -550,7 +585,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
     const updateResult = await updateKey(env, {
       key_id: existingSameAccount.id,
       secrets: { token: workingToken.value },
-      provider_scope: { cf_token_id: workingToken.id, cf_token_name: workingToken.name },
+      provider_scope: { cf_token_id: workingToken.id, cf_token_name: workingToken.name, cf_account_name: cfAccountName },
       expires_at: expiresOn,
     });
 
@@ -567,7 +602,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
       key_alias: tokenName,
       secrets: { token: workingToken.value },
       external_account_id: cf_account_id,
-      provider_scope: { cf_token_id: workingToken.id, cf_token_name: workingToken.name },
+      provider_scope: { cf_token_id: workingToken.id, cf_token_name: workingToken.name, cf_account_name: cfAccountName },
       expires_at: expiresOn,
     });
 
@@ -580,7 +615,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 13. Delete bootstrap token (best effort)
+  // 14. Delete bootstrap token (best effort)
   // ─────────────────────────────────────────────────────────
 
   await deleteCFToken(cf_account_id, bootstrapTokenId, bootstrap_token).catch((e) =>
@@ -588,7 +623,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   );
 
   // ─────────────────────────────────────────────────────────
-  // 14. Sync zones (if no zones exist for this key)
+  // 15. Sync zones (if no zones exist for this key)
   // ─────────────────────────────────────────────────────────
 
   let syncResult: { zones: number; domains: number } | undefined;
@@ -611,7 +646,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 15. Return success
+  // 16. Return success
   // ─────────────────────────────────────────────────────────
 
   return success(c, {
