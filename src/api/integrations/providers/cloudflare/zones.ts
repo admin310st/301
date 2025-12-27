@@ -504,17 +504,15 @@ export async function syncZonesInternal(
   };
 }
 
-// PATCH для src/api/integrations/providers/cloudflare/zones.ts
-// Заменить handleListZones и handleGetZone
 
 // ============================================================
-// HANDLERS: LIST
+// HANDLERS: LIS
 // ============================================================
 
 /**
  * GET /zones
  * Список зон аккаунта из D1
- * Возвращает external_account_id и key_alias из account_keys
+ * Возвращает external_account_id, key_alias и cf_account_name из account_keys
  */
 export async function handleListZones(c: Context<{ Bindings: Env }>) {
   const env = c.env;
@@ -527,9 +525,9 @@ export async function handleListZones(c: Context<{ Bindings: Env }>) {
   const { account_id: accountId } = auth;
 
   const zones = await env.DB301.prepare(
-    `SELECT z.id, z.cf_zone_id, z.key_id, z.status, z.plan, z.ns_expected, z.verified,   z.ssl_status, 
+    `SELECT z.id, z.cf_zone_id, z.key_id, z.status, z.plan, z.ns_expected, z.verified, z.ssl_status, 
             z.ssl_mode, z.auto_https, z.caching_level, z.waf_mode, z.last_sync_at, 
-            z.created_at, ak.key_alias, ak.external_account_id,
+            z.created_at, ak.key_alias, ak.external_account_id, ak.provider_scope,
             d.domain_name as root_domain
      FROM zones z
      LEFT JOIN account_keys ak ON z.key_id = ak.id
@@ -542,14 +540,30 @@ export async function handleListZones(c: Context<{ Bindings: Env }>) {
     .bind(accountId)
     .all();
 
-  return c.json({ ok: true, zones: zones.results });
+  // Извлекаем cf_account_name из provider_scope
+  const zonesWithAccountName = zones.results.map((zone: any) => {
+    let cf_account_name = null;
+    if (zone.provider_scope) {
+      try {
+        const scope = JSON.parse(zone.provider_scope);
+        cf_account_name = scope.cf_account_name || null;
+      } catch {
+        // ignore parse errors
+      }
+    }
+    // Удаляем provider_scope из ответа (содержит внутренние данные)
+    const { provider_scope, ...rest } = zone;
+    return { ...rest, cf_account_name };
+  });
+
+  return c.json({ ok: true, zones: zonesWithAccountName });
 }
 
 /**
  * GET /zones/:id
  * Детали зоны
  * 
- * Возвращает external_account_id и key_alias из account_keys
+ * Возвращает external_account_id, key_alias и cf_account_name из account_keys
  */
 export async function handleGetZone(c: Context<{ Bindings: Env }>) {
   const env = c.env;
@@ -562,18 +576,33 @@ export async function handleGetZone(c: Context<{ Bindings: Env }>) {
 
   const { account_id: accountId } = auth;
 
-  const zone = await env.DB301.prepare(
-    `SELECT z.*, ak.key_alias, ak.external_account_id
+  const zoneRow = await env.DB301.prepare(
+    `SELECT z.*, ak.key_alias, ak.external_account_id, ak.provider_scope
      FROM zones z
      LEFT JOIN account_keys ak ON z.key_id = ak.id
      WHERE z.id = ? AND z.account_id = ?`
   )
     .bind(zoneId, accountId)
-    .first();
+    .first<any>();
 
-  if (!zone) {
+  if (!zoneRow) {
     return c.json({ ok: false, error: "zone_not_found" }, 404);
   }
+
+  // Извлекаем cf_account_name из provider_scope
+  let cf_account_name = null;
+  if (zoneRow.provider_scope) {
+    try {
+      const scope = JSON.parse(zoneRow.provider_scope);
+      cf_account_name = scope.cf_account_name || null;
+    } catch {
+      // ignore parse errors
+    }
+  }
+
+  // Удаляем provider_scope из ответа
+  const { provider_scope, ...zone } = zoneRow;
+  const zoneWithAccountName = { ...zone, cf_account_name };
 
   // Получаем домены зоны
   const domains = await env.DB301.prepare(
@@ -583,7 +612,7 @@ export async function handleGetZone(c: Context<{ Bindings: Env }>) {
     .bind(zoneId)
     .all();
 
-  return c.json({ ok: true, zone, domains: domains.results });
+  return c.json({ ok: true, zone: zoneWithAccountName, domains: domains.results });
 }
 // ============================================================
 // HANDLERS: CREATE
