@@ -41,6 +41,7 @@ curl -X GET "https://api.301.st/zones" \
       "key_id": 42,
       "key_alias": "Main CF Account",
       "external_account_id": "7abc123def456789",
+      "cf_account_name": "user@example.com's Account",
       "status": "active",
       "plan": "free",
       "ns_expected": "ns1.cloudflare.com,ns2.cloudflare.com",
@@ -65,6 +66,7 @@ curl -X GET "https://api.301.st/zones" \
 | `key_id` | number | ID ключа в account_keys |
 | `key_alias` | string | Название ключа (для UI) |
 | `external_account_id` | string | Cloudflare Account ID |
+| `cf_account_name` | string \| null | Имя аккаунта Cloudflare (для UI) |
 
 ---
 
@@ -92,6 +94,7 @@ curl -X GET "https://api.301.st/zones/1" \
     "key_id": 42,
     "key_alias": "Main CF Account",
     "external_account_id": "7abc123def456789",
+    "cf_account_name": "user@example.com's Account",
     "cf_zone_id": "abc123def456",
     "status": "active",
     "plan": "free",
@@ -140,7 +143,6 @@ curl -X GET "https://api.301.st/zones/1" \
   "error": "zone_not_found"
 }
 ```
-
 ---
 
 ### 1.3 POST /zones
