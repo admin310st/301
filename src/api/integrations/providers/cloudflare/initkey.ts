@@ -3,27 +3,36 @@
 /**
  * Инициализация ключа Cloudflare
  *
- * Flow:
- * 1. Bootstrap token → Working token
- * 2. Working token сохраняется через storage.ts (KV + D1)
- * 3. Bootstrap удаляется
+ * Flow (pending-first для защиты от race condition):
+ * 1. Auth → owner only
+ * 2. Parse input
+ * 3. Verify bootstrap → получаем token_id
+ * 4. Get account info → cf_account_name
+ * 5. Глобальная проверка + резервирование (pending)
+ * 6. Get & resolve permissions
+ * 7. Generate token name and dates
+ * 8. Create working token в CF
+ * 9. Verify working token
+ * 10. Delete old CF token (если rotate)
+ * 11. Finalize: UPDATE pending→active или UPDATE existing (rotate)
+ * 12. Delete bootstrap token
+ * 13. Sync zones (если create)
+ * 14. Return success
  *
- * Сценарии:
- * - СОЗДАНИЕ: новый CF аккаунт → createKey + syncZones
- * - РОТАЦИЯ: тот же CF аккаунт → updateKey
- * - ЗАМЕНА: другой CF аккаунт (free plan) → deleteKey + createKey + syncZones
+ * При ошибке после шага 5:
+ * - DELETE pending запись
+ * - DELETE CF token (если создан)
  */
 
 import type { Context } from "hono";
 import type { Env } from "../../../types/worker";
+import { nanoid } from "nanoid";
+import { encrypt } from "../../../lib/crypto";
 import { requireOwner } from "../../../lib/auth";
 import { withRetry } from "../../../lib/retry";
 import {
-  createKey,
   updateKey,
   deleteKey,
-  findKeyByExternalId,
-  listKeys,
   type KeyRecord,
 } from "../../keys/storage";
 import { CF_REQUIRED_PERMISSIONS } from "./permissions";
@@ -56,6 +65,14 @@ interface CreatedToken {
   id: string;
   name: string;
   value: string;
+}
+
+interface ExistingKeyInfo {
+  id: number;
+  account_id: number;
+  status: string;
+  provider_scope: string | null;
+  kv_key: string;
 }
 
 // ============================================================
@@ -277,6 +294,43 @@ async function deleteCFToken(
 // ============================================================
 
 /**
+ * Проверка лимита CF ключей
+ */
+async function checkCFKeyQuota(
+  env: Env,
+  accountId: number
+): Promise<{ limit: number; current: number; plan: string }> {
+  const accountRow = await env.DB301.prepare(
+    `SELECT plan_tier FROM accounts WHERE id = ?`
+  )
+    .bind(accountId)
+    .first<{ plan_tier: string }>();
+
+  const plan = accountRow?.plan_tier ?? "free";
+
+  const limitByPlan: Record<string, number> = {
+    free: 1,
+    pro: 10,
+    buss: 100,
+  };
+  const limit = limitByPlan[plan] ?? 1;
+
+  const countRow = await env.DB301.prepare(
+    `SELECT COUNT(DISTINCT external_account_id) as count 
+     FROM account_keys 
+     WHERE account_id = ? AND provider = 'cloudflare' AND status = 'active'`
+  )
+    .bind(accountId)
+    .first<{ count: number }>();
+
+  return {
+    limit,
+    current: countRow?.count ?? 0,
+    plan,
+  };
+}
+
+/**
  * Удаление старой CF интеграции при замене
  */
 async function deleteExistingCFIntegration(
@@ -288,9 +342,10 @@ async function deleteExistingCFIntegration(
 
   // 1. CF API — удаляем старый working token (best effort)
   if (oldScope.cf_token_id && oldKey.external_account_id) {
-    await deleteCFToken(oldKey.external_account_id, oldScope.cf_token_id, bootstrapToken).catch(
-      (e) => console.warn("Failed to delete old CF token:", e)
-    );
+    const deleteResult = await deleteCFToken(oldKey.external_account_id, oldScope.cf_token_id, bootstrapToken);
+    if (!deleteResult.ok) {
+      console.warn("Failed to delete old CF token:", oldScope.cf_token_id, deleteResult.error);
+    }
   }
 
   // 2. D1 — удаляем zones и domains (с retry)
@@ -316,47 +371,38 @@ async function deleteExistingCFIntegration(
 }
 
 /**
- * Проверка лимита CF ключей
- * 
- * Логика:
- * - free: 1 CF аккаунт
- * - pro/buss: без лимита (пока)
+ * Rollback: удалить pending запись и CF токен
  */
-async function checkCFKeyQuota(
+async function rollback(
   env: Env,
-  accountId: number
-): Promise<{ limit: number; current: number; plan: string }> {
-  // Получаем plan_tier аккаунта
-  const accountRow = await env.DB301.prepare(
-    `SELECT plan_tier FROM accounts WHERE id = ?`
-  )
-    .bind(accountId)
-    .first<{ plan_tier: string }>();
+  pendingKeyId: number | null,
+  kvKey: string | null,
+  cfAccountId: string,
+  cfTokenId: string | null,
+  bootstrapToken: string
+): Promise<void> {
+  // Удаляем pending запись из D1
+  if (pendingKeyId) {
+    await env.DB301.prepare("DELETE FROM account_keys WHERE id = ?")
+      .bind(pendingKeyId)
+      .run()
+      .catch((e) => console.error("Rollback: failed to delete pending key:", e));
+  }
 
-  const plan = accountRow?.plan_tier ?? "free";
+  // Удаляем из KV
+  if (kvKey) {
+    await env.KV_CREDENTIALS.delete(kvKey).catch((e) =>
+      console.error("Rollback: failed to delete KV:", e)
+    );
+  }
 
-  // Лимит CF аккаунтов по тарифу
-  const limitByPlan: Record<string, number> = {
-    free: 1,
-    pro: 10,
-    buss: 100,
-  };
-  const limit = limitByPlan[plan] ?? 1;
-
-  // Считаем текущие активные CF ключи
-  const countRow = await env.DB301.prepare(
-    `SELECT COUNT(DISTINCT external_account_id) as count 
-     FROM account_keys 
-     WHERE account_id = ? AND provider = 'cloudflare' AND status = 'active'`
-  )
-    .bind(accountId)
-    .first<{ count: number }>();
-
-  return {
-    limit,
-    current: countRow?.count ?? 0,
-    plan,
-  };
+  // Удаляем CF токен
+  if (cfTokenId) {
+    const result = await deleteCFToken(cfAccountId, cfTokenId, bootstrapToken);
+    if (!result.ok) {
+      console.error("Rollback: failed to delete CF token:", cfTokenId, result.error);
+    }
+  }
 }
 
 // ============================================================
@@ -401,66 +447,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 3. Глобальная проверка — CF аккаунт уже используется в ДРУГОМ аккаунте 301?
-  // ─────────────────────────────────────────────────────────
-
-  const globalExisting = await env.DB301.prepare(
-    `SELECT id, account_id FROM account_keys 
-     WHERE provider = 'cloudflare' 
-     AND external_account_id = ? 
-     AND status = 'active'
-     AND account_id != ?`
-  )
-    .bind(cf_account_id, accountId)
-    .first<{ id: number; account_id: number }>();
-
-  if (globalExisting) {
-    return Errors.externalAccountAlreadyUsed(c, "cloudflare", cf_account_id);
-  }
-
-  // ─────────────────────────────────────────────────────────
-  // 4. Проверка тарифа
-  // ─────────────────────────────────────────────────────────
-
-  const quota = await checkCFKeyQuota(env, accountId);
-
-  // ─────────────────────────────────────────────────────────
-  // 5. Определение сценария
-  // ─────────────────────────────────────────────────────────
-
-  const existingSameAccount = await findKeyByExternalId(env, accountId, "cloudflare", cf_account_id);
-  const existingCFKeys = await listKeys(env, accountId, "cloudflare");
-  const existingOtherAccount = existingCFKeys.find(
-    (k) => k.external_account_id !== cf_account_id && k.status === "active"
-  );
-
-  let scenario: "create" | "rotate" | "replace";
-  let oldKeyForCleanup: KeyRecord | null = null;
-
-  if (existingSameAccount && existingSameAccount.status === "active") {
-    scenario = "rotate";
-  } else if (existingOtherAccount) {
-    if (quota.limit <= quota.current && !confirm_replace) {
-      return Errors.cfAccountConflict(
-        c,
-        existingOtherAccount.external_account_id || "",
-        existingOtherAccount.id,
-        cf_account_id
-      );
-    }
-    scenario = confirm_replace ? "replace" : "create";
-    if (confirm_replace) {
-      oldKeyForCleanup = existingOtherAccount;
-    }
-  } else {
-    if (quota.current >= quota.limit) {
-      return Errors.quotaExceeded(c, quota.limit, quota.current, quota.plan);
-    }
-    scenario = "create";
-  }
-
-  // ─────────────────────────────────────────────────────────
-  // 6. Verify bootstrap token
+  // 3. Verify bootstrap token
   // ─────────────────────────────────────────────────────────
 
   const bootstrapVerify = await verifyToken(cf_account_id, bootstrap_token);
@@ -474,28 +461,124 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   const bootstrapTokenId = bootstrapVerify.tokenId;
 
   // ─────────────────────────────────────────────────────────
-  // 7. Get account info (name для UI)
+  // 4. Get account info (name для UI)
   // ─────────────────────────────────────────────────────────
 
   const accountInfoResult = await getAccountInfo(cf_account_id, bootstrap_token);
   const cfAccountName = accountInfoResult.ok ? accountInfoResult.name : null;
 
   // ─────────────────────────────────────────────────────────
-  // 8. Get & resolve permissions
+  // 5. Глобальная проверка + резервирование (pending)
+  // ─────────────────────────────────────────────────────────
+
+  // 5.1 Проверяем существующие записи
+  const existingKey = await env.DB301.prepare(
+    `SELECT id, account_id, status, provider_scope, kv_key
+     FROM account_keys 
+     WHERE provider = 'cloudflare' AND external_account_id = ?
+     ORDER BY CASE status WHEN 'active' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END
+     LIMIT 1`
+  )
+    .bind(cf_account_id)
+    .first<ExistingKeyInfo>();
+
+  let scenario: "create" | "rotate" | "replace";
+  let existingActiveKey: ExistingKeyInfo | null = null;
+  let pendingKeyId: number | null = null;
+  let kvKey: string | null = null;
+
+  if (existingKey) {
+    if (existingKey.status === "pending") {
+      // Уже есть pending — race condition
+      return Errors.keyCreationInProgress(c);
+    }
+
+    if (existingKey.status === "active") {
+      if (existingKey.account_id === accountId) {
+        // Тот же аккаунт — rotate
+        scenario = "rotate";
+        existingActiveKey = existingKey;
+      } else {
+        // Другой аккаунт — blocked
+        return Errors.externalAccountAlreadyUsed(c, "cloudflare", cf_account_id);
+      }
+    } else {
+      // revoked/expired — можно создавать новый
+      scenario = "create";
+    }
+  } else {
+    scenario = "create";
+  }
+
+  // 5.2 Проверка тарифа (только для create)
+  if (scenario === "create") {
+    const quota = await checkCFKeyQuota(env, accountId);
+
+    // Проверяем есть ли другой CF ключ (для replace)
+    const otherCFKey = await env.DB301.prepare(
+      `SELECT id, external_account_id, provider_scope, kv_key
+       FROM account_keys 
+       WHERE account_id = ? AND provider = 'cloudflare' AND status = 'active' AND external_account_id != ?
+       LIMIT 1`
+    )
+      .bind(accountId, cf_account_id)
+      .first<ExistingKeyInfo & { external_account_id: string }>();
+
+    if (otherCFKey) {
+      if (!confirm_replace) {
+        return Errors.cfAccountConflict(
+          c,
+          otherCFKey.external_account_id,
+          otherCFKey.id,
+          cf_account_id
+        );
+      }
+      scenario = "replace";
+      existingActiveKey = otherCFKey;
+    } else if (quota.current >= quota.limit) {
+      return Errors.quotaExceeded(c, quota.limit, quota.current, quota.plan);
+    }
+  }
+
+  // 5.3 Резервируем место (INSERT pending) — только для create/replace
+  if (scenario === "create" || scenario === "replace") {
+    kvKey = `cloudflare:${accountId}:${nanoid(12)}`;
+
+    try {
+      const result = await env.DB301.prepare(
+        `INSERT INTO account_keys (
+          account_id, provider, external_account_id, status, kv_key, key_alias
+        ) VALUES (?, 'cloudflare', ?, 'pending', ?, ?)`
+      )
+        .bind(accountId, cf_account_id, kvKey, key_alias || `pending-${Date.now()}`)
+        .run();
+
+      pendingKeyId = result.meta?.last_row_id as number;
+    } catch (e) {
+      // UNIQUE constraint — race condition
+      console.error("Failed to insert pending key:", e);
+      return Errors.keyCreationInProgress(c);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // 6. Get & resolve permissions
   // ─────────────────────────────────────────────────────────
 
   const permGroupsResult = await getPermissionGroups(cf_account_id, bootstrap_token);
   if (!permGroupsResult.ok) {
+    await rollback(env, pendingKeyId, null, cf_account_id, null, bootstrap_token);
     return Errors.cfError(c, permGroupsResult.error);
   }
 
   const resolveResult = resolvePermissions(permGroupsResult.groups);
   if (!resolveResult.ok) {
+    await rollback(env, pendingKeyId, null, cf_account_id, null, bootstrap_token);
     return Errors.permissionsMissing(c, resolveResult.missing);
   }
 
   // ─────────────────────────────────────────────────────────
-  // 9. Generate token name and dates
+  // 7. Generate token name and dates
   // ─────────────────────────────────────────────────────────
 
   const now = new Date();
@@ -512,7 +595,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   const expiresOn = expiresAt.toISOString().split(".")[0] + "Z";
 
   // ─────────────────────────────────────────────────────────
-  // 10. Create working token
+  // 8. Create working token в CF
   // ─────────────────────────────────────────────────────────
 
   const payload = buildCreateTokenPayload(
@@ -525,128 +608,140 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
 
   const createResult = await createCFToken(cf_account_id, bootstrap_token, payload);
   if (!createResult.ok) {
+    await rollback(env, pendingKeyId, null, cf_account_id, null, bootstrap_token);
     return Errors.cfError(c, createResult.error);
   }
 
   const workingToken = createResult.token;
 
   // ─────────────────────────────────────────────────────────
-  // 11. Verify working token
+  // 9. Verify working token
   // ─────────────────────────────────────────────────────────
 
   const workingVerify = await verifyToken(cf_account_id, workingToken.value);
   if (!workingVerify.ok) {
-    await deleteCFToken(cf_account_id, workingToken.id, bootstrap_token).catch((e) =>
-      console.error("Rollback: failed to delete working token:", e)
-    );
+    await rollback(env, pendingKeyId, null, cf_account_id, workingToken.id, bootstrap_token);
     return Errors.cfError(c, workingVerify.error);
   }
 
   // ─────────────────────────────────────────────────────────
-  // 12. Delete old integration (replace scenario)
+  // 10. Delete old CF token (rotate/replace scenarios)
   // ─────────────────────────────────────────────────────────
 
-  if (scenario === "replace" && oldKeyForCleanup) {
-    const cleanupResult = await deleteExistingCFIntegration(env, oldKeyForCleanup, bootstrap_token);
-    if (!cleanupResult.ok) {
-      await deleteCFToken(cf_account_id, workingToken.id, bootstrap_token).catch(() => {});
-      return Errors.cleanupFailed(c, cleanupResult.error);
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────
-  // 13. Delete old working token + cleanup duplicates (rotate scenario)
-  // ─────────────────────────────────────────────────────────
-
-  if (scenario === "rotate" && existingSameAccount) {
-    const oldScope = existingSameAccount.provider_scope
-      ? JSON.parse(existingSameAccount.provider_scope)
+  if ((scenario === "rotate" || scenario === "replace") && existingActiveKey) {
+    const oldScope = existingActiveKey.provider_scope
+      ? JSON.parse(existingActiveKey.provider_scope)
       : {};
+
     if (oldScope.cf_token_id) {
-      await deleteCFToken(cf_account_id, oldScope.cf_token_id, bootstrap_token).catch((e) =>
-        console.warn("Failed to delete old working token:", e)
-      );
+      const deleteOldResult = await deleteCFToken(cf_account_id, oldScope.cf_token_id, bootstrap_token);
+      if (!deleteOldResult.ok) {
+        console.warn("Failed to delete old CF token:", oldScope.cf_token_id, deleteOldResult.error);
+      }
     }
 
-    // Чистка дубликатов: удаляем ВСЕ другие ключи с этим external_account_id
-    // Правило: 1 CF аккаунт = 1 ключ в 301.st
-    const duplicates = existingCFKeys.filter(
-      (k) =>
-        k.external_account_id === cf_account_id &&
-        k.id !== existingSameAccount.id &&
-        k.status === "active"
-    );
-
-    for (const dup of duplicates) {
-      console.warn(`Cleaning duplicate CF key: id=${dup.id}`);
-      const dupScope = dup.provider_scope ? JSON.parse(dup.provider_scope) : {};
-
-      // Удаляем токен в CF (best effort)
-      if (dupScope.cf_token_id) {
-        await deleteCFToken(cf_account_id, dupScope.cf_token_id, bootstrap_token).catch(() => {});
+    // Для replace — удаляем старую интеграцию полностью
+    if (scenario === "replace") {
+      const cleanupResult = await deleteExistingCFIntegration(env, existingActiveKey as KeyRecord, bootstrap_token);
+      if (!cleanupResult.ok) {
+        await rollback(env, pendingKeyId, null, cf_account_id, workingToken.id, bootstrap_token);
+        return Errors.cleanupFailed(c, cleanupResult.error);
       }
-
-      // Удаляем ключ из storage (D1 + KV)
-      await deleteKey(env, dup.id).catch((e) =>
-        console.error(`Failed to delete duplicate key ${dup.id}:`, e)
-      );
     }
   }
 
   // ─────────────────────────────────────────────────────────
-  // 14. Save key via storage.ts
+  // 11. Finalize: encrypt secrets + UPDATE D1
   // ─────────────────────────────────────────────────────────
 
   let keyId: number;
 
-  if (scenario === "rotate" && existingSameAccount) {
-    const updateResult = await updateKey(env, {
-      key_id: existingSameAccount.id,
-      secrets: { token: workingToken.value },
-      provider_scope: { cf_token_id: workingToken.id, cf_token_name: workingToken.name, cf_account_name: cfAccountName },
-      expires_at: expiresOn,
-    });
+  // Шифруем secrets
+  let encrypted: string;
+  try {
+    const encryptedData = await encrypt({ token: workingToken.value }, env.MASTER_SECRET);
+    encrypted = JSON.stringify(encryptedData);
+  } catch (e) {
+    console.error("Encryption failed:", e);
+    await rollback(env, pendingKeyId, null, cf_account_id, workingToken.id, bootstrap_token);
+    return Errors.storageFailed(c, workingToken.id, cf_account_id);
+  }
 
-    if (!updateResult.ok) {
-      await deleteCFToken(cf_account_id, workingToken.id, workingToken.value).catch(() => {});
+  // Сохраняем в KV
+  try {
+    await env.KV_CREDENTIALS.put(kvKey!, encrypted);
+  } catch (e) {
+    console.error("KV write failed:", e);
+    await rollback(env, pendingKeyId, null, cf_account_id, workingToken.id, bootstrap_token);
+    return Errors.storageFailed(c, workingToken.id, cf_account_id);
+  }
+
+  const providerScope = JSON.stringify({
+    cf_token_id: workingToken.id,
+    cf_token_name: workingToken.name,
+    cf_account_name: cfAccountName,
+  });
+
+  if (scenario === "rotate" && existingActiveKey) {
+    // UPDATE existing record
+    try {
+      await withRetry(async () => {
+        await env.DB301.prepare(
+          `UPDATE account_keys 
+           SET provider_scope = ?, expires_at = ?, kv_key = ?
+           WHERE id = ?`
+        )
+          .bind(providerScope, expiresOn, kvKey, existingActiveKey.id)
+          .run();
+      });
+
+      // Удаляем старый KV
+      if (existingActiveKey.kv_key && existingActiveKey.kv_key !== kvKey) {
+        await env.KV_CREDENTIALS.delete(existingActiveKey.kv_key).catch(() => {});
+      }
+    } catch (e) {
+      console.error("D1 update failed:", e);
+      await rollback(env, null, kvKey, cf_account_id, workingToken.id, bootstrap_token);
       return Errors.storageFailed(c, workingToken.id, cf_account_id);
     }
 
-    keyId = existingSameAccount.id;
+    keyId = existingActiveKey.id;
   } else {
-    const storageResult = await createKey(env, {
-      account_id: accountId,
-      provider: "cloudflare",
-      key_alias: tokenName,
-      secrets: { token: workingToken.value },
-      external_account_id: cf_account_id,
-      provider_scope: { cf_token_id: workingToken.id, cf_token_name: workingToken.name, cf_account_name: cfAccountName },
-      expires_at: expiresOn,
-    });
-
-    if (!storageResult.ok) {
-      await deleteCFToken(cf_account_id, workingToken.id, workingToken.value).catch(() => {});
+    // UPDATE pending → active
+    try {
+      await withRetry(async () => {
+        await env.DB301.prepare(
+          `UPDATE account_keys 
+           SET status = 'active', provider_scope = ?, key_alias = ?, expires_at = ?
+           WHERE id = ?`
+        )
+          .bind(providerScope, tokenName, expiresOn, pendingKeyId)
+          .run();
+      });
+    } catch (e) {
+      console.error("D1 update failed:", e);
+      await rollback(env, pendingKeyId, kvKey, cf_account_id, workingToken.id, bootstrap_token);
       return Errors.storageFailed(c, workingToken.id, cf_account_id);
     }
 
-    keyId = storageResult.key_id;
+    keyId = pendingKeyId!;
   }
 
   // ─────────────────────────────────────────────────────────
-  // 15. Delete bootstrap token (best effort)
+  // 12. Delete bootstrap token (best effort)
   // ─────────────────────────────────────────────────────────
 
-  await deleteCFToken(cf_account_id, bootstrapTokenId, bootstrap_token).catch((e) =>
-    console.warn("Failed to delete bootstrap token:", e)
-  );
+  const deleteBootstrapResult = await deleteCFToken(cf_account_id, bootstrapTokenId, bootstrap_token);
+  if (!deleteBootstrapResult.ok) {
+    console.warn("Failed to delete bootstrap token:", bootstrapTokenId, deleteBootstrapResult.error);
+  }
 
   // ─────────────────────────────────────────────────────────
-  // 16. Sync zones (if no zones exist for this key)
+  // 13. Sync zones (if no zones exist for this key)
   // ─────────────────────────────────────────────────────────
 
   let syncResult: { zones: number; domains: number } | undefined;
 
-  // Проверяем есть ли зоны у этого ключа
   const zonesCount = await env.DB301.prepare(
     "SELECT COUNT(*) as cnt FROM zones WHERE key_id = ?"
   )
@@ -664,7 +759,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 17. Return success
+  // 14. Return success
   // ─────────────────────────────────────────────────────────
 
   return success(c, {

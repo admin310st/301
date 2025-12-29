@@ -273,5 +273,9 @@ export const Errors = {
       provider,
       external_account_id: externalAccountId,
     }),
+
+  /** Создание ключа уже в процессе (race condition) */
+  keyCreationInProgress: (c: Context) =>
+    error(c, "key_creation_in_progress", 409, true),
 };
 
