@@ -401,13 +401,31 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 3. Проверка тарифа
+  // 3. Глобальная проверка — CF аккаунт уже используется в ДРУГОМ аккаунте 301?
+  // ─────────────────────────────────────────────────────────
+
+  const globalExisting = await env.DB301.prepare(
+    `SELECT id, account_id FROM account_keys 
+     WHERE provider = 'cloudflare' 
+     AND external_account_id = ? 
+     AND status = 'active'
+     AND account_id != ?`
+  )
+    .bind(cf_account_id, accountId)
+    .first<{ id: number; account_id: number }>();
+
+  if (globalExisting) {
+    return Errors.externalAccountAlreadyUsed(c, "cloudflare", cf_account_id);
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // 4. Проверка тарифа
   // ─────────────────────────────────────────────────────────
 
   const quota = await checkCFKeyQuota(env, accountId);
 
   // ─────────────────────────────────────────────────────────
-  // 4. Определение сценария
+  // 5. Определение сценария
   // ─────────────────────────────────────────────────────────
 
   const existingSameAccount = await findKeyByExternalId(env, accountId, "cloudflare", cf_account_id);
@@ -442,7 +460,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 5. Verify bootstrap token
+  // 6. Verify bootstrap token
   // ─────────────────────────────────────────────────────────
 
   const bootstrapVerify = await verifyToken(cf_account_id, bootstrap_token);
@@ -456,14 +474,14 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   const bootstrapTokenId = bootstrapVerify.tokenId;
 
   // ─────────────────────────────────────────────────────────
-  // 6. Get account info (name для UI)
+  // 7. Get account info (name для UI)
   // ─────────────────────────────────────────────────────────
 
   const accountInfoResult = await getAccountInfo(cf_account_id, bootstrap_token);
   const cfAccountName = accountInfoResult.ok ? accountInfoResult.name : null;
 
   // ─────────────────────────────────────────────────────────
-  // 7. Get & resolve permissions
+  // 8. Get & resolve permissions
   // ─────────────────────────────────────────────────────────
 
   const permGroupsResult = await getPermissionGroups(cf_account_id, bootstrap_token);
@@ -477,7 +495,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 8. Generate token name and dates
+  // 9. Generate token name and dates
   // ─────────────────────────────────────────────────────────
 
   const now = new Date();
@@ -494,7 +512,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   const expiresOn = expiresAt.toISOString().split(".")[0] + "Z";
 
   // ─────────────────────────────────────────────────────────
-  // 9. Create working token
+  // 10. Create working token
   // ─────────────────────────────────────────────────────────
 
   const payload = buildCreateTokenPayload(
@@ -513,7 +531,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   const workingToken = createResult.token;
 
   // ─────────────────────────────────────────────────────────
-  // 10. Verify working token
+  // 11. Verify working token
   // ─────────────────────────────────────────────────────────
 
   const workingVerify = await verifyToken(cf_account_id, workingToken.value);
@@ -525,7 +543,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 11. Delete old integration (replace scenario)
+  // 12. Delete old integration (replace scenario)
   // ─────────────────────────────────────────────────────────
 
   if (scenario === "replace" && oldKeyForCleanup) {
@@ -537,7 +555,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 12. Delete old working token + cleanup duplicates (rotate scenario)
+  // 13. Delete old working token + cleanup duplicates (rotate scenario)
   // ─────────────────────────────────────────────────────────
 
   if (scenario === "rotate" && existingSameAccount) {
@@ -576,7 +594,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 13. Save key via storage.ts
+  // 14. Save key via storage.ts
   // ─────────────────────────────────────────────────────────
 
   let keyId: number;
@@ -615,7 +633,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 14. Delete bootstrap token (best effort)
+  // 15. Delete bootstrap token (best effort)
   // ─────────────────────────────────────────────────────────
 
   await deleteCFToken(cf_account_id, bootstrapTokenId, bootstrap_token).catch((e) =>
@@ -623,7 +641,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   );
 
   // ─────────────────────────────────────────────────────────
-  // 15. Sync zones (if no zones exist for this key)
+  // 16. Sync zones (if no zones exist for this key)
   // ─────────────────────────────────────────────────────────
 
   let syncResult: { zones: number; domains: number } | undefined;
@@ -646,7 +664,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 16. Return success
+  // 17. Return success
   // ─────────────────────────────────────────────────────────
 
   return success(c, {
@@ -655,3 +673,4 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
     sync: syncResult,
   });
 }
+

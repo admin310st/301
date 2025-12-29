@@ -266,4 +266,12 @@ export const Errors = {
       new_account_id: newAccountId,
       resolution: "confirm_replace",
     }),
+
+  /** Внешний аккаунт уже используется в другом аккаунте 301.st */
+  externalAccountAlreadyUsed: (c: Context, provider: string, externalAccountId: string) =>
+    error(c, "external_account_already_used", 409, false, {
+      provider,
+      external_account_id: externalAccountId,
+    }),
 };
+

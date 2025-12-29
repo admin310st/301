@@ -182,10 +182,13 @@ sequenceDiagram
 | `cf_unavailable` | 503 | ✓ | CF API недоступен (можно retry) |
 | `storage_failed` | 500 | ✓ | Ошибка сохранения (context содержит данные для cleanup) |
 | `cleanup_failed` | 500 | ✗ | Ошибка очистки старой интеграции |
+| `external_account_already_used` | 409 | ✗ | CF аккаунт уже используется в другом аккаунте 301.st |
+
 
 **Примеры ошибок:**
 
 **Примеры ошибок:**
+
 ```json
 // Отсутствуют поля
 {
@@ -254,8 +257,20 @@ sequenceDiagram
     "cf_account_id": "abc123def456"
   }
 }
+
+// CF аккаунт уже используется в другом аккаунте 301.st
+{
+  "ok": false,
+  "error": "external_account_already_used",
+  "recoverable": false,
+  "context": {
+    "provider": "cloudflare",
+    "external_account_id": "7fadeb365dc925694b8dcfb313412345"
+  }
+}
 ```
-```
+
+
 # ============================================================
 # POST /integrations/cloudflare/init
 # Создание working token из bootstrap token
