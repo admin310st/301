@@ -1,0 +1,26 @@
+-- Migration: 0002_add_global_unique_external_account
+-- Description: Глобальная уникальность external_account_id по провайдеру
+--              Один внешний аккаунт (CF, Namecheap, etc.) = один аккаунт 301.st
+-- Date: 2025-12-29
+
+-- Применение:
+--   npx wrangler d1 execute DB301 --remote --file schema/migrations/0003_add_global_unique_external_account.sql
+
+-- ВАЖНО: Перед применением убедитесь что нет дубликатов!
+-- Проверка дубликатов:
+--   SELECT provider, external_account_id, COUNT(*) as cnt, GROUP_CONCAT(id) as key_ids
+--   FROM account_keys
+--   WHERE status = 'active' AND external_account_id IS NOT NULL
+--   GROUP BY provider, external_account_id
+--   HAVING cnt > 1;
+
+-- Если есть дубликаты — удалите лишние записи вручную перед миграцией
+
+-- Глобальная уникальность: (provider + external_account_id) уникален среди активных ключей
+-- Пример: CF аккаунт "7fadeb..." может быть только в одном аккаунте 301.st
+CREATE UNIQUE INDEX IF NOT EXISTS idx_account_keys_global_unique_external
+ON account_keys(provider, external_account_id)
+WHERE status = 'active' AND external_account_id IS NOT NULL;
+
+-- Откат:
+--   DROP INDEX IF EXISTS idx_account_keys_global_unique_external;

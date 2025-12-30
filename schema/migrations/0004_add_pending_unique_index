@@ -1,0 +1,24 @@
+-- Migration: 0004_add_pending_unique_index
+-- Description: Добавляет UNIQUE индекс для status='pending'
+--              Защита от race condition при создании ключей
+-- Date: 2025-12-29
+
+-- Применение:
+--   npx wrangler d1 execute DB301 --remote --file schema/migrations/0004_add_pending_unique_index.sql
+
+-- Логика:
+-- 1. idx_account_keys_global_unique_external — блокирует дубликаты active
+-- 2. idx_account_keys_unique_pending — блокирует дубликаты pending
+-- 
+-- Flow:
+-- 1. INSERT с status='pending' → если pending уже есть, UNIQUE error
+-- 2. Create CF token
+-- 3. UPDATE status='active' → если active уже есть, UNIQUE error
+
+-- Индекс для pending (защита от race condition)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_account_keys_unique_pending
+ON account_keys(provider, external_account_id)
+WHERE status = 'pending' AND external_account_id IS NOT NULL;
+
+-- Откат:
+--   DROP INDEX IF EXISTS idx_account_keys_unique_pending;

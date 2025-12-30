@@ -1,0 +1,48 @@
+-- Migration: 0006_remove_plan_tier_from_quota_usage
+-- Description: Убираем plan_tier из quota_usage (источник правды — accounts.plan_tier)
+--              Добавляем UNIQUE на account_id
+-- Date: 2025-12-30
+
+-- Применение:
+--   wrangler d1 execute 301 --remote --file schema/migrations/0006_remove_plan_tier_from_quota_usage.sql
+
+-- 1. Создаём новую таблицу без plan_tier и с UNIQUE на account_id
+CREATE TABLE quota_usage_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL UNIQUE,
+    projects_used INTEGER DEFAULT 0,
+    sites_used INTEGER DEFAULT 0,
+    domains_used INTEGER DEFAULT 0,
+    zones_used INTEGER DEFAULT 0,
+    redirect_rules_used INTEGER DEFAULT 0,
+    tds_rules_used INTEGER DEFAULT 0,
+    team_members_used INTEGER DEFAULT 0,
+    api_calls_minute INTEGER DEFAULT 0,
+    last_reset TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+-- 2. Копируем данные (если есть)
+INSERT INTO quota_usage_new (
+    id, account_id, projects_used, sites_used, domains_used, zones_used,
+    redirect_rules_used, tds_rules_used, team_members_used, api_calls_minute,
+    last_reset, updated_at
+)
+SELECT 
+    id, account_id, projects_used, sites_used, domains_used, zones_used,
+    redirect_rules_used, tds_rules_used, team_members_used, api_calls_minute,
+    last_reset, updated_at
+FROM quota_usage;
+
+-- 3. Удаляем старую таблицу
+DROP TABLE quota_usage;
+
+-- 4. Переименовываем новую
+ALTER TABLE quota_usage_new RENAME TO quota_usage;
+
+-- 5. Создаём индекс (UNIQUE уже встроен в определение колонки)
+-- Индекс не нужен — UNIQUE constraint автоматически создаёт индекс
+
+-- Откат (требует ручного восстановления):
+--   Пересоздать таблицу с plan_tier

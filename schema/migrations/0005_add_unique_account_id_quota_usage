@@ -1,0 +1,12 @@
+-- Migration: 0005_add_unique_account_id_quota_usage
+-- Description: Добавляет UNIQUE индекс на account_id для корректной работы ON CONFLICT
+-- Date: 2025-12-30
+
+-- Применение:
+--   wrangler d1 execute 301 --remote --file schema/migrations/0005_add_unique_account_id_quota_usage.sql
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_quota_usage_account_id 
+ON quota_usage(account_id);
+
+-- Откат:
+--   DROP INDEX IF EXISTS idx_quota_usage_account_id;
