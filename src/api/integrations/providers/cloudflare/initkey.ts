@@ -683,25 +683,25 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   });
 
   if (scenario === "rotate" && existingActiveKey) {
-    // UPDATE existing record
+    // UPDATE existing record — используем существующий kv_key
+    const rotateKvKey = existingActiveKey.kv_key;
+    
     try {
       await withRetry(async () => {
         await env.DB301.prepare(
           `UPDATE account_keys 
-           SET provider_scope = ?, expires_at = ?, kv_key = ?
+           SET provider_scope = ?, expires_at = ?
            WHERE id = ?`
         )
-          .bind(providerScope, expiresOn, kvKey, existingActiveKey.id)
+          .bind(providerScope, expiresOn, existingActiveKey.id)
           .run();
       });
 
-      // Удаляем старый KV
-      if (existingActiveKey.kv_key && existingActiveKey.kv_key !== kvKey) {
-        await env.KV_CREDENTIALS.delete(existingActiveKey.kv_key).catch(() => {});
-      }
+      // Обновляем секрет в KV (перезаписываем)
+      await env.KV_CREDENTIALS.put(rotateKvKey, encrypted);
     } catch (e) {
       console.error("D1 update failed:", e);
-      await rollback(env, null, kvKey, cf_account_id, workingToken.id, bootstrap_token);
+      await rollback(env, null, null, cf_account_id, workingToken.id, bootstrap_token);
       return Errors.storageFailed(c, workingToken.id, cf_account_id);
     }
 
