@@ -212,7 +212,6 @@ VALUES
 CREATE TABLE IF NOT EXISTS quota_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
-    plan_tier TEXT NOT NULL CHECK(plan_tier IN ('free','pro','buss')),
     projects_used INTEGER DEFAULT 0,
     sites_used INTEGER DEFAULT 0,
     domains_used INTEGER DEFAULT 0,
