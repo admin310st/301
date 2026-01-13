@@ -733,129 +733,15 @@ const trend = clicks_today > clicks_yesterday * 1.1 ? 'up'
 
 ---
 
-## 7. API Endpoints
+## 7. UI Flow
 
-### 7.1 List redirects for Site
-
-```
-GET /api/sites/{site_id}/redirects
-```
-
-**Response:**
-```json
-{
-  "redirects": [
-    {
-      "id": 1,
-      "domain_id": 45,
-      "domain_name": "cryptoboss.pics",
-      "zone_id": 10,
-      "template_id": "T1",
-      "preset_id": null,
-      "rule_name": "Main redirect",
-      "params": {"target_url": "https://cryptoboss.com"},
-      "status_code": 301,
-      "enabled": true,
-      "sync_status": "synced",
-      "clicks_total": 12847,
-      "clicks_today": 142,
-      "trend": "up"
-    }
-  ],
-  "zone_limits": [
-    {"zone_id": 10, "zone_name": "cryptoboss.pics", "used": 3, "max": 10}
-  ],
-  "total": 8
-}
-```
-
-### 7.2 Create redirect
-
-```
-POST /api/domains/{domain_id}/redirects
-```
-
-**Body:**
-```json
-{
-  "template_id": "T1",
-  "rule_name": "New redirect",
-  "params": {
-    "target_url": "https://target.com"
-  },
-  "status_code": 301
-}
-```
-
-### 7.3 Update redirect
-
-```
-PATCH /api/redirects/{id}
-```
-
-### 7.4 Delete redirect
-
-```
-DELETE /api/redirects/{id}
-```
-
-### 7.5 Force sync
-
-```
-POST /api/redirects/{id}/sync
-```
-
-### 7.6 Get zone limits
-
-```
-GET /api/zones/{zone_id}/limits
-```
-
----
-
-## 8. CF Integration
-
-### 8.1 Phase
-
-```
-http_request_dynamic_redirect
-```
-
-### 8.2 API Endpoints
-
-```
-GET    /zones/{zone_id}/rulesets?phase=http_request_dynamic_redirect
-POST   /zones/{zone_id}/rulesets/{ruleset_id}/rules
-PATCH  /zones/{zone_id}/rulesets/{ruleset_id}/rules/{rule_id}
-DELETE /zones/{zone_id}/rulesets/{ruleset_id}/rules/{rule_id}
-```
-
-### 8.3 Required Permissions
-
-- `Zone:Dynamic URL Redirects:Read`
-- `Zone:Dynamic URL Redirects:Write`
-- `Zone:Analytics:Read` (для GraphQL API)
-
-### 8.4 Лимиты
-
-| Plan | Rules per Zone |
-|------|----------------|
-| Free | 10 |
-| Pro | 25 |
-| Business | 50 |
-| Enterprise | 300 |
-
----
-
-## 9. UI Flow
-
-### 9.1 Навигация
+### 7.1 Навигация
 
 ```
 Projects → Site → Redirects
 ```
 
-### 9.2 List View
+### 7.2 List View
 
 **Header:**
 - Название Site
@@ -867,7 +753,7 @@ Projects → Site → Redirects
 | Status | Domain | Target | Type | Code | Clicks | Trend | Sync | Actions |
 |--------|--------|--------|------|------|--------|-------|------|---------|
 
-### 9.3 Create/Edit Drawer
+### 7.3 Create/Edit Drawer
 
 1. Source Domain (select + лимит)
 2. Template (T1-T7) или Preset (P1-Pn)
@@ -876,7 +762,7 @@ Projects → Site → Redirects
 5. Preview (CF expression)
 6. Save & Deploy
 
-### 9.4 Sync Status
+### 7.4 Sync Status
 
 | Status | Badge | Описание |
 |--------|-------|----------|
@@ -886,7 +772,7 @@ Projects → Site → Redirects
 
 ---
 
-## 10. Validation
+## 8. Validation
 
 | Правило | Сообщение |
 |---------|-----------|
@@ -897,7 +783,7 @@ Projects → Site → Redirects
 
 ---
 
-## 11. Scope & Exclusions
+## 9. Scope & Exclusions
 
 ### В scope:
 - ✅ Simple redirects (T1-T7)
@@ -914,7 +800,7 @@ Projects → Site → Redirects
 
 ---
 
-## 12. Implementation Plan
+## 10. Implementation Plan
 
 1. **Миграция БД** — создать redirect_rules
 2. **API для UI** — CRUD endpoints
