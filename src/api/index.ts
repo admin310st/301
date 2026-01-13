@@ -15,6 +15,20 @@ import githubStart from "./auth/oauth/github/start";
 import githubCallback from "./auth/oauth/github/callback";
 import { handleInitKeyCF } from "./integrations/providers/cloudflare/initkey";
 import { handleInitKeyNamecheap } from "./integrations/providers/namecheap/initkey";
+import {
+  handleListTemplates,
+  handleListPresets,
+  handleListSiteRedirects,
+  handleListDomainRedirects,
+  handleGetRedirect,
+  handleCreateRedirect,
+  handleCreatePreset,
+  handleUpdateRedirect,
+  handleDeleteRedirect,
+  handleSyncRedirect,
+  handleGetZoneRedirectLimits,
+} from "./redirects/redirects";
+
 
 // Cloudflare Zones
 import {
@@ -70,6 +84,12 @@ import {
 } from "./domains/domains";
 
 import { handleBatchCreateZones } from "./domains/zones-batch";
+
+// Redirects CF Sync
+import {
+  handleApplyZoneRedirects,
+  handleGetZoneRedirectStatus,
+} from "./redirects/cf-sync";
 
 // Cron
 import cronHandler from "./jobs/cron";
@@ -140,6 +160,30 @@ app.post("/domains/batch", handleBatchCreateDomains);
 app.patch("/domains/:id", handleUpdateDomain);
 app.delete("/domains/:id", handleDeleteDomain);
 app.post("/domains/zones/batch", handleBatchCreateZones);
+
+// --- Redirects ---
+// Templates & Presets (public)
+app.get("/redirects/templates", handleListTemplates);
+app.get("/redirects/presets", handleListPresets);
+
+// List redirects
+app.get("/sites/:siteId/redirects", handleListSiteRedirects);
+app.get("/domains/:domainId/redirects", handleListDomainRedirects);
+
+// CRUD redirects
+app.get("/redirects/:id", handleGetRedirect);
+app.post("/domains/:domainId/redirects", handleCreateRedirect);
+app.post("/domains/:domainId/redirects/preset", handleCreatePreset);
+app.patch("/redirects/:id", handleUpdateRedirect);
+app.delete("/redirects/:id", handleDeleteRedirect);
+
+// Sync & Limits
+app.post("/redirects/:id/sync", handleSyncRedirect);
+app.get("/zones/:zoneId/redirect-limits", handleGetZoneRedirectLimits);
+
+// CF Apply (zone-level)
+app.post("/zones/:zoneId/apply-redirects", handleApplyZoneRedirects);
+app.get("/zones/:zoneId/redirect-status", handleGetZoneRedirectStatus);
 
 export default {
   fetch: app.fetch,
