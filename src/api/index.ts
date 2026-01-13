@@ -25,7 +25,6 @@ import {
   handleCreatePreset,
   handleUpdateRedirect,
   handleDeleteRedirect,
-  handleSyncRedirect,
   handleGetZoneRedirectLimits,
 } from "./redirects/redirects";
 
@@ -178,12 +177,11 @@ app.patch("/redirects/:id", handleUpdateRedirect);
 app.delete("/redirects/:id", handleDeleteRedirect);
 
 // Sync & Limits
-app.post("/redirects/:id/sync", handleSyncRedirect);
-app.get("/zones/:zoneId/redirect-limits", handleGetZoneRedirectLimits);
+app.get("/zones/:id/redirect-limits", handleGetZoneRedirectLimits);
 
 // CF Apply (zone-level)
-app.post("/zones/:zoneId/apply-redirects", handleApplyZoneRedirects);
-app.get("/zones/:zoneId/redirect-status", handleGetZoneRedirectStatus);
+app.post("/zones/:id/apply-redirects", handleApplyZoneRedirects);
+app.get("/zones/:id/redirect-status", handleGetZoneRedirectStatus);
 
 export default {
   fetch: app.fetch,
