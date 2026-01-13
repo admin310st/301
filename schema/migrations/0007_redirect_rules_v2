@@ -1,0 +1,223 @@
+-- ======================================================
+-- Migration: 0007_redirect_rules_v2.sql
+-- Date: 2025-01-11
+-- Description: Новая структура redirect_rules на основе шаблонов T1-T7
+-- 
+-- Удаляет:
+--   - rule_domain_map (таблица + 4 индекса)
+--   - redirect_rules старая (таблица + 2 индекса)
+--
+-- Создаёт:
+--   - redirect_rules новая (таблица + 6 индексов)
+--
+-- Execute:
+--   npx wrangler d1 execute DB301 --remote --file schema/migrations/0007_redirect_rules_v2.sql
+-- ======================================================
+
+-- ======================================================
+-- STEP 1: УДАЛЕНИЕ ИНДЕКСОВ rule_domain_map
+-- ======================================================
+
+DROP INDEX IF EXISTS idx_rdm_account_status;
+DROP INDEX IF EXISTS idx_rdm_domain_enabled;
+DROP INDEX IF EXISTS idx_rdm_redirect;
+DROP INDEX IF EXISTS idx_rdm_tds;
+
+-- ======================================================
+-- STEP 2: УДАЛЕНИЕ ТАБЛИЦЫ rule_domain_map
+-- ======================================================
+
+DROP TABLE IF EXISTS rule_domain_map;
+
+-- ======================================================
+-- STEP 3: УДАЛЕНИЕ ИНДЕКСОВ redirect_rules (старых)
+-- ======================================================
+
+DROP INDEX IF EXISTS idx_redirect_rules_account;
+DROP INDEX IF EXISTS idx_redirect_rules_name;
+
+-- ======================================================
+-- STEP 4: УДАЛЕНИЕ ТАБЛИЦЫ redirect_rules (старой)
+-- ======================================================
+
+DROP TABLE IF EXISTS redirect_rules;
+
+-- ======================================================
+-- STEP 5: СОЗДАНИЕ ТАБЛИЦЫ redirect_rules (новой)
+-- ======================================================
+
+CREATE TABLE redirect_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    
+    -- Владелец и связи
+    account_id INTEGER NOT NULL,
+    domain_id INTEGER NOT NULL,
+    zone_id INTEGER NOT NULL,
+    
+    -- Шаблон и пресет
+    template_id TEXT NOT NULL,
+    preset_id TEXT,
+    preset_order INTEGER,
+    
+    -- Параметры правила
+    rule_name TEXT NOT NULL,
+    params TEXT NOT NULL DEFAULT '{}',
+    status_code INTEGER NOT NULL DEFAULT 301 
+        CHECK(status_code IN (301, 302)),
+    
+    -- Состояние
+    enabled INTEGER NOT NULL DEFAULT 1,
+    
+    -- Синхронизация с Cloudflare
+    sync_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(sync_status IN ('pending', 'synced', 'error')),
+    cf_rule_id TEXT,
+    cf_ruleset_id TEXT,
+    last_synced_at TEXT,
+    last_error TEXT,
+    
+    -- Analytics (накопительные счётчики)
+    clicks_total INTEGER NOT NULL DEFAULT 0,
+    clicks_yesterday INTEGER NOT NULL DEFAULT 0,
+    clicks_today INTEGER NOT NULL DEFAULT 0,
+    last_counted_date TEXT,
+    
+    -- Timestamps
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- Foreign Keys
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE,
+    FOREIGN KEY (zone_id) REFERENCES zones(id) ON DELETE CASCADE
+);
+
+-- ======================================================
+-- STEP 6: СОЗДАНИЕ ИНДЕКСОВ
+-- ======================================================
+
+-- Выборка по аккаунту
+CREATE INDEX idx_redirect_rules_account 
+    ON redirect_rules(account_id);
+
+-- Подсчёт лимитов per zone
+CREATE INDEX idx_redirect_rules_zone_enabled 
+    ON redirect_rules(zone_id, enabled);
+
+-- Выборка по домену
+CREATE INDEX idx_redirect_rules_domain 
+    ON redirect_rules(domain_id);
+
+-- Batch job синхронизации
+CREATE INDEX idx_redirect_rules_sync_pending 
+    ON redirect_rules(sync_status) 
+    WHERE sync_status = 'pending';
+
+-- Группировка по пресетам
+CREATE INDEX idx_redirect_rules_preset 
+    ON redirect_rules(account_id, preset_id, preset_order)
+    WHERE preset_id IS NOT NULL;
+
+-- Уникальность: один template на домен
+CREATE UNIQUE INDEX idx_redirect_rules_unique_template 
+    ON redirect_rules(domain_id, template_id)
+    WHERE enabled = 1;
+
+/*
+ТАБЛИЦА: redirect_rules
+НАЗНАЧЕНИЕ: Пользовательские правила редиректов на основе шаблонов T1-T7.
+            Деплоятся в Cloudflare Redirect Rules API (phase: http_request_dynamic_redirect).
+
+ПОЛЯ:
+
+id                  - Уникальный идентификатор правила.
+account_id          - Владелец (tenant isolation). FK → accounts.id.
+domain_id           - Домен-источник редиректа. FK → domains.id.
+zone_id             - Зона Cloudflare для подсчёта лимита (10 правил/зону на Free). FK → zones.id.
+
+template_id         - Идентификатор шаблона:
+                      T1 = Domain → Domain (основной кейс донор→лендинг)
+                      T3 = non-www → www (SEO canonical)
+                      T4 = www → non-www (SEO canonical)
+                      T5 = Path prefix → Path (wildcard /old/* → /new/)
+                      T6 = Exact path → URL (точечная замена страницы)
+                      T7 = Maintenance (временный редирект, всегда 302)
+
+preset_id           - Идентификатор пресета (P1-Pn). NULL для одиночных шаблонов.
+                      P1 = SEO Canonical (www) = T3
+                      P2 = SEO Canonical (non-www) = T4
+                      P3 = Domain Migration = T1 + T3
+                      P4 = Maintenance Mode = T7
+                      P5 = Full Migration = T1 + T3 + T5 (×N)
+
+preset_order        - Порядок правила в пресете (1, 2, 3...). NULL для одиночных шаблонов.
+
+rule_name           - Человекочитаемое название для UI.
+                      Пример: "cryptoboss.pics → cryptoboss.com"
+
+params              - JSON с параметрами пользователя.
+                      Пример: {"target_url": "https://new.com", "preserve_path": true, "preserve_query": true}
+                      
+                      Параметры по шаблонам:
+                      T1: target_url, preserve_path, preserve_query
+                      T3: (фиксированы)
+                      T4: (фиксированы)
+                      T5: source_path, target_path, preserve_query
+                      T6: source_path, target_url, preserve_query
+                      T7: target_url
+
+status_code         - HTTP код редиректа: 301 (permanent) или 302 (temporary).
+                      T7 (Maintenance) всегда использует 302.
+
+enabled             - Флаг активности правила. 0 = отключено без удаления.
+
+sync_status         - Статус синхронизации с Cloudflare:
+                      pending = ожидает деплоя
+                      synced  = успешно размещено в CF
+                      error   = ошибка деплоя
+
+cf_rule_id          - ID правила в Cloudflare Redirect Rules после деплоя.
+cf_ruleset_id       - ID ruleset в Cloudflare (phase: http_request_dynamic_redirect).
+last_synced_at      - Время последней успешной синхронизации с Cloudflare.
+last_error          - Текст последней ошибки при деплое или синхронизации.
+
+clicks_total        - Накопительный счётчик кликов за всё время жизни правила.
+                      Обновляется batch job 1 раз в день.
+clicks_yesterday    - Клики за вчера. Используется для расчёта trend.
+clicks_today        - Клики за сегодня (текущий день). Сбрасывается batch job.
+last_counted_date   - Дата последнего подсчёта (YYYY-MM-DD). Для предотвращения двойного подсчёта.
+
+created_at          - Дата и время создания правила.
+updated_at          - Дата и время последнего обновления записи.
+
+ИНДЕКСЫ:
+
+idx_redirect_rules_account         - Выборка всех правил аккаунта.
+idx_redirect_rules_zone_enabled    - Подсчёт лимита правил per zone (только активные).
+idx_redirect_rules_domain          - Выборка правил по домену.
+idx_redirect_rules_sync_pending    - Batch job: поиск правил для синхронизации.
+idx_redirect_rules_preset          - Группировка правил по пресетам.
+idx_redirect_rules_unique_template - Уникальность: один шаблон на домен (только активные).
+
+ПОДСЧЁТ ЛИМИТА ЗОНЫ:
+
+SELECT COUNT(*) FROM redirect_rules 
+WHERE zone_id = ? AND enabled = 1;
+
+-- Лимит Free плана: 10 правил на зону
+
+ANALYTICS BATCH JOB (1 раз в день):
+
+1. Query CF GraphQL API за вчерашний день
+2. Для каждого правила:
+   - clicks_total += clicks_from_cf
+   - clicks_yesterday = clicks_today
+   - clicks_today = 0
+   - last_counted_date = today
+
+TREND CALCULATION:
+
+trend = clicks_today > clicks_yesterday * 1.1 ? 'up'
+      : clicks_today < clicks_yesterday * 0.9 ? 'down'
+      : 'neutral';
+*/
