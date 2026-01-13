@@ -16,6 +16,7 @@ Serverless-архитектура, multi-tenant изоляция, интегра
   - [API: Backend Domains](API_Domains)
   - [API: Backend Projects](API_Projects)
   - [API: Backend Sites](API_Sites)
+  - [API: Redirects](API_Redirects)
 8. [ВОРКЕРЫ (Core и Client)](Workers)
 9. [РЕДИРЕКТЫ ДОМЕНОВ](Redirects)
 10. [TDS — СИСТЕМА РАСПРЕДЕЛЕНИЯ ТРАФИКА](TDS)
