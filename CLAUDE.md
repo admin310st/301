@@ -96,14 +96,26 @@ UI (draft) → API /apply → CF API → Customer Account
 ### Entity Hierarchy
 ```
 Account
-└── Projects (campaigns/brands)
-    ├── Integrations (CF keys, analytics)
-    └── Sites (traffic units)
-        ├── Primary Domain (acceptor)
-        └── Donor Domains (redirect to primary)
+ ├── Free Domains (reserve)               ← домены, не привязанные к сайту
+ │       └── Zones (технические, скрытые) ← каждая зона соответствует домену 2-го уровня
+ │
+ └── Projects                             ← логические группы (бренды / кампании)
+        ├── Integrations                  ← Cloudflare, GA, YM, HostTracker, Registrar
+        │
+        ├── Sites                         ← функциональные единицы приёма трафика
+        │     ├── Primary Domain          ← один главный домен (2-го или 3-го уровня)
+        │     ├── Donor Domains (0..N)    ← редиректы на primary
+        │     └── (в будущем) сущности сайта: аналитика, правила, отчёты и т.п.
+        │
+        ├── Domains (через Sites)         ← рабочие домены сайта
+        │       └── Zones (служебные, Cloudflare)
+        │             └── домены, принадлежащие этой зоне
+        │
+        └── Zones (служебная группировка Cloudflare)
+              ├── Связь с интеграцией (Cloudflare Account Key)
+              ├── Список доменов, относящихся к зоне
+              └── Используется для быстрой выборки и управления записями DNS
 ```
-
-Zones are technical containers (1 zone = 1 second-level domain), hidden from UI.
 
 ## Environment Variables
 
