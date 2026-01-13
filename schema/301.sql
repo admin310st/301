@@ -448,10 +448,98 @@ COMMENT ON COLUMN domains.expired_at IS 'Дата окончания регис�
 COMMENT ON COLUMN domains.created_at IS 'Дата добавления домена в систему.';
 COMMENT ON COLUMN domains.updated_at IS 'Дата последнего обновления записи.';
 
+-- ======================================================
+-- REDIRECT_RULES
+-- ======================================================
 
--- ======================================================
--- IV. REDIRECTS AND TDS RULES
--- ======================================================
+CREATE TABLE IF NOT EXISTS redirect_rules (
+    id SERIAL PRIMARY KEY,
+    account_id INTEGER NOT NULL,              -- Владелец (tenant isolation)
+    domain_id INTEGER NOT NULL,               -- Домен-источник редиректа
+    zone_id INTEGER NOT NULL,                 -- Зона Cloudflare (для подсчёта лимита 10 правил/зону)
+    template_id VARCHAR(10) NOT NULL,         -- T1, T3, T4, T5, T6, T7
+    preset_id VARCHAR(10),                    -- P1-Pn (NULL для одиночных шаблонов)
+    preset_order INTEGER,                     -- Порядок правила в пресете (1, 2, 3...)
+    rule_name VARCHAR(255) NOT NULL,          -- Человекочитаемое название для UI
+    params JSONB NOT NULL DEFAULT '{}',       -- JSON с параметрами пользователя
+    status_code INTEGER NOT NULL DEFAULT 301 
+        CHECK(status_code IN (301, 302)),     -- HTTP код редиректа
+    enabled BOOLEAN NOT NULL DEFAULT true,    -- Флаг активности
+    sync_status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK(sync_status IN ('pending', 'synced', 'error')),
+    cf_rule_id VARCHAR(64),                   -- ID правила в Cloudflare Redirect Rules
+    cf_ruleset_id VARCHAR(64),                -- ID ruleset в Cloudflare
+    last_synced_at TIMESTAMP,                 -- Время последней успешной синхронизации
+    last_error TEXT,                          -- Текст последней ошибки
+    clicks_total BIGINT NOT NULL DEFAULT 0,   -- Накопительный счётчик (всё время жизни)
+    clicks_yesterday INTEGER NOT NULL DEFAULT 0, -- Клики за вчера (для расчёта trend)
+    clicks_today INTEGER NOT NULL DEFAULT 0,  -- Клики за сегодня (текущий день)
+    last_counted_date DATE,                   -- Дата последнего подсчёта (YYYY-MM-DD)
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_redirect_rules_account 
+        FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    CONSTRAINT fk_redirect_rules_domain 
+        FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE,
+    CONSTRAINT fk_redirect_rules_zone 
+        FOREIGN KEY (zone_id) REFERENCES zones(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_redirect_rules_account ON redirect_rules(account_id);
+CREATE INDEX idx_redirect_rules_zone_enabled ON redirect_rules(zone_id, enabled) 
+    WHERE enabled = true;
+CREATE INDEX idx_redirect_rules_domain ON redirect_rules(domain_id);
+CREATE INDEX idx_redirect_rules_sync_pending ON redirect_rules(sync_status) 
+    WHERE sync_status = 'pending';
+CREATE INDEX idx_redirect_rules_preset ON redirect_rules(account_id, preset_id, preset_order)
+    WHERE preset_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_redirect_rules_unique_template ON redirect_rules(domain_id, template_id)
+    WHERE enabled = true;
+
+-- Автообновление updated_at
+CREATE OR REPLACE FUNCTION update_redirect_rules_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_redirect_rules_updated_at
+    BEFORE UPDATE ON redirect_rules
+    FOR EACH ROW
+    EXECUTE FUNCTION update_redirect_rules_updated_at();
+
+COMMENT ON TABLE redirect_rules IS 'Пользовательские правила редиректов на основе шаблонов T1-T7. Деплоятся в Cloudflare Redirect Rules API.';
+COMMENT ON COLUMN redirect_rules.id IS 'Уникальный идентификатор правила.';
+COMMENT ON COLUMN redirect_rules.account_id IS 'Владелец (tenant isolation). FK → accounts.id.';
+COMMENT ON COLUMN redirect_rules.domain_id IS 'Домен-источник редиректа. FK → domains.id.';
+COMMENT ON COLUMN redirect_rules.zone_id IS 'Зона Cloudflare для подсчёта лимита (10 правил/зону на Free). FK → zones.id.';
+COMMENT ON COLUMN redirect_rules.template_id IS 'Идентификатор шаблона: T1 (Domain→Domain), T3 (non-www→www), T4 (www→non-www), T5 (Path prefix), T6 (Exact path), T7 (Maintenance).';
+COMMENT ON COLUMN redirect_rules.preset_id IS 'Идентификатор пресета (P1-Pn). NULL для одиночных шаблонов.';
+COMMENT ON COLUMN redirect_rules.preset_order IS 'Порядок правила в пресете (1, 2, 3...). NULL для одиночных шаблонов.';
+COMMENT ON COLUMN redirect_rules.rule_name IS 'Человекочитаемое название для UI. Пример: "cryptoboss.pics → cryptoboss.com".';
+COMMENT ON COLUMN redirect_rules.params IS 'JSON с параметрами пользователя. Пример: {"target_url": "https://new.com", "preserve_path": true}.';
+COMMENT ON COLUMN redirect_rules.status_code IS 'HTTP код редиректа: 301 (permanent) или 302 (temporary).';
+COMMENT ON COLUMN redirect_rules.enabled IS 'Флаг активности правила. false = отключено без удаления.';
+COMMENT ON COLUMN redirect_rules.sync_status IS 'Статус синхронизации: pending (ожидает деплоя), synced (успешно), error (ошибка).';
+COMMENT ON COLUMN redirect_rules.cf_rule_id IS 'ID правила в Cloudflare Redirect Rules после деплоя.';
+COMMENT ON COLUMN redirect_rules.cf_ruleset_id IS 'ID ruleset в Cloudflare (phase: http_request_dynamic_redirect).';
+COMMENT ON COLUMN redirect_rules.last_synced_at IS 'Время последней успешной синхронизации с Cloudflare.';
+COMMENT ON COLUMN redirect_rules.last_error IS 'Текст последней ошибки при деплое или синхронизации.';
+COMMENT ON COLUMN redirect_rules.clicks_total IS 'Накопительный счётчик кликов за всё время жизни правила.';
+COMMENT ON COLUMN redirect_rules.clicks_yesterday IS 'Клики за вчера. Используется для расчёта trend.';
+COMMENT ON COLUMN redirect_rules.clicks_today IS 'Клики за сегодня (текущий день). Сбрасывается batch job.';
+COMMENT ON COLUMN redirect_rules.last_counted_date IS 'Дата последнего подсчёта (YYYY-MM-DD). Для предотвращения двойного подсчёта.';
+COMMENT ON COLUMN redirect_rules.created_at IS 'Дата и время создания правила.';
+COMMENT ON COLUMN redirect_rules.updated_at IS 'Дата и время последнего обновления записи.';
+COMMENT ON INDEX idx_redirect_rules_account IS 'Выборка всех правил аккаунта.';
+COMMENT ON INDEX idx_redirect_rules_zone_enabled IS 'Подсчёт лимита правил per zone (только активные).';
+COMMENT ON INDEX idx_redirect_rules_domain IS 'Выборка правил по домену.';
+COMMENT ON INDEX idx_redirect_rules_sync_pending IS 'Batch job: поиск правил для синхронизации.';
+COMMENT ON INDEX idx_redirect_rules_preset IS 'Группировка правил по пресетам.';
+COMMENT ON INDEX idx_redirect_rules_unique_template IS 'Уникальность: один шаблон на домен (только активные).';
+
 
 CREATE TABLE IF NOT EXISTS redirect_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
