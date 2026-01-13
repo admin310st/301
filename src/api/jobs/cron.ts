@@ -13,6 +13,9 @@ import { Env } from "../types/worker";
 import { checkPendingZones } from "../integrations/providers/cloudflare/zones";
 import { verifyAccountKeys as verifyCFKeys } from "../integrations/providers/cloudflare/keys";
 
+// Redirect stats
+import { updateRedirectStats } from "./redirect-stats";
+
 // TODO: Namecheap providers
 // import { checkDomainExpiration } from "../api/integrations/providers/namecheap/domains";
 // import { verifyAccountKeys as verifyNCKeys } from "../api/integrations/providers/namecheap/keys";
@@ -88,6 +91,15 @@ async function taskVerifyCFKeys(env: Env): Promise<void> {
   await runTask("verifyCFKeys", () => verifyCFKeys(env));
 }
 
+/**
+ * Задача: Сбор статистики редиректов
+ * Интервал: 24 часа (02:00 UTC)
+ * Источник: CF GraphQL Analytics API
+ */
+async function taskUpdateRedirectStats(env: Env): Promise<void> {
+  await runTask("updateRedirectStats", () => updateRedirectStats(env));
+}
+
 // ============================================================
 // MAIN HANDLER
 // ============================================================
@@ -122,6 +134,13 @@ export default {
     // ========================================
     if (hour === 0 && minute === 0) {
       ctx.waitUntil(taskVerifyCFKeys(env));
+    }
+
+    // ========================================
+    // Раз в 24 часа (02:00 UTC) — сбор статистики редиректов
+    // ========================================
+    if (hour === 2 && minute === 0) {
+      ctx.waitUntil(taskUpdateRedirectStats(env));
     }
 
     // ========================================
@@ -167,6 +186,10 @@ export async function handleRunCronTask(c: Context<{ Bindings: Env }>) {
     case "verifyCFKeys":
       const keysResult = await verifyCFKeys(env);
       return c.json({ ok: true, result: keysResult });
+
+    case "updateRedirectStats":
+      const statsResult = await updateRedirectStats(env);
+      return c.json({ ok: true, result: statsResult });
 
     default:
       return c.json({ ok: false, error: "unknown_task" }, 400);
