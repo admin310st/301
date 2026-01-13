@@ -209,6 +209,13 @@ async function checkTemplateUnique(
  * Список доступных шаблонов
  */
 export async function handleListTemplates(c: Context<{ Bindings: Env }>) {
+  const env = c.env;
+
+  const auth = await requireAuth(c, env);
+  if (!auth) {
+    return c.json({ ok: false, error: "unauthorized" }, 401);
+  }
+
   return c.json({
     ok: true,
     templates: listTemplates(),
@@ -220,6 +227,13 @@ export async function handleListTemplates(c: Context<{ Bindings: Env }>) {
  * Список доступных пресетов
  */
 export async function handleListPresets(c: Context<{ Bindings: Env }>) {
+  const env = c.env;
+
+  const auth = await requireAuth(c, env);
+  if (!auth) {
+    return c.json({ ok: false, error: "unauthorized" }, 401);
+  }
+
   return c.json({
     ok: true,
     presets: listPresets(),
