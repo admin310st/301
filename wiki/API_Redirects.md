@@ -923,14 +923,19 @@ curl -X GET "https://api.301.st/zones/12/redirect-status" \
 
 ## 15. Шаблоны (Templates)
 
-| ID | Название | Категория | Params | Default Code |
-|----|----------|-----------|--------|--------------|
-| T1 | Domain → Domain | domain | `target_url` | 301 |
-| T3 | non-www → www | canonical | — | 301 |
-| T4 | www → non-www | canonical | — | 301 |
-| T5 | Path prefix → Path | path | `source_path`, `target_path` | 301 |
-| T6 | Exact path → URL | path | `source_path`, `target_url` | 301 |
-| T7 | Maintenance | temporary | `target_url` | 302 |
+| ID | Название | Категория | Params | Default Code | Роль домена |
+|----|----------|-----------|--------|--------------|-------------|
+| T1 | Domain → Domain | domain | `target_url` | 301 | → `donor` |
+| T3 | non-www → www | canonical | — | 301 | без изменений |
+| T4 | www → non-www | canonical | — | 301 | без изменений |
+| T5 | Path prefix → Path | path | `source_path`, `target_path` | 301 | → `donor` |
+| T6 | Exact path → URL | path | `source_path`, `target_url` | 301 | → `donor` |
+| T7 | Maintenance | temporary | `target_url` | 302 | → `donor` |
+
+> **Влияние на роль домена:**
+> - **T1, T5, T6, T7** — устанавливают роль `donor` (перенаправляют трафик)
+> - **T3, T4** — не меняют роль (canonical-редиректы для www-нормализации)
+> - При удалении всех редиректов T1/T5/T6/T7 роль возвращается в `reserve`
 
 ---
 

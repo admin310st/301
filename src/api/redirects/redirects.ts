@@ -83,6 +83,10 @@ interface ZoneLimitInfo {
 
 const CF_FREE_PLAN_LIMIT = 10;
 
+// Шаблоны, которые меняют роль домена на 'donor'
+// T3/T4 (www canonical) — НЕ меняют роль, т.к. это нормализация того же домена
+const DONOR_TEMPLATES = new Set(["T1", "T5", "T6", "T7"]);
+
 // ============================================================
 // HELPERS
 // ============================================================
@@ -246,7 +250,9 @@ export async function handleListPresets(c: Context<{ Bindings: Env }>) {
 
 /**
  * GET /sites/:siteId/redirects
- * Список редиректов для Site с zone limits
+ * Список всех доменов сайта с редиректами и zone limits
+ *
+ * Возвращает ВСЕ домены сайта (с редиректами и без) для UI
  */
 export async function handleListSiteRedirects(c: Context<{ Bindings: Env }>) {
   const env = c.env;
@@ -271,17 +277,58 @@ export async function handleListSiteRedirects(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: false, error: "site_not_found" }, 404);
   }
 
-  // Получаем редиректы через domains, привязанные к site
-  const redirects = await env.DB301.prepare(
-    `SELECT r.*, d.domain_name, z.zone_name
-     FROM redirect_rules r
-     JOIN domains d ON r.domain_id = d.id
-     LEFT JOIN zones z ON r.zone_id = z.id
-     WHERE d.site_id = ? AND r.account_id = ?
-     ORDER BY d.domain_name, r.preset_order, r.id`
+  // Получаем ВСЕ домены сайта с LEFT JOIN на redirect_rules
+  const domainsWithRedirects = await env.DB301.prepare(
+    `SELECT
+       d.id as domain_id,
+       d.domain_name,
+       d.role as domain_role,
+       d.zone_id,
+       z.zone_name,
+       r.id as redirect_id,
+       r.template_id,
+       r.preset_id,
+       r.preset_order,
+       r.rule_name,
+       r.params,
+       r.status_code,
+       r.enabled,
+       r.sync_status,
+       r.cf_rule_id,
+       r.clicks_total,
+       r.clicks_today,
+       r.clicks_yesterday,
+       r.created_at,
+       r.updated_at
+     FROM domains d
+     LEFT JOIN zones z ON d.zone_id = z.id
+     LEFT JOIN redirect_rules r ON r.domain_id = d.id
+     WHERE d.site_id = ? AND d.account_id = ?
+     ORDER BY d.role DESC, d.domain_name, r.preset_order, r.id`
   )
     .bind(siteId, auth.account_id)
-    .all<RedirectRecord>();
+    .all<{
+      domain_id: number;
+      domain_name: string;
+      domain_role: string;
+      zone_id: number | null;
+      zone_name: string | null;
+      redirect_id: number | null;
+      template_id: string | null;
+      preset_id: string | null;
+      preset_order: number | null;
+      rule_name: string | null;
+      params: string | null;
+      status_code: number | null;
+      enabled: number | null;
+      sync_status: string | null;
+      cf_rule_id: string | null;
+      clicks_total: number | null;
+      clicks_today: number | null;
+      clicks_yesterday: number | null;
+      created_at: string | null;
+      updated_at: string | null;
+    }>();
 
   // Получаем zone limits для всех зон в site
   const zoneLimits = await env.DB301.prepare(
@@ -296,28 +343,33 @@ export async function handleListSiteRedirects(c: Context<{ Bindings: Env }>) {
     .bind(siteId, auth.account_id)
     .all<{ zone_id: number; zone_name: string; used: number }>();
 
-  // Форматируем ответ
-  const formatted = (redirects.results || []).map((r) => ({
-    id: r.id,
-    domain_id: r.domain_id,
-    domain_name: r.domain_name,
-    zone_id: r.zone_id,
-    zone_name: r.zone_name,
-    template_id: r.template_id,
-    preset_id: r.preset_id,
-    preset_order: r.preset_order,
-    rule_name: r.rule_name,
-    params: JSON.parse(r.params || "{}"),
-    status_code: r.status_code,
-    enabled: r.enabled === 1,
-    sync_status: r.sync_status,
-    cf_rule_id: r.cf_rule_id,
-    clicks_total: r.clicks_total,
-    clicks_today: r.clicks_today,
-    clicks_yesterday: r.clicks_yesterday,
-    trend: calculateTrend(r.clicks_today, r.clicks_yesterday),
-    created_at: r.created_at,
-    updated_at: r.updated_at,
+  // Форматируем ответ: группируем по доменам
+  const formatted = (domainsWithRedirects.results || []).map((row) => ({
+    domain_id: row.domain_id,
+    domain_name: row.domain_name,
+    domain_role: row.domain_role,
+    zone_id: row.zone_id,
+    zone_name: row.zone_name,
+    redirect: row.redirect_id
+      ? {
+          id: row.redirect_id,
+          template_id: row.template_id,
+          preset_id: row.preset_id,
+          preset_order: row.preset_order,
+          rule_name: row.rule_name,
+          params: JSON.parse(row.params || "{}"),
+          status_code: row.status_code,
+          enabled: row.enabled === 1,
+          sync_status: row.sync_status || "never",
+          cf_rule_id: row.cf_rule_id,
+          clicks_total: row.clicks_total || 0,
+          clicks_today: row.clicks_today || 0,
+          clicks_yesterday: row.clicks_yesterday || 0,
+          trend: calculateTrend(row.clicks_today || 0, row.clicks_yesterday || 0),
+          created_at: row.created_at,
+          updated_at: row.updated_at,
+        }
+      : null,
   }));
 
   const limits = (zoneLimits.results || []).map((z) => ({
@@ -331,9 +383,10 @@ export async function handleListSiteRedirects(c: Context<{ Bindings: Env }>) {
     ok: true,
     site_id: siteId,
     site_name: site.site_name,
-    redirects: formatted,
+    domains: formatted,
     zone_limits: limits,
-    total: formatted.length,
+    total_domains: new Set(formatted.map((d) => d.domain_id)).size,
+    total_redirects: formatted.filter((d) => d.redirect !== null).length,
   });
 }
 
@@ -536,6 +589,18 @@ export async function handleCreateRedirect(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: false, error: "create_failed" }, 500);
   }
 
+  // Обновляем роль домена на 'donor' только для шаблонов, меняющих трафик
+  // T3/T4 (www canonical) не меняют роль
+  let newDomainRole: string | undefined;
+  if (DONOR_TEMPLATES.has(template_id)) {
+    await env.DB301.prepare(
+      `UPDATE domains SET role = 'donor', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+    )
+      .bind(domainId)
+      .run();
+    newDomainRole = "donor";
+  }
+
   return c.json({
     ok: true,
     redirect: {
@@ -555,6 +620,7 @@ export async function handleCreateRedirect(c: Context<{ Bindings: Env }>) {
       used: limitCheck.used + 1,
       max: limitCheck.max,
     },
+    domain_role: newDomainRole,
   }, 201);
 }
 
@@ -603,13 +669,14 @@ export async function handleCreatePreset(c: Context<{ Bindings: Env }>) {
 
   // Создаём все правила
   const createdIds: number[] = [];
+  let hasDonorTemplate = false;
 
   for (const rule of expandedRules) {
     const template = getTemplate(rule.template_id);
     if (!template) continue;
 
     const result = await env.DB301.prepare(
-      `INSERT INTO redirect_rules 
+      `INSERT INTO redirect_rules
        (account_id, domain_id, zone_id, template_id, preset_id, preset_order, rule_name, params, status_code, enabled, sync_status)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'pending')
        RETURNING id`
@@ -629,7 +696,22 @@ export async function handleCreatePreset(c: Context<{ Bindings: Env }>) {
 
     if (result) {
       createdIds.push(result.id);
+      if (DONOR_TEMPLATES.has(rule.template_id)) {
+        hasDonorTemplate = true;
+      }
     }
+  }
+
+  // Обновляем роль домена на 'donor' только если есть шаблоны, меняющие трафик
+  // T3/T4 (www canonical) не меняют роль
+  let newDomainRole: string | undefined;
+  if (hasDonorTemplate) {
+    await env.DB301.prepare(
+      `UPDATE domains SET role = 'donor', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+    )
+      .bind(domainId)
+      .run();
+    newDomainRole = "donor";
   }
 
   return c.json({
@@ -642,6 +724,7 @@ export async function handleCreatePreset(c: Context<{ Bindings: Env }>) {
       used: limitCheck.used + createdIds.length,
       max: limitCheck.max,
     },
+    domain_role: newDomainRole,
   }, 201);
 }
 
@@ -750,15 +833,40 @@ export async function handleDeleteRedirect(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: false, error: check.error }, 404);
   }
 
+  const domainId = check.redirect.domain_id;
+
   await env.DB301.prepare(
     `DELETE FROM redirect_rules WHERE id = ? AND account_id = ?`
   )
     .bind(redirectId, auth.account_id)
     .run();
 
+  // Проверяем остались ли donor-редиректы у домена (T1, T5, T6, T7)
+  // T3/T4 (www canonical) не влияют на роль
+  const remainingDonor = await env.DB301.prepare(
+    `SELECT COUNT(*) as count FROM redirect_rules
+     WHERE domain_id = ? AND template_id IN ('T1', 'T5', 'T6', 'T7')`
+  )
+    .bind(domainId)
+    .first<{ count: number }>();
+
+  let newRole: string | undefined;
+
+  // Если donor-редиректов больше нет — возвращаем роль в 'reserve'
+  if (!remainingDonor || remainingDonor.count === 0) {
+    await env.DB301.prepare(
+      `UPDATE domains SET role = 'reserve', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+    )
+      .bind(domainId)
+      .run();
+    newRole = "reserve";
+  }
+
   return c.json({
     ok: true,
     deleted_id: redirectId,
+    domain_id: domainId,
+    domain_role: newRole,
   });
 }
 

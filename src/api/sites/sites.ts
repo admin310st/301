@@ -514,14 +514,14 @@ export async function handleAssignDomainToSite(c: Context<{ Bindings: Env }>) {
   }
 
   // Parse request
-  let body: { domain_id: number; role?: "acceptor" | "donor" | "reserve" };
+  let body: { domain_id: number };
   try {
     body = await c.req.json();
   } catch {
     return c.json({ ok: false, error: "invalid_json" }, 400);
   }
 
-  const { domain_id, role } = body;
+  const { domain_id } = body;
 
   if (!domain_id) {
     return c.json({ ok: false, error: "missing_field", field: "domain_id" }, 400);
@@ -529,41 +529,40 @@ export async function handleAssignDomainToSite(c: Context<{ Bindings: Env }>) {
 
   // Проверяем что домен принадлежит аккаунту
   const domain = await env.DB301.prepare(
-    "SELECT id, domain_name, project_id FROM domains WHERE id = ? AND account_id = ?"
+    "SELECT id, domain_name, site_id, role FROM domains WHERE id = ? AND account_id = ?"
   )
     .bind(domain_id, accountId)
-    .first<{ id: number; domain_name: string; project_id: number | null }>();
+    .first<{ id: number; domain_name: string; site_id: number | null; role: string }>();
 
   if (!domain) {
     return c.json({ ok: false, error: "domain_not_found" }, 404);
   }
 
-  // Проверяем что домен в том же проекте (или без проекта)
-  if (domain.project_id && domain.project_id !== site.project_id) {
+  // Проверяем что домен ещё не привязан к другому сайту
+  if (domain.site_id && domain.site_id !== siteId) {
     return c.json({
       ok: false,
-      error: "domain_in_different_project",
-      message: "Domain belongs to a different project. Reassign it first.",
+      error: "domain_in_different_site",
+      message: "Domain is already assigned to another site. Unassign it first.",
     }, 400);
   }
 
+  // Определяем роль: acceptor если это первый домен сайта, иначе оставляем текущую
+  const existingAcceptor = await env.DB301.prepare(
+    "SELECT id FROM domains WHERE site_id = ? AND role = 'acceptor' LIMIT 1"
+  )
+    .bind(siteId)
+    .first();
+
+  const newRole = existingAcceptor ? domain.role : "acceptor";
+
   // Обновляем домен
-  const updates: string[] = [
-    "site_id = ?",
-    "project_id = ?",
-    "updated_at = CURRENT_TIMESTAMP",
-  ];
-  const bindings: (number | string)[] = [siteId, site.project_id];
-
-  if (role) {
-    updates.push("role = ?");
-    bindings.push(role);
-  }
-
-  bindings.push(domain_id);
-
-  await env.DB301.prepare(`UPDATE domains SET ${updates.join(", ")} WHERE id = ?`)
-    .bind(...bindings)
+  await env.DB301.prepare(
+    `UPDATE domains
+     SET site_id = ?, role = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`
+  )
+    .bind(siteId, newRole, domain_id)
     .run();
 
   return c.json({
@@ -572,8 +571,8 @@ export async function handleAssignDomainToSite(c: Context<{ Bindings: Env }>) {
       id: domain_id,
       domain_name: domain.domain_name,
       site_id: siteId,
-      project_id: site.project_id,
-      role: role || undefined,
+      role: newRole,
+      became_acceptor: newRole === "acceptor" && domain.role !== "acceptor",
     },
   });
 }

@@ -343,14 +343,16 @@ curl -X DELETE "https://api.301.st/sites/11" \
 
 **Требует:** `Authorization: Bearer <access_token>` (owner или editor)
 
-> При привязке домена автоматически устанавливается `project_id` от сайта.
+> **Логика роли:**
+> - При привязке домена автоматически устанавливается `project_id` от сайта
+> - Первый домен сайта автоматически получает роль `acceptor`
+> - Последующие домены сохраняют текущую роль (`reserve`)
 
 **Параметры запроса:**
 
 | Поле | Тип | Обязательно | Описание |
 |------|-----|-------------|----------|
 | `domain_id` | number | да | ID домена |
-| `role` | string | нет | Роль: `acceptor`, `donor`, `reserve` |
 
 **Пример запроса:**
 
@@ -359,8 +361,7 @@ curl -X POST "https://api.301.st/sites/10/domains" \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "domain_id": 6,
-    "role": "acceptor"
+    "domain_id": 6
   }'
 ```
 
@@ -375,7 +376,8 @@ curl -X POST "https://api.301.st/sites/10/domains" \
     "site_id": 10,
     "project_id": 5,
     "role": "acceptor"
-  }
+  },
+  "note": "First domain assigned - role set to acceptor"
 }
 ```
 

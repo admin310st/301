@@ -223,10 +223,11 @@ curl -X GET "https://api.301.st/domains/2" \
 
 **Требует:** `Authorization: Bearer <access_token>` (owner или editor)
 
-> **Важно:** 
+> **Важно:**
 > - Root домены (2-го уровня) создаются через `POST /domains/zones/batch`
 > - Зона должна быть верифицирована (`zones.verified = 1`)
 > - Создаётся DNS A запись в Cloudflare автоматически
+> - Роль всегда `reserve` при создании (управляется автоматически)
 
 **Параметры запроса:**
 
@@ -234,7 +235,6 @@ curl -X GET "https://api.301.st/domains/2" \
 |------|-----|-------------|----------|
 | `domain_name` | string | да | Полное имя домена (только 3-й+ уровень) |
 | `zone_id` | number | **да** | ID зоны (должна быть verified) |
-| `role` | string | нет | Роль: `acceptor`, `donor`, `reserve` (по умолчанию: `reserve`) |
 
 **Пример запроса:**
 
@@ -244,8 +244,7 @@ curl -X POST "https://api.301.st/domains" \
   -H "Content-Type: application/json" \
   -d '{
     "domain_name": "promo.example.com",
-    "zone_id": 1,
-    "role": "donor"
+    "zone_id": 1
   }'
 ```
 
@@ -258,7 +257,7 @@ curl -X POST "https://api.301.st/domains" \
     "id": 6,
     "domain_name": "promo.example.com",
     "zone_id": 1,
-    "role": "donor",
+    "role": "reserve",
     "cf_dns_record_id": "abc123def456"
   }
 }
@@ -434,6 +433,19 @@ curl -X DELETE "https://api.301.st/domains/6" \
 | `acceptor` | Основной домен (лендинг, TDS) — принимает трафик | ✅ Да |
 | `donor` | Донор для редиректов (используется в рекламе) | ❌ Нет |
 | `reserve` | В резерве, не привязан к сайту | ❌ Нет |
+
+**Автоматическое управление ролями:**
+
+| Событие | Результат |
+|---------|-----------|
+| Создание домена | `reserve` |
+| Первый домен привязан к Site | `acceptor` |
+| Создан редирект T1/T5/T6/T7 | `donor` |
+| Создан редирект T3/T4 (canonical) | Роль не меняется |
+| Удалены все редиректы T1/T5/T6/T7 | `reserve` |
+| Отвязан от Site | `reserve` |
+
+> **Примечание:** T3/T4 (www canonical) не меняют роль, так как это внутренняя нормализация домена, а не перенаправление трафика.
 
 ---
 
@@ -638,6 +650,7 @@ Batch создание поддоменов (до 10 за раз).
 **Требует:** `Authorization: Bearer <access_token>` (owner или editor)
 
 > **Этап 3:** Создание поддоменов после верификации зоны (`zones.verified = 1`).
+> Все домены создаются с ролью `reserve` (управляется автоматически через привязку к Site и создание редиректов).
 
 **Параметры запроса:**
 
@@ -646,7 +659,6 @@ Batch создание поддоменов (до 10 за раз).
 | `zone_id` | number | да | ID зоны (должна быть verified) |
 | `domains` | array | да | Массив поддоменов (max 10) |
 | `domains[].name` | string | да | Короткое имя: `www`, `api`, `blog` |
-| `domains[].role` | string | нет | Роль: `acceptor`, `donor`, `reserve` (default) |
 
 **Пример запроса:**
 
@@ -657,10 +669,10 @@ curl -X POST "https://api.301.st/domains/batch" \
   -d '{
     "zone_id": 1,
     "domains": [
-      { "name": "www", "role": "acceptor" },
-      { "name": "api", "role": "acceptor" },
+      { "name": "www" },
+      { "name": "api" },
       { "name": "blog" },
-      { "name": "promo", "role": "donor" }
+      { "name": "promo" }
     ]
   }'
 ```

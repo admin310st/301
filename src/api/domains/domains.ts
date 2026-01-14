@@ -446,7 +446,8 @@ export async function handleCreateDomain(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: false, error: "invalid_json" }, 400);
   }
 
-  const { domain_name, zone_id, parent_id, role = "reserve" } = body;
+  const { domain_name, zone_id, parent_id } = body;
+  const role = "reserve"; // Роль всегда reserve при создании
 
   if (!domain_name) {
     return c.json({ ok: false, error: "missing_fields", fields: ["domain_name"] }, 400);
@@ -681,7 +682,7 @@ export async function handleBatchCreateDomains(c: Context<{ Bindings: Env }>) {
   for (const item of domains) {
     const shortName = item.name.trim().toLowerCase();
     const fullDomain = `${shortName}.${zone.root_domain}`;
-    const domainRole = item.role || "reserve";
+    const domainRole = "reserve"; // Роль всегда reserve при создании
 
     // Проверяем уникальность
     const existing = await env.DB301.prepare(
