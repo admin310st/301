@@ -229,6 +229,7 @@ CREATE INDEX IF NOT EXISTS idx_zones_key_id ON zones(key_id);
 CREATE TABLE IF NOT EXISTS domains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
+    project_id INTEGER,
     site_id INTEGER,
     zone_id INTEGER,
     key_id INTEGER,

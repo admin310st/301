@@ -397,6 +397,7 @@ COMMENT ON COLUMN zones.updated_at IS 'Дата последнего обнов�
 CREATE TABLE IF NOT EXISTS domains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,                         -- владелец домена (tenant)
+    project_id INTEGER,                                  -- ссылка на проект (сохраняется при откреплении от сайта)
     site_id INTEGER,                                     -- ссылка на сайт, если домен используется
     zone_id INTEGER,                                     -- служебная зона (Cloudflare)
     key_id INTEGER,                                      -- ссылка на ключ интеграции (account_keys.id)
@@ -416,6 +417,7 @@ CREATE TABLE IF NOT EXISTS domains (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
     FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE SET NULL,
     FOREIGN KEY (zone_id) REFERENCES zones(id) ON DELETE SET NULL,
     FOREIGN KEY (key_id) REFERENCES account_keys(id) ON DELETE SET NULL,
@@ -423,6 +425,7 @@ CREATE TABLE IF NOT EXISTS domains (
 );
 
 CREATE INDEX IF NOT EXISTS idx_domains_account_id ON domains(account_id);
+CREATE INDEX IF NOT EXISTS idx_domains_project_id ON domains(project_id);
 CREATE INDEX IF NOT EXISTS idx_domains_site_id ON domains(site_id);
 CREATE INDEX IF NOT EXISTS idx_domains_zone_id ON domains(zone_id);
 CREATE INDEX IF NOT EXISTS idx_domains_key_id ON domains(key_id);
@@ -432,6 +435,7 @@ CREATE INDEX IF NOT EXISTS idx_domains_blocked ON domains(blocked);
 COMMENT ON TABLE domains IS 'Домены всех уровней в системе 301.st: акцепторы (acceptor), доноры (donor) и свободные (reserve).';
 COMMENT ON COLUMN domains.id IS 'Уникальный идентификатор домена.';
 COMMENT ON COLUMN domains.account_id IS 'Ссылка на аккаунт (accounts.id), которому принадлежит домен.';
+COMMENT ON COLUMN domains.project_id IS 'Ссылка на проект (projects.id). Сохраняется при откреплении от сайта.';
 COMMENT ON COLUMN domains.site_id IS 'Ссылка на сайт (sites.id), если домен используется сайтом.';
 COMMENT ON COLUMN domains.zone_id IS 'Ссылка на служебную зону Cloudflare (zones.id), скрытую от пользователя.';
 COMMENT ON COLUMN domains.key_id IS 'Ссылка на ключ интеграции (account_keys.id), через который управляется домен.';
