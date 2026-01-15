@@ -556,13 +556,13 @@ export async function handleAssignDomainToSite(c: Context<{ Bindings: Env }>) {
 
   const newRole = existingAcceptor ? domain.role : "acceptor";
 
-  // Обновляем домен
+  // Обновляем домен (устанавливаем site_id и project_id)
   await env.DB301.prepare(
     `UPDATE domains
-     SET site_id = ?, role = ?, updated_at = CURRENT_TIMESTAMP
+     SET site_id = ?, project_id = ?, role = ?, updated_at = CURRENT_TIMESTAMP
      WHERE id = ?`
   )
-    .bind(siteId, newRole, domain_id)
+    .bind(siteId, site.project_id, newRole, domain_id)
     .run();
 
   return c.json({
@@ -571,6 +571,7 @@ export async function handleAssignDomainToSite(c: Context<{ Bindings: Env }>) {
       id: domain_id,
       domain_name: domain.domain_name,
       site_id: siteId,
+      project_id: site.project_id,
       role: newRole,
       became_acceptor: newRole === "acceptor" && domain.role !== "acceptor",
     },

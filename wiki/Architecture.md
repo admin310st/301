@@ -70,20 +70,20 @@
 
 ```
 Account
- ├── Free Domains (reserve)               ← домены, не привязанные к сайту
+ ├── Free Domains (reserve)               ← role='reserve', site_id=NULL, project_id=NULL
  │       └── Zones (технические, скрытые) ← каждая зона соответствует домену 2-го уровня
  │
  └── Projects                             ← логические группы (бренды / кампании)
         ├── Integrations                  ← Cloudflare, GA, YM, HostTracker, Registrar
         │
-        ├── Sites                         ← функциональные единицы приёма трафика
-        │     ├── Primary Domain          ← один главный домен (2-го или 3-го уровня)
-        │     ├── Donor Domains (0..N)    ← редиректы на primary
-        │     └── (в будущем) сущности сайта: аналитика, правила, отчёты и т.п.
+        ├── Reserve Domains               ← project_id заполнен, site_id=NULL, role='reserve'
         │
-        ├── Domains (через Sites)         ← рабочие домены сайта
-        │       └── Zones (служебные, Cloudflare)
-        │             └── домены, принадлежащие этой зоне
+        ├── Sites                         ← функциональные единицы приёма трафика
+        │     ├── Acceptor Domain         ← один главный домен, role='acceptor', TDS активен
+        │     └── (в будущем) аналитика, правила, отчёты
+        │
+        ├── Donor Domains                 ← бывшие acceptor, role='donor', TDS отключён
+        │     └── Редиректят acceptor сайта (редирект устанавливается отдельно)
         │
         └── Zones (служебная группировка Cloudflare)
               ├── Связь с интеграцией (Cloudflare Account Key)
@@ -137,11 +137,78 @@ _reserve_ — в резерве (NS настроены, но не использ
 
 ### Жизненный цикл домена
 ```
-1. Sync из CF      → Domain создаётся с role='reserve', site_id=NULL
-2. Привязка к Site → site_id заполняется, role меняется на 'acceptor'/'donor'  
-3. Работа         → Домен используется в редиректах/TDS
-4. Блокировка     → blocked=1, blocked_reason='ad_network'
-5. Освобождение   → site_id=NULL, role='reserve'
+
+# Architecture.md — Обновление секции "Жизненный цикл домена"
+
+## Заменить старую секцию на:
+
+---
+
+### Жизненный цикл домена
+
+```
+1. Создание зоны    → Domain создаётся с role='reserve', site_id=NULL, project_id=NULL
+2. Резерв проекта   → project_id заполняется, site_id=NULL, role='reserve'
+3. Назначение сайта → site_id заполняется, role='acceptor', TDS настраивается
+4. Работа           → Домен принимает трафик, TDS активен
+5. Блокировка       → blocked=1, blocked_reason='ad_network'
+6. Открепление      → site_id=NULL, role='donor', TDS ОТКЛЮЧАЕТСЯ
+7. Редирект         → Настраивается редирект donor → новый acceptor
+```
+
+### Состояния домена
+
+| Состояние | site_id | project_id | role | TDS | Описание |
+|-----------|---------|------------|------|-----|----------|
+| **Свободный** | NULL | NULL | reserve | — | Не привязан к проекту |
+| **Резерв проекта** | NULL | project.id | reserve | — | В проекте, готов к назначению |
+| **Активный (сайт)** | site.id | project.id | acceptor | ✅ ON | Принимает трафик |
+| **Донор** | NULL | project.id | donor | ❌ OFF | Редиректит на acceptor |
+
+### Правила переходов
+
+| Действие | site_id | project_id | role | TDS |
+|----------|---------|------------|------|-----|
+| Добавить в резерв проекта | — | → project.id | reserve | — |
+| Назначить на сайт (первый домен) | → site.id | → site.project_id | → acceptor | настроить |
+| Назначить на сайт (доп. домен) | → site.id | → site.project_id | reserve | — |
+| Открепить от сайта | → NULL | сохраняется | → donor | **ОТКЛЮЧИТЬ** |
+| Удалить из проекта | — | → NULL | → reserve | — |
+
+> **Важно:** При откреплении домена от сайта (например, при блокировке) TDS **обязательно отключается**. Домен становится donor и только редиректит трафик на новый acceptor.
+
+### Workflow: Блокировка и замена домена
+
+```mermaid
+flowchart TD
+    subgraph Before["До блокировки"]
+        A1["example.com<br/>site_id=10<br/>role=acceptor<br/>TDS: ON"]
+        B1["backup.com<br/>site_id=NULL<br/>project_id=5<br/>role=reserve"]
+    end
+    
+    subgraph Action["Действия пользователя"]
+        A1 -->|"1. Блокировка<br/>2. Открепить"| A2["example.com<br/>site_id=NULL<br/>project_id=5<br/>role=donor<br/>TDS: OFF"]
+        B1 -->|"3. Назначить<br/>на site_id=10"| B2["backup.com<br/>site_id=10<br/>project_id=5<br/>role=acceptor<br/>TDS: настроить"]
+    end
+    
+    subgraph After["После"]
+        A2 -->|"4. Редирект<br/>donor→acceptor"| B2
+    end
+    
+    style A1 fill:#c8e6c9
+    style A2 fill:#ffcdd2
+    style B1 fill:#e3f2fd
+    style B2 fill:#c8e6c9
+```
+
+### Пошаговый сценарий замены
+
+1. **Домен блокируется** — `blocked=1, blocked_reason='ad_network'`
+2. **Пользователь открепляет домен** — `site_id → NULL, role → donor, TDS → OFF`
+3. **Пользователь назначает резервный домен** — `site_id → 10, role → acceptor`
+4. **Пользователь настраивает TDS** — копирует конфигурацию с предшественника
+5. **Пользователь создаёт редирект** — `example.com → backup.com` (T1 template)
+
 
 ### Терминология UI vs Backend
 
@@ -157,17 +224,14 @@ _reserve_ — в резерве (NS настроены, но не использ
 
 | Связь | FK | Описание |
 |-------|-----|----------|
-| Domain → Site | `site_id` | Привязка к сайту (NULL = резерв) |
+| Domain → Site | `site_id` | Привязка к сайту  |
 | Domain → Zone | `zone_id` | Техническая принадлежность к зоне CF |
-| Domain → Domain | `parent_id` | Поддомен → родительский домен |
 | Site → Project | `project_id` | Сайт принадлежит проекту |
 | Zone → Account | `account_id` | Зона принадлежит аккаунту |
 | Zone → Key | `key_id` | Зона управляется через CF ключ |
 
 **Важно:**
 - Zone НЕ связана с Project/Site
-- Domain связан с Site через `site_id`
-- Получить Project для домена: `Domain.site_id → Site.project_id → Project`
 
 ### Источники данных домена
 

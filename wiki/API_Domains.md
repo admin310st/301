@@ -377,9 +377,10 @@ curl -X PATCH "https://api.301.st/domains/2" \
 
 **Требует:** `Authorization: Bearer <access_token>` (owner или editor)
 
-> **Важно:** 
+> **Важно:**
 > - Root домены (2-го уровня) удалить нельзя — они управляются через зоны
 > - При удалении поддомена также удаляется DNS запись в Cloudflare
+> - Удаляются связанные записи: `redirect_rules`, `rule_domain_map`
 > - Квота доменов уменьшается на 1
 
 **Пример запроса:**
@@ -428,24 +429,133 @@ curl -X DELETE "https://api.301.st/domains/6" \
 
 ### 6 Роли доменов
 
-| Роль | Описание | Может быть primary? |
-|------|----------|---------------------|
-| `acceptor` | Основной домен (лендинг, TDS) — принимает трафик | ✅ Да |
-| `donor` | Донор для редиректов (используется в рекламе) | ❌ Нет |
-| `reserve` | В резерве, не привязан к сайту | ❌ Нет |
+| Роль | Описание | TDS | site_id |
+|------|----------|-----|---------|
+| `acceptor` | Принимает трафик (лендинг, TDS активен) | ✅ ON | обязателен |
+| `donor` | Редиректит на acceptor (бывший сайт) | ❌ OFF | NULL |
+| `reserve` | В резерве, готов к назначению | — | NULL |
 
-**Автоматическое управление ролями:**
+**Ключевые правила:**
+
+1. **Только acceptor имеет активный TDS** — при откреплении от сайта TDS отключается
+2. **donor всегда имеет site_id=NULL** — он больше не "сайт", только источник редиректа
+3. **reserve может быть в проекте** — через project_id, но без site_id
+
+---
+
+### 6.1 Состояния домена
+
+| Состояние | site_id | project_id | role | TDS | Описание |
+|-----------|---------|------------|------|-----|----------|
+| Свободный | NULL | NULL | reserve | — | Не привязан к проекту |
+| Резерв проекта | NULL | **project.id** | reserve | — | В проекте, готов к назначению |
+| Активный сайт | **site.id** | project.id | acceptor | ✅ | Принимает трафик |
+| Донор | NULL | project.id | donor | ❌ | Редиректит на acceptor |
+
+---
+
+### 6.2 Управление ролями (операции)
+
+| Действие UI | Изменения в БД | TDS |
+|-------------|----------------|-----|
+| **Добавить домен в резерв проекта** | `project_id = :projectId` | — |
+| **Назначить домен на сайт** | `site_id = :siteId, project_id = site.project_id, role = 'acceptor'` | Настроить |
+| **Открепить домен от сайта** | `site_id = NULL, role = 'donor'` | **ОТКЛЮЧИТЬ** |
+| **Удалить домен из проекта** | `project_id = NULL, site_id = NULL, role = 'reserve'` | — |
+| **Создать редирект T1/T5/T6/T7** | `role = 'donor'` (если был reserve) | — |
+| **Удалить все редиректы** | `role = 'reserve'` (если site_id=NULL) | — |
+
+---
+
+### 6.3 Автоматическое управление ролями
 
 | Событие | Результат |
 |---------|-----------|
-| Создание домена | `reserve` |
-| Первый домен привязан к Site | `acceptor` |
-| Создан редирект T1/T5/T6/T7 | `donor` |
-| Создан редирект T3/T4 (canonical) | Роль не меняется |
-| Удалены все редиректы T1/T5/T6/T7 | `reserve` |
-| Отвязан от Site | `reserve` |
+| Создание домена (через зону) | `reserve`, site_id=NULL, project_id=NULL |
+| Добавление в резерв проекта | `reserve`, site_id=NULL, project_id=:id |
+| Назначение на сайт (первый домен) | `acceptor`, site_id=:id, TDS доступен |
+| **Открепление от сайта** | `donor`, site_id=NULL, **TDS отключён** |
+| Создан редирект T1/T5/T6/T7 (из reserve) | `donor` |
+| Создан редирект T3/T4 (www canonical) | Роль не меняется |
+| Удалены все редиректы (donor без site) | `reserve` |
+| Удалён из проекта | `reserve`, project_id=NULL |
 
-> **Примечание:** T3/T4 (www canonical) не меняют роль, так как это внутренняя нормализация домена, а не перенаправление трафика.
+> **Важно:** T3/T4 (www canonical) не меняют роль — это внутренняя нормализация, а не перенаправление трафика на другой домен.
+
+---
+
+### 6.4 Workflow: Блокировка и замена
+
+```
+Исходное состояние:
+┌─────────────────────────────────────────────────────┐
+│ Project: "Brand Campaign"                           │
+├─────────────────────────────────────────────────────┤
+│ Site: "Main Landing" (id=10)                        │
+│   └── example.com [acceptor, TDS: ON]               │
+│                                                     │
+│ Reserve:                                            │
+│   └── backup.com [reserve, site_id=NULL]            │
+└─────────────────────────────────────────────────────┘
+
+После блокировки example.com:
+┌─────────────────────────────────────────────────────┐
+│ Project: "Brand Campaign"                           │
+├─────────────────────────────────────────────────────┤
+│ Site: "Main Landing" (id=10)                        │
+│   └── backup.com [acceptor, TDS: ON]                │
+│                                                     │
+│ Donors:                                             │
+│   └── example.com [donor, TDS: OFF]                 │
+│       └── redirect → backup.com                     │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+### 6.5 API операции для смены состояния
+
+**Открепить домен от сайта (сделать донором):**
+
+```bash
+curl -X PATCH "https://api.301.st/domains/1" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "site_id": null,
+    "role": "donor",
+    "blocked": true,
+    "blocked_reason": "ad_network"
+  }'
+```
+
+**Назначить резервный домен на сайт:**
+
+```bash
+curl -X POST "https://api.301.st/sites/10/domains" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "domain_id": 2
+  }'
+```
+
+**Создать редирект donor → acceptor:**
+
+```bash
+curl -X POST "https://api.301.st/redirects" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "domain_id": 1,
+    "template_id": "T1",
+    "params": {
+      "target_url": "https://backup.com",
+      "preserve_path": true,
+      "preserve_query": true
+    }
+  }'
+```
 
 ---
 

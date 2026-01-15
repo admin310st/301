@@ -1000,6 +1000,10 @@ export async function handleDeleteDomain(c: Context<{ Bindings: Env }>) {
     }
   }
 
+  // Очищаем связанные записи перед удалением
+  await env.DB301.prepare("DELETE FROM rule_domain_map WHERE domain_id = ?").bind(domainId).run();
+  await env.DB301.prepare("DELETE FROM redirect_rules WHERE domain_id = ?").bind(domainId).run();
+
   // Удаляем из D1
   await env.DB301.prepare("DELETE FROM domains WHERE id = ?").bind(domainId).run();
 
