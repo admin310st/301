@@ -13,6 +13,7 @@ import type { Context } from "hono";
 import type { Env } from "../../../types/worker";
 import { requireAuth, requireOwner } from "../../../lib/auth";
 import { getDecryptedKey } from "../../keys/storage";
+import { updateDomainsPhishingStatus } from "../../domains/health";
 
 // ============================================================
 // TYPES
@@ -45,6 +46,12 @@ interface CFZone {
   plan?: {
     id: string;
     name: string;
+  };
+  meta?: {
+    phishing_detected?: boolean;
+    custom_certificate_quota?: number;
+    page_rule_quota?: number;
+    step?: number;
   };
 }
 
@@ -349,6 +356,34 @@ async function cfDeleteZone(
 }
 
 // ============================================================
+// CF API: ZONE PHISHING CHECK
+// ============================================================
+
+/**
+ * Проверить статус phishing для зоны
+ * CF Trust & Safety блокирует зоны за phishing → meta.phishing_detected = true
+ *
+ * @param cfZoneId - CF Zone ID
+ * @param token - CF API token
+ * @returns { phishing_detected: boolean } или ошибку
+ */
+export async function checkZonePhishing(
+  cfZoneId: string,
+  token: string
+): Promise<{ ok: true; phishing_detected: boolean } | { ok: false; error: string }> {
+  const result = await cfGetZone(cfZoneId, token);
+
+  if (!result.ok) {
+    return { ok: false, error: result.error };
+  }
+
+  return {
+    ok: true,
+    phishing_detected: result.zone.meta?.phishing_detected ?? false
+  };
+}
+
+// ============================================================
 // INTERNAL: SYNC ZONES (for initkey.ts)
 // ============================================================
 
@@ -446,6 +481,9 @@ export async function syncZonesInternal(
         stats.zones_created++;
       }
 
+      // Проверяем phishing status
+      const phishingDetected = cfZone.meta?.phishing_detected ?? false;
+
       // Обрабатываем root domain
       const existingDomain = await env.DB301.prepare(
         `SELECT id FROM domains WHERE domain_name = ? AND account_id = ?`
@@ -454,13 +492,15 @@ export async function syncZonesInternal(
         .first<{ id: number }>();
 
       if (existingDomain) {
-        // UPDATE существующего домена
+        // UPDATE существующего домена (включая phishing status)
         await env.DB301.prepare(
-          `UPDATE domains 
-           SET zone_id = ?, key_id = ?, ns = ?, ns_verified = ?, updated_at = CURRENT_TIMESTAMP
+          `UPDATE domains
+           SET zone_id = ?, key_id = ?, ns = ?, ns_verified = ?,
+               blocked = ?, blocked_reason = CASE WHEN ? = 1 THEN 'phishing' ELSE blocked_reason END,
+               updated_at = CURRENT_TIMESTAMP
            WHERE id = ?`
         )
-          .bind(zoneId, keyId, nsExpected, verified, existingDomain.id)
+          .bind(zoneId, keyId, nsExpected, verified, phishingDetected ? 1 : 0, phishingDetected ? 1 : 0, existingDomain.id)
           .run();
         stats.domains_updated++;
       } else {
@@ -471,12 +511,16 @@ export async function syncZonesInternal(
           continue;
         }
 
-        // INSERT нового домена (root)
+        // INSERT нового домена (root) с phishing status
         await env.DB301.prepare(
-          `INSERT INTO domains (account_id, zone_id, key_id, domain_name, ns, ns_verified, role, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'reserve', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+          `INSERT INTO domains (account_id, zone_id, key_id, domain_name, ns, ns_verified, role, blocked, blocked_reason, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'reserve', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
         )
-          .bind(accountId, zoneId, keyId, cfZone.name, nsExpected, verified)
+          .bind(
+            accountId, zoneId, keyId, cfZone.name, nsExpected, verified,
+            phishingDetected ? 1 : 0,
+            phishingDetected ? "phishing" : null
+          )
           .run();
         stats.domains_created++;
       }
@@ -687,12 +731,24 @@ export async function handleCreateZone(c: Context<{ Bindings: Env }>) {
 
   const zoneId = insertResult.meta.last_row_id as number;
 
+  // Проверяем phishing status
+  const phishingDetected = cfZone.meta?.phishing_detected ?? false;
+
   // Создаём root домен
+  // Если зона заблокирована за phishing, сразу устанавливаем blocked
   await env.DB301.prepare(
-    `INSERT INTO domains (account_id, zone_id, key_id, domain_name, ns, ns_verified, role, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 0, 'reserve', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+    `INSERT INTO domains (account_id, zone_id, key_id, domain_name, ns, ns_verified, role, blocked, blocked_reason, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 0, 'reserve', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
   )
-    .bind(accountId, zoneId, account_key_id, domain, nsExpected)
+    .bind(
+      accountId,
+      zoneId,
+      account_key_id,
+      domain,
+      nsExpected,
+      phishingDetected ? 1 : 0,
+      phishingDetected ? "phishing" : null
+    )
     .run();
 
   // Обновляем квоты
@@ -711,6 +767,7 @@ export async function handleCreateZone(c: Context<{ Bindings: Env }>) {
       status,
       plan,
       name_servers: cfZone.name_servers,
+      phishing_detected: phishingDetected,
     },
   });
 }
@@ -888,12 +945,16 @@ export async function handleSyncZone(c: Context<{ Bindings: Env }>) {
 
   // Обновляем ns_verified для доменов этой зоны
   const domainsResult = await env.DB301.prepare(
-    `UPDATE domains 
+    `UPDATE domains
      SET ns_verified = CASE WHEN ns = ? THEN 1 ELSE 0 END, updated_at = CURRENT_TIMESTAMP
      WHERE zone_id = ?`
   )
     .bind(nsExpected, zone.id)
     .run();
+
+  // Проверяем phishing status и обновляем домены
+  const phishingDetected = cfZone.meta?.phishing_detected ?? false;
+  const phishingResult = await updateDomainsPhishingStatus(env, zone.id, phishingDetected);
 
   return c.json({
     ok: true,
@@ -905,10 +966,12 @@ export async function handleSyncZone(c: Context<{ Bindings: Env }>) {
       plan,
       ns_expected: nsExpected,
       verified,
+      phishing_detected: phishingDetected,
       original_registrar: cfZone.original_registrar,
       activated_on: cfZone.activated_on,
     },
     domains_updated: domainsResult.meta.changes,
+    domains_phishing_updated: phishingResult.updated,
   });
 }
 

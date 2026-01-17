@@ -13,6 +13,7 @@ import type { Context } from "hono";
 import type { Env } from "../types/worker";
 import { requireAuth, requireEditor } from "../lib/auth";
 import { getDecryptedKey } from "../integrations/keys/storage";
+import { computeDomainHealthStatus } from "./health";
 
 // ============================================================
 // TYPES
@@ -41,6 +42,12 @@ interface DomainRecord {
   site_status: string | null;
   project_id: number | null;
   project_name: string | null;
+  // Health data (joined from domain_threats + redirect_rules)
+  threat_score: number | null;
+  threat_categories: string | null;
+  threat_checked_at: string | null;
+  clicks_yesterday: number | null;
+  clicks_today: number | null;
 }
 
 interface DomainGroup {
@@ -213,6 +220,95 @@ function groupByRoot(domains: DomainRecord[]): DomainGroup[] {
 }
 
 /**
+ * Группировка доменов по root domain с добавлением health статуса
+ * Используется в GET /domains для UI светофора
+ */
+function groupByRootWithHealth(domains: DomainRecord[]): DomainGroup[] {
+  const groups = new Map<string, { zone_id: number | null; domains: DomainRecord[] }>();
+
+  // Группируем по root
+  for (const domain of domains) {
+    const root = getRootDomain(domain.domain_name);
+    if (!groups.has(root)) {
+      groups.set(root, { zone_id: null, domains: [] });
+    }
+    const group = groups.get(root)!;
+    group.domains.push(domain);
+
+    // zone_id берём от root домена
+    if (domain.domain_name === root && domain.zone_id) {
+      group.zone_id = domain.zone_id;
+    }
+  }
+
+  // Сортируем группы по root
+  const sortedRoots = Array.from(groups.keys()).sort();
+
+  const result: DomainGroup[] = [];
+
+  for (const root of sortedRoots) {
+    const group = groups.get(root)!;
+
+    // Сортируем домены внутри группы: root первый, потом по алфавиту
+    group.domains.sort((a, b) => {
+      if (a.domain_name === root) return -1;
+      if (b.domain_name === root) return 1;
+      return a.domain_name.localeCompare(b.domain_name);
+    });
+
+    // Формируем ответ с health статусом
+    const domainsWithHealth = group.domains.map((domain) => {
+      const {
+        account_id,
+        threat_score,
+        threat_categories,
+        threat_checked_at,
+        clicks_yesterday,
+        clicks_today,
+        ...rest
+      } = domain;
+
+      // Вычисляем health статус
+      const healthStatus = computeDomainHealthStatus({
+        blocked: domain.blocked,
+        blocked_reason: domain.blocked_reason,
+        threat_score: domain.threat_score,
+        clicks_yesterday: clicks_yesterday ?? undefined,
+        clicks_today: clicks_today ?? undefined,
+      });
+
+      // Парсим categories
+      let categories: string[] | null = null;
+      if (threat_categories) {
+        try {
+          categories = JSON.parse(threat_categories);
+        } catch {
+          categories = null;
+        }
+      }
+
+      return {
+        ...rest,
+        health: {
+          status: healthStatus,
+          threat_score: threat_score,
+          categories: categories,
+          checked_at: threat_checked_at,
+        },
+      };
+    });
+
+    result.push({
+      root,
+      zone_id: group.zone_id,
+      domains: domainsWithHealth as unknown as Omit<DomainRecord, "account_id">[],
+    });
+  }
+
+  return result;
+}
+
+/**
  * Проверка квоты доменов
  */
 async function checkDomainQuota(
@@ -357,21 +453,33 @@ export async function handleListDomains(c: Context<{ Bindings: Env }>) {
 
   const result = await env.DB301.prepare(
     `SELECT d.id, d.account_id, d.site_id, d.zone_id, d.key_id, d.parent_id,
-            d.domain_name, d.role, d.ns, d.ns_verified, d.proxied, 
+            d.domain_name, d.role, d.ns, d.ns_verified, d.proxied,
             d.blocked, d.blocked_reason, d.ssl_status, d.expired_at,
             d.created_at, d.updated_at,
             s.site_name, s.status as site_status,
-            p.id as project_id, p.project_name
+            p.id as project_id, p.project_name,
+            t.threat_score, t.categories as threat_categories, t.checked_at as threat_checked_at,
+            COALESCE(r.clicks_yesterday, 0) as clicks_yesterday,
+            COALESCE(r.clicks_today, 0) as clicks_today
      FROM domains d
      LEFT JOIN sites s ON d.site_id = s.id
      LEFT JOIN projects p ON s.project_id = p.id
+     LEFT JOIN domain_threats t ON d.id = t.domain_id
+     LEFT JOIN (
+       SELECT domain_id,
+              SUM(clicks_yesterday) as clicks_yesterday,
+              SUM(clicks_today) as clicks_today
+       FROM redirect_rules
+       WHERE enabled = 1
+       GROUP BY domain_id
+     ) r ON d.id = r.domain_id
      WHERE ${whereClause}
      ORDER BY d.domain_name`
   )
     .bind(...bindings)
     .all<DomainRecord>();
 
-  const grouped = groupByRoot(result.results);
+  const grouped = groupByRootWithHealth(result.results);
 
   return c.json({
     ok: true,

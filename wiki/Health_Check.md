@@ -8,6 +8,81 @@
 
 ---
 
+## Статус реализации
+
+| Phase | Название | Статус |
+|-------|----------|--------|
+| 1 | CF Phishing Detection | ✅ Готово |
+| 2 | Traffic Anomaly Detection | ✅ Готово |
+| 3 | GET /domains (health в списке) | ✅ Готово |
+| 4 | POST /webhook/health | ⏳ Pending |
+
+---
+
+## Реализованные компоненты (Phase 1-2)
+
+### Файлы
+
+| Файл | Назначение |
+|------|------------|
+| `schema/migrations/0009_health_check.sql` | Миграция: таблица `domain_threats` |
+| `schema/301.sql` | Схема: `domain_threats`, `blocked_reason` += 'phishing' |
+| `src/api/domains/health.ts` | Модуль health: функции и API handler |
+| `src/api/integrations/providers/cloudflare/zones.ts` | `checkZonePhishing()`, phishing в sync/create |
+| `src/api/jobs/redirect-stats.ts` | Anomaly detection + phishing trigger |
+
+### Функции
+
+```
+src/api/domains/health.ts
+├── updateDomainsPhishingStatus()  — UPDATE domains SET blocked для зоны
+├── detectAnomaly()                — drop_50 / drop_90 / zero_traffic
+├── shouldCheckPhishing()          — true для drop_90 / zero_traffic
+├── upsertDomainThreat()           — UPSERT в domain_threats
+├── handleGetDomainHealth()        — GET /domains/:id/health
+└── computeDomainHealthStatus()    — расчёт статуса для списка
+
+src/api/integrations/providers/cloudflare/zones.ts
+├── checkZonePhishing()            — CF API meta.phishing_detected
+├── handleCreateZone()             — проверка phishing при создании
+├── handleSyncZone()               — обновление phishing при sync
+└── syncZonesInternal()            — phishing при массовой синхронизации
+```
+
+### Триггеры CF Phishing
+
+| Событие | Где срабатывает | Действие |
+|---------|-----------------|----------|
+| Создание зоны | `handleCreateZone()` | Проверка `meta.phishing_detected` → blocked |
+| Sync zone (UI) | `handleSyncZone()` | Проверка + UPDATE domains |
+| Sync all zones | `syncZonesInternal()` | Проверка для каждой зоны |
+| Traffic anomaly | `redirect-stats.ts` | drop_90/zero_traffic → checkZonePhishing |
+
+### Логика Anomaly Detection
+
+```typescript
+function detectAnomaly(yesterday: number, today: number): AnomalyType {
+  if (today === 0 && yesterday >= 20) return "zero_traffic";
+  if (yesterday > 0 && today < yesterday * 0.1) return "drop_90";
+  if (yesterday > 0 && today < yesterday * 0.5) return "drop_50";
+  return null;
+}
+```
+
+При `drop_90` или `zero_traffic` в cron job `redirect-stats.ts`:
+1. Вызывается `checkZonePhishing(cf_zone_id, token)`
+2. Если `phishing_detected = true` → `updateDomainsPhishingStatus(zone_id, true)`
+
+### API Endpoints
+
+| Method | Path | Описание |
+|--------|------|----------|
+| GET | `/domains` | Список доменов с `health.status` |
+| GET | `/domains/:id/health` | Детальная информация о здоровье |
+| POST | `/zones/:id/sync` | Синхронизация зоны + phishing check |
+
+---
+
 ## Источники данных
 
 | # | Источник | Тип | Статус |

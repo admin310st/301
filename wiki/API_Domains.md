@@ -61,7 +61,13 @@ curl -X GET "https://api.301.st/domains" \
           "updated_at": "2025-01-10T08:00:00Z",
           "site_name": "Main Landing",
           "site_status": "active",
-          "project_name": "Brand Campaign Q1"
+          "project_name": "Brand Campaign Q1",
+          "health": {
+            "status": "healthy",
+            "threat_score": null,
+            "categories": null,
+            "checked_at": null
+          }
         },
         {
           "id": 2,
@@ -82,7 +88,13 @@ curl -X GET "https://api.301.st/domains" \
           "updated_at": "2025-01-11T09:00:00Z",
           "site_name": "Main Landing",
           "site_status": "active",
-          "project_name": "Brand Campaign Q1"
+          "project_name": "Brand Campaign Q1",
+          "health": {
+            "status": "warning",
+            "threat_score": 2,
+            "categories": ["spam"],
+            "checked_at": "2025-01-15T10:00:00Z"
+          }
         },
         {
           "id": 3,
@@ -95,15 +107,21 @@ curl -X GET "https://api.301.st/domains" \
           "ns": "ns1.cloudflare.com,ns2.cloudflare.com",
           "ns_verified": 1,
           "proxied": 1,
-          "blocked": 0,
-          "blocked_reason": null,
+          "blocked": 1,
+          "blocked_reason": "phishing",
           "ssl_status": "valid",
           "expired_at": null,
           "created_at": "2025-01-11T10:00:00Z",
           "updated_at": "2025-01-11T10:00:00Z",
           "site_name": null,
           "site_status": null,
-          "project_name": null
+          "project_name": null,
+          "health": {
+            "status": "blocked",
+            "threat_score": null,
+            "categories": null,
+            "checked_at": null
+          }
         }
       ]
     },
@@ -130,13 +148,37 @@ curl -X GET "https://api.301.st/domains" \
           "updated_at": "2025-01-12T08:00:00Z",
           "site_name": "Main Landing",
           "site_status": "active",
-          "project_name": "Brand Campaign Q1"
+          "project_name": "Brand Campaign Q1",
+          "health": {
+            "status": "unknown",
+            "threat_score": null,
+            "categories": null,
+            "checked_at": null
+          }
         }
       ]
     }
   ]
 }
 ```
+
+**Поле `health` (для UI светофора):**
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `status` | string | Статус здоровья: `blocked`, `warning`, `healthy`, `unknown` |
+| `threat_score` | number/null | Количество malicious детекций (VT) |
+| `categories` | string[]/null | Категории угроз: `["gambling", "spam", "phishing"]` |
+| `checked_at` | string/null | Время последней проверки (ISO 8601) |
+
+**Светофор UI:**
+
+| Статус | Цвет | Условие |
+|--------|------|---------|
+| `blocked` | 🔴 | `blocked = 1` |
+| `warning` | 🟡 | `threat_score > 0` или traffic anomaly |
+| `healthy` | 🟢 | Проверен, угроз нет |
+| `unknown` | ⚪ | Нет данных о проверке |
 
 **С фильтрами:**
 
@@ -559,7 +601,76 @@ curl -X POST "https://api.301.st/redirects" \
 
 ---
 
-### 7 Причины блокировки
+### 7 GET /domains/:id/health
+
+Детальная информация о здоровье домена для Security Tab в UI drawer.
+
+**Требует:** `Authorization: Bearer <access_token>`
+
+**Пример запроса:**
+
+```bash
+curl -X GET "https://api.301.st/domains/2/health" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Успешный ответ:**
+
+```json
+{
+  "ok": true,
+  "health": {
+    "status": "warning",
+    "blocked": false,
+    "blocked_reason": null,
+    "threats": {
+      "score": 3,
+      "categories": ["gambling", "spam"],
+      "reputation": -15,
+      "source": "virustotal",
+      "checked_at": "2025-01-15T09:55:00Z"
+    },
+    "traffic": {
+      "yesterday": 150,
+      "today": 45,
+      "change_percent": -70,
+      "anomaly": true
+    }
+  }
+}
+```
+
+**Поля ответа:**
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `status` | string | Общий статус: `blocked`, `warning`, `healthy`, `unknown` |
+| `blocked` | boolean | Флаг блокировки |
+| `blocked_reason` | string/null | Причина блокировки |
+| `threats` | object/null | Данные об угрозах (VT/CF Intel) |
+| `threats.score` | number | Количество malicious детекций |
+| `threats.categories` | string[] | Категории угроз |
+| `threats.reputation` | number | Репутация (-100 to +100) |
+| `threats.source` | string | Источник: `virustotal`, `cloudflare_intel` |
+| `threats.checked_at` | string | Время проверки |
+| `traffic` | object/null | Статистика трафика |
+| `traffic.yesterday` | number | Клики за вчера |
+| `traffic.today` | number | Клики за сегодня |
+| `traffic.change_percent` | number | Изменение в % |
+| `traffic.anomaly` | boolean | Обнаружена аномалия |
+
+**Ошибки:**
+
+```json
+{
+  "ok": false,
+  "error": "domain_not_found"
+}
+```
+
+---
+
+### 8 Причины блокировки
 
 | Причина | Описание |
 |---------|----------|
@@ -568,10 +679,11 @@ curl -X POST "https://api.301.st/redirects" \
 | `hosting_registrar` | Заблокирован хостингом/регистратором |
 | `government` | Государственная блокировка |
 | `manual` | Ручная блокировка пользователем |
+| `phishing` | Заблокирован CF Trust & Safety за phishing |
 
 ---
 
-### 8 Связь с Project/Site
+### 9 Связь с Project/Site
 
 Домены привязываются напрямую к проектам и сайтам:
 
@@ -593,7 +705,7 @@ Domain.site_id → Site (тег = точка приёма трафика)
 
 ---
 
-### 9 Архитектура доменов
+### 10 Архитектура доменов
 
 ```
 Project (логическая группа)
@@ -614,7 +726,7 @@ Project (логическая группа)
 
 ---
 
-### 10 POST /domains/zones/batch
+### 11 POST /domains/zones/batch
 
 Batch создание зон в Cloudflare для списка root доменов.
 
@@ -683,7 +795,7 @@ curl -X POST "https://api.301.st/domains/zones/batch" \
 
 ---
 
-#### 10.1 Коды ошибок Cloudflare
+#### 11.1 Коды ошибок Cloudflare
 
 | CF Code | Наш код | Описание |
 |---------|---------|----------|
@@ -696,7 +808,7 @@ curl -X POST "https://api.301.st/domains/zones/batch" \
 
 ---
 
-#### 10.2 Ошибки валидации
+#### 11.2 Ошибки валидации
 
 ```json
 // Не указан ключ
@@ -720,7 +832,7 @@ curl -X POST "https://api.301.st/domains/zones/batch" \
 
 ---
 
-#### 10.3 UX Flow (3 этапа)
+#### 11.3 UX Flow (3 этапа)
 
 ```mermaid
 flowchart LR
@@ -753,7 +865,7 @@ flowchart LR
 
 ---
 
-### 11 POST /domains/batch
+### 12 POST /domains/batch
 
 Batch создание поддоменов (до 10 за раз).
 
@@ -807,7 +919,7 @@ curl -X POST "https://api.301.st/domains/batch" \
 
 ---
 
-#### 11.1 Ошибки валидации
+#### 12.1 Ошибки валидации
 
 ```json
 // Не указан zone_id
@@ -822,7 +934,7 @@ curl -X POST "https://api.301.st/domains/batch" \
 
 ---
 
-#### 11.2 Ошибки в failed array
+#### 12.2 Ошибки в failed array
 
 | Код | Описание |
 |-----|----------|
@@ -832,12 +944,13 @@ curl -X POST "https://api.301.st/domains/batch" \
 
 ---
 
-### 12 Таблица endpoints
+### 13 Таблица endpoints
 
 | Endpoint | Метод | Auth | Описание |
 |----------|-------|------|----------|
-| `/domains` | GET | JWT | Список доменов с группировкой |
+| `/domains` | GET | JWT | Список доменов с группировкой + health |
 | `/domains/:id` | GET | JWT | Детали домена |
+| `/domains/:id/health` | GET | JWT | Health Check (Security Tab) |
 | `/domains` | POST | editor | Создать поддомен + DNS |
 | `/domains/batch` | POST | editor | Batch поддомены (до 10) |
 | `/domains/:id` | PATCH | editor | Обновить домен |

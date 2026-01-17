@@ -79,8 +79,11 @@ import {
   handleCreateDomain,
   handleUpdateDomain,
   handleDeleteDomain,
-  handleBatchCreateDomains, 
+  handleBatchCreateDomains,
 } from "./domains/domains";
+
+// Domain Health
+import { handleGetDomainHealth } from "./domains/health";
 
 import { handleBatchCreateZones } from "./domains/zones-batch";
 
@@ -154,6 +157,7 @@ app.delete("/sites/:id/domains/:domainId", handleUnassignDomainFromSite);
 // --- Domains ---
 app.get("/domains", handleListDomains);
 app.get("/domains/:id", handleGetDomain);
+app.get("/domains/:id/health", handleGetDomainHealth);
 app.post("/domains", handleCreateDomain);
 app.post("/domains/batch", handleBatchCreateDomains);
 app.patch("/domains/:id", handleUpdateDomain);

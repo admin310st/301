@@ -15,6 +15,8 @@
 import type { Env } from "../types/worker";
 import { getDecryptedKey } from "../integrations/keys/storage";
 import { fetchRedirectStats, getYesterdayDate, getTodayDate } from "../redirects/analytics";
+import { detectAnomaly, shouldCheckPhishing, updateDomainsPhishingStatus } from "../domains/health";
+import { checkZonePhishing } from "../integrations/providers/cloudflare/zones";
 
 // ============================================================
 // TYPES
@@ -31,6 +33,9 @@ interface UpdateResult {
   zones_processed: number;
   zones_failed: number;
   rules_updated: number;
+  anomalies_detected: number;
+  phishing_checks: number;
+  phishing_blocked: number;
   errors: string[];
 }
 
@@ -46,6 +51,9 @@ export async function updateRedirectStats(env: Env): Promise<UpdateResult> {
     zones_processed: 0,
     zones_failed: 0,
     rules_updated: 0,
+    anomalies_detected: 0,
+    phishing_checks: 0,
+    phishing_blocked: 0,
     errors: [],
   };
 
@@ -67,9 +75,12 @@ export async function updateRedirectStats(env: Env): Promise<UpdateResult> {
   // 2. Обработать каждую зону
   for (const zone of zones.results) {
     try {
-      const updated = await processZoneStats(env, zone, yesterday, today);
+      const zoneResult = await processZoneStats(env, zone, yesterday, today);
       result.zones_processed++;
-      result.rules_updated += updated;
+      result.rules_updated += zoneResult.rules_updated;
+      result.anomalies_detected += zoneResult.anomalies;
+      result.phishing_checks += zoneResult.phishing_checked ? 1 : 0;
+      result.phishing_blocked += zoneResult.phishing_detected ? 1 : 0;
     } catch (e) {
       result.zones_failed++;
       result.errors.push(`Zone ${zone.id}: ${e}`);
@@ -77,6 +88,13 @@ export async function updateRedirectStats(env: Env): Promise<UpdateResult> {
   }
 
   return result;
+}
+
+interface ZoneStatsResult {
+  rules_updated: number;
+  anomalies: number;
+  phishing_checked: boolean;
+  phishing_detected: boolean;
 }
 
 /**
@@ -87,7 +105,14 @@ async function processZoneStats(
   zone: ZoneWithKey,
   yesterday: string,
   today: string
-): Promise<number> {
+): Promise<ZoneStatsResult> {
+  const result: ZoneStatsResult = {
+    rules_updated: 0,
+    anomalies: 0,
+    phishing_checked: false,
+    phishing_detected: false,
+  };
+
   // 1. Получить токен
   const keyData = await getDecryptedKey(env, zone.key_id);
   if (!keyData) {
@@ -100,7 +125,7 @@ async function processZoneStats(
   if (stats.length === 0) {
     // Нет данных — просто ротируем счётчики
     await rotateCounters(env, zone.id, today);
-    return 0;
+    return result;
   }
 
   // 3. Получить домены зоны для маппинга host → domain_id
@@ -113,12 +138,19 @@ async function processZoneStats(
     domainMap.set(d.domain_name.toLowerCase(), d.id);
   }
 
-  // 4. Обновить счётчики
-  let updatedCount = 0;
+  // 4. Обновить счётчики и отслеживать аномалии
+  let hasAnomalyTrigger = false;
 
   for (const stat of stats) {
     const domainId = domainMap.get(stat.host.toLowerCase());
     if (!domainId) continue;
+
+    // Получить текущие значения clicks_yesterday и clicks_today
+    const currentStats = await env.DB301.prepare(`
+      SELECT COALESCE(SUM(clicks_yesterday), 0) as yesterday, COALESCE(SUM(clicks_today), 0) as today_val
+      FROM redirect_rules
+      WHERE domain_id = ? AND zone_id = ? AND enabled = 1
+    `).bind(domainId, zone.id).first<{ yesterday: number; today_val: number }>();
 
     // Обновить все правила этого домена
     const updateResult = await env.DB301.prepare(`
@@ -133,13 +165,35 @@ async function processZoneStats(
         AND (last_counted_date IS NULL OR last_counted_date != ?)
     `).bind(stat.count, today, domainId, zone.id, today).run();
 
-    updatedCount += updateResult.meta?.changes || 0;
+    result.rules_updated += updateResult.meta?.changes || 0;
+
+    // Проверить аномалию: вчерашние клики (после ротации будут в yesterday)
+    // и сегодняшние (stat.count — новые данные, которые станут yesterday завтра)
+    if (currentStats) {
+      const anomaly = detectAnomaly(currentStats.yesterday, stat.count);
+      if (anomaly) {
+        result.anomalies++;
+        if (shouldCheckPhishing(anomaly)) {
+          hasAnomalyTrigger = true;
+        }
+      }
+    }
   }
 
   // 5. Ротировать счётчики для доменов без статистики
   await rotateCounters(env, zone.id, today);
 
-  return updatedCount;
+  // 6. Если обнаружена серьёзная аномалия (drop_90 / zero_traffic), проверяем phishing
+  if (hasAnomalyTrigger) {
+    result.phishing_checked = true;
+    const phishingResult = await checkZonePhishing(zone.cf_zone_id, keyData.secrets.token);
+    if (phishingResult.ok && phishingResult.phishing_detected) {
+      result.phishing_detected = true;
+      await updateDomainsPhishingStatus(env, zone.id, true);
+    }
+  }
+
+  return result;
 }
 
 /**
