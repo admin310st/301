@@ -409,7 +409,7 @@ CREATE TABLE IF NOT EXISTS domains (
     proxied INTEGER DEFAULT 1,
     blocked INTEGER DEFAULT 0 CHECK(blocked IN (0,1)),   -- флаг блокировки домена
     blocked_reason TEXT CHECK(blocked_reason IN (        -- причина блокировки
-        'unavailable', 'ad_network', 'hosting_registrar', 'government', 'manual'
+        'unavailable', 'ad_network', 'hosting_registrar', 'government', 'manual', 'phishing'
     )),
     ssl_status TEXT CHECK(ssl_status IN ('none','valid','expired','error')) DEFAULT 'none',
     expired_at TIMESTAMP,                                -- дата окончания регистрации у регистратора
@@ -446,11 +446,34 @@ COMMENT ON COLUMN domains.ns IS 'Фактические NS-записи, пол�
 COMMENT ON COLUMN domains.ns_verified IS 'Флаг подтверждения делегирования NS (1 — подтверждено).';
 COMMENT ON COLUMN domains.proxied IS 'Флаг проксирования через Cloudflare (1 — включено, 0 — только DNS).';
 COMMENT ON COLUMN domains.blocked IS 'Флаг блокировки домена (1 — домен заблокирован системой или вручную).';
-COMMENT ON COLUMN domains.blocked_reason IS 'Причина блокировки: unavailable, ad_network, hosting_registrar, government, manual.';
+COMMENT ON COLUMN domains.blocked_reason IS 'Причина блокировки: unavailable, ad_network, hosting_registrar, government, manual, phishing.';
 COMMENT ON COLUMN domains.ssl_status IS 'Статус SSL-сертификата: none, valid, expired, error.';
 COMMENT ON COLUMN domains.expired_at IS 'Дата окончания регистрации домена у регистратора.';
 COMMENT ON COLUMN domains.created_at IS 'Дата добавления домена в систему.';
 COMMENT ON COLUMN domains.updated_at IS 'Дата последнего обновления записи.';
+
+-- ======================================================
+-- DOMAIN_THREATS (Health Check)
+-- ======================================================
+CREATE TABLE IF NOT EXISTS domain_threats (
+    domain_id INTEGER PRIMARY KEY,
+    threat_score INTEGER,           -- VT malicious count / CF security score
+    categories TEXT,                -- JSON: ["gambling", "spam"]
+    reputation INTEGER,             -- -100 to +100
+    source TEXT,                    -- 'virustotal' | 'cloudflare_intel'
+    checked_at TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE
+);
+
+COMMENT ON TABLE domain_threats IS 'Оценки угроз доменов от VirusTotal или Cloudflare Intel.';
+COMMENT ON COLUMN domain_threats.domain_id IS 'Ссылка на домен (domains.id).';
+COMMENT ON COLUMN domain_threats.threat_score IS 'Количество malicious детекций (VT) или security score (CF Intel).';
+COMMENT ON COLUMN domain_threats.categories IS 'JSON-массив категорий: gambling, spam, phishing и т.п.';
+COMMENT ON COLUMN domain_threats.reputation IS 'Репутация домена от -100 до +100.';
+COMMENT ON COLUMN domain_threats.source IS 'Источник данных: virustotal или cloudflare_intel.';
+COMMENT ON COLUMN domain_threats.checked_at IS 'Дата последней проверки.';
+COMMENT ON COLUMN domain_threats.updated_at IS 'Дата последнего обновления записи.';
 
 -- ======================================================
 -- REDIRECT_RULES
