@@ -15,86 +15,13 @@
 | 1 | CF Phishing Detection | ✅ Готово |
 | 2 | Traffic Anomaly Detection | ✅ Готово |
 | 3 | GET /domains (health в списке) | ✅ Готово |
-| 4 | POST /webhook/health | ⏳ Pending |
+| 4 | POST /webhook/health | ✅ Готово |
+| 5 | VirusTotal Integration | ✅ Готово |
+| 6 | Client Worker Setup | ✅ Готово |
 
 ---
 
-## Реализованные компоненты (Phase 1-2)
-
-### Файлы
-
-| Файл | Назначение |
-|------|------------|
-| `schema/migrations/0009_health_check.sql` | Миграция: таблица `domain_threats` |
-| `schema/301.sql` | Схема: `domain_threats`, `blocked_reason` += 'phishing' |
-| `src/api/domains/health.ts` | Модуль health: функции и API handler |
-| `src/api/integrations/providers/cloudflare/zones.ts` | `checkZonePhishing()`, phishing в sync/create |
-| `src/api/jobs/redirect-stats.ts` | Anomaly detection + phishing trigger |
-
-### Функции
-
-```
-src/api/domains/health.ts
-├── updateDomainsPhishingStatus()  — UPDATE domains SET blocked для зоны
-├── detectAnomaly()                — drop_50 / drop_90 / zero_traffic
-├── shouldCheckPhishing()          — true для drop_90 / zero_traffic
-├── upsertDomainThreat()           — UPSERT в domain_threats
-├── handleGetDomainHealth()        — GET /domains/:id/health
-└── computeDomainHealthStatus()    — расчёт статуса для списка
-
-src/api/integrations/providers/cloudflare/zones.ts
-├── checkZonePhishing()            — CF API meta.phishing_detected
-├── handleCreateZone()             — проверка phishing при создании
-├── handleSyncZone()               — обновление phishing при sync
-└── syncZonesInternal()            — phishing при массовой синхронизации
-```
-
-### Триггеры CF Phishing
-
-| Событие | Где срабатывает | Действие |
-|---------|-----------------|----------|
-| Создание зоны | `handleCreateZone()` | Проверка `meta.phishing_detected` → blocked |
-| Sync zone (UI) | `handleSyncZone()` | Проверка + UPDATE domains |
-| Sync all zones | `syncZonesInternal()` | Проверка для каждой зоны |
-| Traffic anomaly | `redirect-stats.ts` | drop_90/zero_traffic → checkZonePhishing |
-
-### Логика Anomaly Detection
-
-```typescript
-function detectAnomaly(yesterday: number, today: number): AnomalyType {
-  if (today === 0 && yesterday >= 20) return "zero_traffic";
-  if (yesterday > 0 && today < yesterday * 0.1) return "drop_90";
-  if (yesterday > 0 && today < yesterday * 0.5) return "drop_50";
-  return null;
-}
-```
-
-При `drop_90` или `zero_traffic` в cron job `redirect-stats.ts`:
-1. Вызывается `checkZonePhishing(cf_zone_id, token)`
-2. Если `phishing_detected = true` → `updateDomainsPhishingStatus(zone_id, true)`
-
-### API Endpoints
-
-| Method | Path | Описание |
-|--------|------|----------|
-| GET | `/domains` | Список доменов с `health.status` |
-| GET | `/domains/:id/health` | Детальная информация о здоровье |
-| POST | `/zones/:id/sync` | Синхронизация зоны + phishing check |
-
----
-
-## Источники данных
-
-| # | Источник | Тип | Статус |
-|---|----------|-----|--------|
-| 1 | CF Phishing | ФАКТ | ✅ MVP |
-| 2 | Traffic Anomaly | СИГНАЛ | ✅ MVP |
-| 3 | VirusTotal | ОЦЕНКА | ✅ MVP |
-| 4 | HostTracker | ДОСТУПНОСТЬ | 🔜 Future |
-
----
-
-## Архитектура
+## Архитектура (Push Model)
 
 ```mermaid
 flowchart TB
@@ -103,38 +30,59 @@ flowchart TB
         WH[Webhook receiver]
         DOM[(domains<br>blocked, blocked_reason)]
         THR[(domain_threats<br>VT/Intel оценки)]
-        
+
         POLL -->|GraphQL redirects| DOM
         POLL -->|anomaly?| ZONES_CHECK[Check zones phishing]
         ZONES_CHECK --> DOM
-        WH -->|перезапись| DOM
-        WH -->|перезапись| THR
+        WH -->|Verify JWT| PROCESS[Process data]
+        PROCESS --> DOM
+        PROCESS --> THR
     end
-    
-    subgraph "CF Account Client"
-        ZH[(zones_health<br>phishing history)]
+
+    subgraph "CF Account Client (автономно)"
         DT[(domain_threats<br>VT results)]
+        Q[(threat_check_queue)]
         W[Worker]
         CR[Cron 2x+/сутки]
-        
+
         CR --> W
-        W --> ZH
-        W --> DT
-        W -->|webhook| WH
+        W --> Q
+        W -->|VT API| DT
+        W -->|POST /health| WH
     end
-    
+
     subgraph "External APIs"
         GQL[CF GraphQL]
         VT[VirusTotal API]
         ZONES[CF Zones API]
     end
-    
+
     POLL -->|1x/сутки| GQL
     ZONES_CHECK --> ZONES
-    W -->|чаще| GQL
-    W -->|по триггеру| VT
+    W -->|по очереди| VT
     W -->|по триггеру| ZONES
 ```
+
+### Push Model — простая модель безопасности
+
+```
+Client Worker                              301.st Webhook
+     │                                           │
+     │  POST /health                             │
+     │  Authorization: Bearer <JWT>              │
+     │  Body: { zones, threats }    ───────────► │
+     │                                           │ Verify JWT
+     │                                           │ Process data
+     │  ◄─────────────────────────────────────── │
+     │  { ok: true, result: {...} }              │
+     │                                           │
+```
+
+**Аудит безопасности:**
+- Клиент аутентифицируется JWT токеном
+- 301.st валидирует JWT и извлекает account_id
+- Данные из body привязываются к account_id из токена
+- Никаких дополнительных секретов не требуется
 
 ---
 
@@ -144,264 +92,88 @@ flowchart TB
 |-----|----------|---------|
 | **301.st** | Poll GraphQL redirects | 1x/сутки |
 | **301.st** | Проверить zones phishing | По триггеру (anomaly) |
-| **301.st** | Принять webhook | По событию |
+| **301.st** | Принять webhook данные | По событию |
 | **301.st** | Хранить итоговые данные | — |
-| **Клиент** | Poll GraphQL | 2x+/сутки |
 | **Клиент** | Проверить zones phishing | По триггеру (anomaly) |
-| **Клиент** | Запросить VT | По триггеру |
-| **Клиент** | Отправить webhook | После проверок |
+| **Клиент** | Запросить VT | По очереди (cron) |
+| **Клиент** | Отправить данные в webhook | После проверок |
+
+**301.st и Client работают автономно.** Нет взаимных триггеров.
 
 ---
 
-## Источник #1: CF Phishing
+## Реализованные компоненты
 
-### Суть
+### Файлы (301.st Backend)
 
-CF Trust & Safety блокирует зону → все домены зоны мертвы.
+| Файл | Назначение |
+|------|------------|
+| `schema/migrations/0009_health_check.sql` | Миграция: таблица `domain_threats` |
+| `src/api/domains/health.ts` | GET /domains/:id/health |
+| `src/api/integrations/providers/cloudflare/zones.ts` | `checkZonePhishing()` |
+| `src/api/integrations/providers/cloudflare/d1.ts` | D1 API для клиента |
+| `src/api/integrations/providers/cloudflare/workers.ts` | Workers Secrets API |
+| `src/api/integrations/providers/virustotal/initkey.ts` | VT key init |
+| `src/api/health/setup.ts` | POST /health/client/setup |
+| `src/api/jobs/redirect-stats.ts` | Anomaly detection |
+| `src/webhook/health.ts` | POST /health handler |
 
-### Хранение
+### Файлы (Client Worker)
 
-В таблице `domains` (существующие поля):
-
-```sql
-blocked INTEGER DEFAULT 0
-blocked_reason TEXT CHECK(blocked_reason IN (
-    'unavailable', 
-    'ad_network', 
-    'hosting_registrar', 
-    'government', 
-    'manual',
-    'phishing'  -- ← добавить
-))
-```
-
-### Триггеры проверки
-
-| Триггер | Где |
-|---------|-----|
-| Создание зоны | 301.st |
-| Кнопка "Sync zone" | 301.st (UI) |
-| Traffic anomaly | 301.st (при poll) |
-| Traffic anomaly | Клиент → webhook |
-
-### Логика
-
-```mermaid
-flowchart TB
-    A[Триггер] --> B[CF API: GET /zones/id]
-    B --> C{meta.phishing_detected?}
-    C -->|true| D[UPDATE domains<br>blocked=1<br>blocked_reason='phishing'<br>WHERE zone_id=X]
-    C -->|false| E[UPDATE domains<br>blocked=0<br>blocked_reason=NULL<br>WHERE zone_id=X<br>AND blocked_reason='phishing']
-```
-
-### Синхронизация данных
-
-**Чтобы не было рассинхрона:**
-
-1. **При создании зоны** → пишем статус phishing в root домен и все субдомены:
-```sql
-UPDATE domains 
-SET blocked = 1, blocked_reason = 'phishing'
-WHERE zone_id = :zone_id
-```
-
-2. **При аномалии на любом домене зоны** → узнаём zone_id, опрашиваем CF API, обновляем ВСЕ домены зоны:
-```mermaid
-flowchart LR
-    A[Anomaly на domain X] --> B[SELECT zone_id FROM domains]
-    B --> C[GET /zones/:zone_id]
-    C --> D[UPDATE domains WHERE zone_id = :zone_id]
-```
-
-### Снятие блокировки
-
-Только по кнопке "Sync zone" в UI → проверяем CF API → если `phishing_detected = false` → снимаем блок.
+| Файл | Назначение |
+|------|------------|
+| `src/api/health/client/index.ts` | Main worker: cron + HTTP |
+| `src/api/health/client/vt.ts` | VirusTotal API + queue |
+| `src/api/health/client/phishing.ts` | CF Phishing check |
+| `src/api/health/client/webhook.ts` | Push data → 301.st |
+| `src/api/health/client/domains.ts` | Get domains + anomaly |
+| `src/api/health/client/client.sql` | D1 schema |
+| `src/api/health/client/wrangler.template.toml` | Config |
 
 ---
 
-## Источник #2: Traffic Anomaly
+## API Endpoints
 
-### Суть
+### 301.st API
 
-Падение трафика = сигнал, что что-то случилось.
+| Method | Path | Описание |
+|--------|------|----------|
+| GET | `/domains` | Список доменов с health.status |
+| GET | `/domains/:id/health` | Детальная информация о здоровье |
+| POST | `/integrations/virustotal/init` | Сохранить VT ключ |
+| GET | `/integrations/virustotal/quota` | Проверить VT квоту |
+| POST | `/health/client/setup` | Setup Client Worker |
+| GET | `/health/client/status` | Статус настройки |
 
-### Получение данных
+### 301.st Webhook
 
-| Где | Частота | Источник |
-|-----|---------|----------|
-| 301.st | 1x/сутки | GraphQL клиента (уже сделано) |
-| Клиент | 2x+/сутки | GraphQL → webhook в 301.st |
+| Method | Path | Описание |
+|--------|------|----------|
+| POST | `/health` | Приём данных от Client Worker |
 
-### Логика детекции
+### Client Worker
 
-| Условие | Anomaly |
-|---------|---------|
-| `today < yesterday * 0.5` | drop_50 |
-| `today < yesterday * 0.1` | drop_90 |
-| `today = 0` AND `yesterday >= 20` | zero_traffic |
-
-### Триггер
-
-При обнаружении anomaly (drop_90 / zero_traffic):
-
-**На 301.st (при poll 1x/сутки):**
-1. Проверить zones phishing → UPDATE domains
-
-**На клиенте (при poll 2x+/сутки):**
-1. Проверить zones phishing
-2. Запустить VT check
-3. Отправить webhook → 301.st
-
----
-
-## Источник #3: VirusTotal
-
-### Суть
-
-Оценка репутации домена. Выполняется на клиенте.
-
-### Данные VT API
-
-| Блок | Что даёт | Надёжность |
-|------|----------|------------|
-| `last_analysis_stats` | malicious/suspicious/harmless | Высокая |
-| `categories` | gambling, spam, adult | Средняя |
-| `reputation` | Голоса сообщества | Низкая |
-
-### Пример ответа
-
-```json
-{
-  "last_analysis_stats": {
-    "malicious": 3,
-    "suspicious": 1,
-    "harmless": 65,
-    "undetected": 5
-  },
-  "categories": {
-    "Forcepoint": "gambling",
-    "Sophos": "spam"
-  },
-  "reputation": -15
-}
-```
-
-### Триггеры
-
-| Триггер | Приоритет |
-|---------|-----------|
-| Traffic anomaly (drop_90+) | Высокий |
-| Cron (периодический) | Низкий |
-
-### Rate Limits (Free tier)
-
-- 4 requests/min
-- ~500 requests/day
-
----
-
-## Схема БД
-
-### 301.st
-
-```mermaid
-erDiagram
-    domains ||--o| domain_threats : has
-    
-    domains {
-        int id PK
-        text domain_name
-        int zone_id FK
-        int blocked
-        text blocked_reason
-    }
-    
-    domain_threats {
-        int domain_id PK,FK
-        int threat_score
-        text categories
-        int reputation
-        text source
-        text checked_at
-        text updated_at
-    }
-```
-
-### Таблица domain_threats (301.st)
-
-```sql
-CREATE TABLE domain_threats (
-    domain_id INTEGER PRIMARY KEY,
-    threat_score INTEGER,           -- VT malicious count / CF security score
-    categories TEXT,                -- JSON: ["gambling", "spam"]
-    reputation INTEGER,             -- -100 to +100
-    source TEXT,                    -- 'virustotal' | 'cloudflare_intel'
-    checked_at TEXT,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE
-);
-```
-
-### CF Client
-
-```mermaid
-erDiagram
-    zones_health {
-        int zone_id PK
-        text zone_name
-        int phishing_detected
-        text checked_at
-    }
-    
-    domain_threats {
-        text domain_name PK
-        int malicious
-        int suspicious
-        int harmless
-        text categories
-        int reputation
-        text checked_at
-        text synced_at
-    }
-```
-
-### Таблица zones_health (Client D1)
-
-```sql
-CREATE TABLE zones_health (
-    zone_id TEXT PRIMARY KEY,
-    zone_name TEXT,
-    phishing_detected INTEGER DEFAULT 0,
-    checked_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-### Таблица domain_threats (Client D1)
-
-```sql
-CREATE TABLE domain_threats (
-    domain_name TEXT PRIMARY KEY,
-    malicious INTEGER DEFAULT 0,
-    suspicious INTEGER DEFAULT 0,
-    harmless INTEGER DEFAULT 0,
-    categories TEXT,
-    reputation INTEGER,
-    checked_at TEXT,
-    synced_at TEXT
-);
-```
+| Method | Path | Описание |
+|--------|------|----------|
+| GET | `/health` | Health check (public) |
+| POST | `/run` | Manual trigger |
+| GET | `/stats` | Queue statistics |
 
 ---
 
 ## Webhook: Client → 301.st
 
-### POST /webhook/health
+### POST /health
 
-```json
+**Request:**
+```http
+POST /health
+Authorization: Bearer <JWT_TOKEN>
+Content-Type: application/json
+
 {
-  "account_id": 123,
+  "account_id": "123",
   "timestamp": "2025-01-15T10:00:00Z",
-  
   "zones": [
     {
       "zone_id": "abc123",
@@ -409,7 +181,6 @@ CREATE TABLE domain_threats (
       "checked_at": "2025-01-15T10:00:00Z"
     }
   ],
-  
   "threats": [
     {
       "domain_name": "example.com",
@@ -423,16 +194,184 @@ CREATE TABLE domain_threats (
 }
 ```
 
+**Response:**
+```json
+{
+  "ok": true,
+  "result": {
+    "zones_processed": 1,
+    "domains_blocked": 5,
+    "threats_upserted": 10,
+    "errors": []
+  }
+}
+```
+
 ### Обработка на 301.st
 
 ```mermaid
 flowchart TB
-    A[Webhook received] --> B[Validate auth]
-    B --> C[Process zones]
-    C --> D[UPDATE domains<br>SET blocked, blocked_reason<br>WHERE zone_id IN ...]
-    D --> E[Process threats]
-    E --> F[UPSERT domain_threats]
+    A[POST /health] --> B[Verify JWT]
+    B --> C{Valid?}
+    C -->|No| D[401 Unauthorized]
+    C -->|Yes| E[Extract account_id from JWT]
+    E --> F[Validate account_id match]
+    F --> G[Process zones → UPDATE domains]
+    G --> H[Process threats → UPSERT domain_threats]
+    H --> I[Return result]
 ```
+
+---
+
+## Client Worker
+
+### Bindings
+
+| Тип | Имя | Назначение |
+|-----|-----|------------|
+| Secret | `JWT_TOKEN` | Для webhook → 301.st |
+| Env Var | `ACCOUNT_ID` | ID аккаунта в 301.st |
+| Env Var | `WEBHOOK_URL` | `https://webhook.301.st/health` |
+| D1 | `DB` | Client D1 database |
+| KV | `KV` | Integration keys (VT_API_KEY, etc.) |
+
+### Setup Flow (Автоматический)
+
+При добавлении CF ключа (`POST /integrations/cloudflare/init`) **автоматически** создаётся:
+
+```
+Client CF Account:
+├── D1: 301-client              # Shared database
+├── KV: 301-keys                # Integration keys (VT, etc.)
+└── Worker: 301-health          # Health monitoring
+    ├── Bindings: D1, KV
+    ├── Cron: "0 */12 * * *"
+    └── Secrets: JWT_TOKEN
+```
+
+**Response POST /integrations/cloudflare/init:**
+```json
+{
+  "ok": true,
+  "key_id": 123,
+  "sync": { "zones": 5, "domains": 12 },
+  "client_env": {
+    "d1": { "database_id": "xxx-xxx", "created": true },
+    "kv": { "namespace_id": "yyy-yyy", "created": true },
+    "workers": { "health": { "deployed": true } }
+  }
+}
+```
+
+**Initial Sync:** Домены автоматически синхронизируются в client D1 при создании окружения.
+
+**Auto-sync:** При создании/изменении/удалении домена на 301.st данные автоматически синхронизируются в client D1.
+
+### Cron Flow
+
+```mermaid
+flowchart TB
+    A[Cron trigger] --> B[Get active domains]
+    B --> C[Detect traffic anomalies]
+    C --> D{Anomaly?}
+    D -->|drop_90/zero| E[Check CF Phishing]
+    D -->|No| F[Continue]
+    E --> F
+    F --> G[Add domains to VT queue]
+    G --> H[Process VT queue]
+    H --> I[Send webhook to 301.st]
+    I --> J[Mark threats as synced]
+```
+
+---
+
+## Источники данных
+
+| # | Источник | Тип | Где выполняется |
+|---|----------|-----|-----------------|
+| 1 | CF Phishing | ФАКТ | 301.st + Client |
+| 2 | Traffic Anomaly | СИГНАЛ | 301.st + Client |
+| 3 | VirusTotal | ОЦЕНКА | Client |
+| 4 | HostTracker | ДОСТУПНОСТЬ | 🔜 Future |
+
+---
+
+## Схема БД
+
+### 301.st — domain_threats
+
+```sql
+CREATE TABLE domain_threats (
+    domain_id INTEGER PRIMARY KEY,
+    threat_score INTEGER,
+    categories TEXT,        -- JSON: ["gambling", "spam"]
+    reputation INTEGER,     -- -100 to +100
+    source TEXT,            -- 'virustotal' | 'cloudflare_intel'
+    checked_at TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE
+);
+```
+
+### Client D1
+
+```sql
+-- VT results
+CREATE TABLE domain_threats (
+    domain_name TEXT PRIMARY KEY,
+    threat_score INTEGER,
+    categories TEXT,
+    reputation INTEGER,
+    source TEXT,
+    checked_at TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    synced_at TEXT
+);
+
+-- Queue
+CREATE TABLE threat_check_queue (
+    domain_name TEXT PRIMARY KEY,
+    priority INTEGER DEFAULT 0,
+    source TEXT DEFAULT 'virustotal',
+    added_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    status TEXT DEFAULT 'pending'
+);
+```
+
+---
+
+## VirusTotal Integration
+
+### Rate Limits (Free Tier)
+
+| Лимит | Значение |
+|-------|----------|
+| Requests/min | 4 |
+| Requests/day | 500 |
+
+### VT API Response
+
+```json
+{
+  "last_analysis_stats": {
+    "malicious": 3,
+    "suspicious": 1,
+    "harmless": 65
+  },
+  "categories": {
+    "Forcepoint": "gambling",
+    "Sophos": "spam"
+  },
+  "reputation": -15
+}
+```
+
+### Endpoints
+
+| Method | Path | Описание |
+|--------|------|----------|
+| POST | `/integrations/virustotal/init` | Сохранить VT API key |
+| GET | `/integrations/virustotal/quota` | Текущее использование квоты |
 
 ---
 
@@ -447,62 +386,19 @@ flowchart TB
 | 🟢 | Всё OK |
 | ⚪ | Нет данных |
 
-### Drawer → Security Tab
-
-| Секция | Данные |
-|--------|--------|
-| Status | blocked / warning / healthy |
-| Reason | phishing / ad_network / etc |
-| Threats | VT score, categories |
-| Traffic | Trend, anomaly |
-
----
-
-## API Endpoints (301.st)
-
-> **Важно для UI:** Все данные о домене включая health получаем в одном запросе. Не нужны отдельные запросы для светофора.
-
-### GET /domains
-
-```
-GET /domains
-```
-
-Response (health данные включены по умолчанию):
-```json
-{
-  "id": 123,
-  "domain_name": "example.com",
-  "zone_id": 456,
-  "blocked": 0,
-  "blocked_reason": null,
-  "health": {
-    "status": "warning",
-    "threat_score": 3,
-    "categories": ["gambling"],
-    "checked_at": "2025-01-15T09:55:00Z"
-  }
-}
-```
-
 ### GET /domains/:id/health
-
-> Детальная информация для Drawer → Security Tab
 
 ```json
 {
   "status": "warning",
   "blocked": false,
   "blocked_reason": null,
-  
   "threats": {
     "score": 3,
-    "categories": ["gambling", "spam"],
-    "reputation": -15,
+    "categories": ["gambling"],
     "source": "virustotal",
     "checked_at": "2025-01-15T09:55:00Z"
   },
-  
   "traffic": {
     "yesterday": 150,
     "today": 45,
@@ -510,57 +406,6 @@ Response (health данные включены по умолчанию):
     "anomaly": true
   }
 }
-```
-
-### POST /webhook/health
-
-См. выше.
-
----
-
-## Миграции
-
-### 301.st
-
-```sql
--- 1. Добавить 'phishing' в blocked_reason
--- (требует пересоздания таблицы или CHECK constraint)
-
--- 2. Создать domain_threats
-CREATE TABLE domain_threats (
-    domain_id INTEGER PRIMARY KEY,
-    threat_score INTEGER,
-    categories TEXT,
-    reputation INTEGER,
-    source TEXT,
-    checked_at TEXT,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE
-);
-```
-
-### CF Client (при деплое)
-
-```sql
--- zones_health
-CREATE TABLE zones_health (
-    zone_id TEXT PRIMARY KEY,
-    zone_name TEXT,
-    phishing_detected INTEGER DEFAULT 0,
-    checked_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
--- domain_threats
-CREATE TABLE domain_threats (
-    domain_name TEXT PRIMARY KEY,
-    malicious INTEGER DEFAULT 0,
-    suspicious INTEGER DEFAULT 0,
-    harmless INTEGER DEFAULT 0,
-    categories TEXT,
-    reputation INTEGER,
-    checked_at TEXT,
-    synced_at TEXT
-);
 ```
 
 ---
@@ -576,4 +421,41 @@ CREATE TABLE domain_threats (
 | `reputation` | VT reputation | popularity_rank |
 | `source` | 'virustotal' | 'cloudflare_intel' |
 
-Один формат — переключаем источник.
+---
+
+## Data Sync (Push Model)
+
+### Initial Sync
+
+При `POST /integrations/cloudflare/init`:
+1. Создаётся client environment (D1, KV, Worker)
+2. Все домены аккаунта синхронизируются в client D1
+
+### Auto-Sync
+
+| Событие | Sync действие |
+|---------|---------------|
+| Создание домена | `syncDomainToClient()` |
+| Batch создание | `syncDomainToClient()` для каждого |
+| Изменение role/blocked | `syncDomainToClient()` |
+| Удаление домена | `deleteDomainFromClient()` |
+
+### Файлы
+
+| Файл | Функции |
+|------|---------|
+| `cloudflare/d1-sync.ts` | `syncDomainToClient()`, `deleteDomainFromClient()`, `syncAllDomainsToClient()` |
+| `cloudflare/client-env.ts` | Initial sync в `setupClientEnvironment()` |
+| `domains/domains.ts` | Вызов sync в handlers |
+
+### Client D1 Schema (domain_list)
+
+```sql
+CREATE TABLE domain_list (
+    domain_name TEXT PRIMARY KEY,
+    role TEXT,
+    zone_id TEXT,
+    active INTEGER DEFAULT 1,
+    synced_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+```
