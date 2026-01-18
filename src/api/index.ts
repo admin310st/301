@@ -15,6 +15,7 @@ import githubStart from "./auth/oauth/github/start";
 import githubCallback from "./auth/oauth/github/callback";
 import { handleInitKeyCF } from "./integrations/providers/cloudflare/initkey";
 import { handleInitKeyNamecheap } from "./integrations/providers/namecheap/initkey";
+import { handleInitKeyVirusTotal, handleGetVirusTotalQuota } from "./integrations/providers/virustotal/initkey";
 import {
   handleListTemplates,
   handleListPresets,
@@ -84,6 +85,19 @@ import {
 
 // Domain Health
 import { handleGetDomainHealth } from "./domains/health";
+import { handleSetupClientWorker, handleGetClientStatus } from "./health/setup";
+
+// Worker Configs
+import {
+  handleGenerateConfig,
+  handleGetConfigs,
+  handleGetConfig,
+  handleUpdateConfig,
+  handleDownloadConfig,
+  handleAddRoute,
+  handleRemoveRoute,
+  handleSetupWorker,
+} from "./workers/config";
 
 import { handleBatchCreateZones } from "./domains/zones-batch";
 
@@ -118,6 +132,8 @@ app.route("/auth/oauth/github/callback", githubCallback);
 app.route("/integrations/keys", keysRouter);
 app.post("/integrations/cloudflare/init", handleInitKeyCF);
 app.post("/integrations/namecheap/init", handleInitKeyNamecheap);
+app.post("/integrations/virustotal/init", handleInitKeyVirusTotal);
+app.get("/integrations/virustotal/quota", handleGetVirusTotalQuota);
 
 // --- Cloudflare Zones ---
 app.get("/zones", handleListZones);
@@ -158,6 +174,21 @@ app.delete("/sites/:id/domains/:domainId", handleUnassignDomainFromSite);
 app.get("/domains", handleListDomains);
 app.get("/domains/:id", handleGetDomain);
 app.get("/domains/:id/health", handleGetDomainHealth);
+
+// --- Health Client ---
+app.post("/health/client/setup", handleSetupClientWorker);
+app.get("/health/client/status", handleGetClientStatus);
+
+// --- Worker Configs ---
+app.post("/workers/config", handleGenerateConfig);
+app.get("/workers/config", handleGetConfigs);
+app.get("/workers/config/:type", handleGetConfig);
+app.put("/workers/config/:type", handleUpdateConfig);
+app.get("/workers/config/:type/download", handleDownloadConfig);
+app.post("/workers/config/:type/setup", handleSetupWorker);
+app.post("/workers/config/:type/routes", handleAddRoute);
+app.delete("/workers/config/:type/routes", handleRemoveRoute);
+
 app.post("/domains", handleCreateDomain);
 app.post("/domains/batch", handleBatchCreateDomains);
 app.patch("/domains/:id", handleUpdateDomain);
