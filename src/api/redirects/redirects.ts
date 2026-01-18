@@ -137,10 +137,10 @@ async function verifyRedirectOwnership(
   accountId: number
 ): Promise<{ ok: true; redirect: RedirectRecord } | { ok: false; error: string }> {
   const redirect = await env.DB301.prepare(
-    `SELECT r.*, d.domain_name, z.zone_name
+    `SELECT r.*, d.domain_name,
+            (SELECT domain_name FROM domains WHERE zone_id = r.zone_id AND parent_id IS NULL LIMIT 1) as zone_name
      FROM redirect_rules r
      JOIN domains d ON r.domain_id = d.id
-     LEFT JOIN zones z ON r.zone_id = z.id
      WHERE r.id = ? AND r.account_id = ?`
   )
     .bind(redirectId, accountId)
@@ -284,7 +284,7 @@ export async function handleListSiteRedirects(c: Context<{ Bindings: Env }>) {
        d.domain_name,
        d.role as domain_role,
        d.zone_id,
-       z.zone_name,
+       (SELECT domain_name FROM domains WHERE zone_id = d.zone_id AND parent_id IS NULL LIMIT 1) as zone_name,
        r.id as redirect_id,
        r.template_id,
        r.preset_id,
@@ -301,7 +301,6 @@ export async function handleListSiteRedirects(c: Context<{ Bindings: Env }>) {
        r.created_at,
        r.updated_at
      FROM domains d
-     LEFT JOIN zones z ON d.zone_id = z.id
      LEFT JOIN redirect_rules r ON r.domain_id = d.id
      WHERE d.site_id = ? AND d.account_id = ?
      ORDER BY d.role DESC, d.domain_name, r.preset_order, r.id`
@@ -332,7 +331,8 @@ export async function handleListSiteRedirects(c: Context<{ Bindings: Env }>) {
 
   // Получаем zone limits для всех зон в site
   const zoneLimits = await env.DB301.prepare(
-    `SELECT z.id as zone_id, z.zone_name,
+    `SELECT z.id as zone_id,
+            (SELECT domain_name FROM domains WHERE zone_id = z.id AND parent_id IS NULL LIMIT 1) as zone_name,
             COUNT(r.id) as used
      FROM zones z
      JOIN domains d ON d.zone_id = z.id
@@ -409,10 +409,9 @@ export async function handleListDomainRedirects(c: Context<{ Bindings: Env }>) {
   }
 
   const redirects = await env.DB301.prepare(
-    `SELECT r.*, d.domain_name, z.zone_name
+    `SELECT r.*, d.domain_name
      FROM redirect_rules r
      JOIN domains d ON r.domain_id = d.id
-     LEFT JOIN zones z ON r.zone_id = z.id
      WHERE r.domain_id = ? AND r.account_id = ?
      ORDER BY r.preset_order, r.id`
   )
@@ -887,12 +886,15 @@ export async function handleGetZoneRedirectLimits(c: Context<{ Bindings: Env }>)
     return c.json({ ok: false, error: "unauthorized" }, 401);
   }
 
-  // Проверяем что зона принадлежит аккаунту
+  // Проверяем что зона принадлежит аккаунту и получаем root domain name
   const zone = await env.DB301.prepare(
-    `SELECT id, zone_name FROM zones WHERE id = ? AND account_id = ?`
+    `SELECT z.id,
+            (SELECT domain_name FROM domains WHERE zone_id = z.id AND parent_id IS NULL LIMIT 1) as zone_name
+     FROM zones z
+     WHERE z.id = ? AND z.account_id = ?`
   )
     .bind(zoneId, auth.account_id)
-    .first<{ id: number; zone_name: string }>();
+    .first<{ id: number; zone_name: string | null }>();
 
   if (!zone) {
     return c.json({ ok: false, error: "zone_not_found" }, 404);
