@@ -759,13 +759,73 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   }
 
   // ─────────────────────────────────────────────────────────
-  // 14. Return success
+  // 14. Setup client environment (D1, KV, Workers)
+  // ─────────────────────────────────────────────────────────
+
+  let clientEnvResult: {
+    d1?: { database_id: string; created: boolean };
+    kv?: { namespace_id: string; created: boolean };
+    workers?: { health?: { deployed: boolean } };
+  } | undefined;
+
+  // Setup only for new integrations (not rotate)
+  if (scenario !== "rotate") {
+    try {
+      const { setupClientEnvironment } = await import("./client-env");
+      const envSetup = await setupClientEnvironment({
+        cfAccountId: cf_account_id,
+        cfToken: workingToken.value,
+        accountId,
+        env,
+      });
+
+      if (envSetup.ok) {
+        clientEnvResult = {
+          d1: envSetup.d1 ? {
+            database_id: envSetup.d1.database_id,
+            created: envSetup.d1.created,
+          } : undefined,
+          kv: envSetup.kv ? {
+            namespace_id: envSetup.kv.namespace_id,
+            created: envSetup.kv.created,
+          } : undefined,
+          workers: envSetup.workers ? {
+            health: envSetup.workers.health ? {
+              deployed: envSetup.workers.health.deployed,
+            } : undefined,
+          } : undefined,
+        };
+
+        // Save client env IDs to separate field for future sync operations
+        if (envSetup.d1 || envSetup.kv) {
+          const clientEnv = JSON.stringify({
+            d1_id: envSetup.d1?.database_id,
+            kv_id: envSetup.kv?.namespace_id,
+            health_worker: envSetup.workers?.health?.deployed ?? false,
+            tds_worker: false,
+          });
+
+          await env.DB301.prepare(
+            "UPDATE account_keys SET client_env = ? WHERE id = ?"
+          ).bind(clientEnv, keyId).run();
+        }
+      } else {
+        console.warn("Client environment setup failed:", envSetup.error);
+      }
+    } catch (e) {
+      console.error("Client environment setup error:", e);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // 15. Return success
   // ─────────────────────────────────────────────────────────
 
   return success(c, {
     key_id: keyId,
     is_rotation: scenario === "rotate",
     sync: syncResult,
+    client_env: clientEnvResult,
   });
 }
 
