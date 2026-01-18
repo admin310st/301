@@ -13,7 +13,7 @@ import type { Context } from "hono";
 import type { Env } from "../../../types/worker";
 import { requireAuth, requireOwner } from "../../../lib/auth";
 import { getDecryptedKey } from "../../keys/storage";
-import { updateDomainsPhishingStatus } from "../../domains/health";
+import { updateDomainsPhishingStatus } from "../../../domains/health";
 
 // ============================================================
 // TYPES
