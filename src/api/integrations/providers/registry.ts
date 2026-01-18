@@ -207,25 +207,62 @@ export const Providers = {
     name: "Yandex Metrica",
     description: "Веб-аналитика Яндекс",
     initEndpoint: "/integrations/ym/init",
-    
+
     fields: {
-      token: { 
-        required: true, 
+      token: {
+        required: true,
         sensitive: true,
         description: "OAuth Token"
       },
     },
-    
+
     metadata: {
       counter_id: { description: "ID счётчика Метрики" },
     },
-    
+
     hasBootstrap: false,
     hasOAuth: true,
     externalAccountId: false,
     externalAccountIdField: null,
-    
+
     defaultExpiresYears: null,
+    maxExpiresYears: null,
+  },
+
+  /**
+   * VirusTotal — проверка репутации доменов
+   * Используется для:
+   * - Health Check доменов (threat_score, categories, reputation)
+   * - Выполняется на Client Worker
+   *
+   * Rate Limits (Free Tier):
+   * - 4 requests/min
+   * - 500 requests/day
+   */
+  VIRUSTOTAL: {
+    id: "virustotal",
+    name: "VirusTotal",
+    description: "Domain reputation check — threat score, categories",
+    initEndpoint: "/integrations/virustotal/init",
+
+    fields: {
+      apiKey: {
+        required: true,
+        sensitive: true,
+        description: "API Key из VirusTotal Dashboard"
+      },
+    },
+
+    metadata: {
+      tier: { description: "Тип аккаунта: free | premium" },
+      daily_quota: { description: "Дневной лимит запросов" },
+    },
+
+    hasBootstrap: false,
+    externalAccountId: false,
+    externalAccountIdField: null,
+
+    defaultExpiresYears: null,    // VT API keys не истекают
     maxExpiresYears: null,
   },
 } as const;
