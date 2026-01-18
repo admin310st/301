@@ -14,6 +14,7 @@ import type { Env } from "../types/worker";
 import { requireAuth, requireEditor } from "../lib/auth";
 import { getDecryptedKey } from "../integrations/keys/storage";
 import { computeDomainHealthStatus } from "./health";
+import { syncDomainToClient, deleteDomainFromClient } from "../integrations/providers/cloudflare/d1-sync";
 
 // ============================================================
 // TYPES
@@ -664,6 +665,11 @@ export async function handleCreateDomain(c: Context<{ Bindings: Env }>) {
   // Инкремент квоты
   await incrementDomainsUsed(env, accountId, 1);
 
+  // Sync to client D1 (non-blocking)
+  syncDomainToClient(env, newId as number).catch(e =>
+    console.warn("Client sync failed:", e)
+  );
+
   return c.json({
     ok: true,
     domain: {
@@ -848,6 +854,13 @@ export async function handleBatchCreateDomains(c: Context<{ Bindings: Env }>) {
   // Инкремент квоты
   if (domainsCreated > 0) {
     await incrementDomainsUsed(env, accountId, domainsCreated);
+
+    // Sync created domains to client D1 (non-blocking)
+    for (const item of results.success) {
+      syncDomainToClient(env, item.id).catch(e =>
+        console.warn("Client sync failed for domain", item.id, e)
+      );
+    }
   }
 
   return c.json({
@@ -928,6 +941,13 @@ export async function handleUpdateDomain(c: Context<{ Bindings: Env }>) {
   await env.DB301.prepare(`UPDATE domains SET ${updates.join(", ")} WHERE id = ?`)
     .bind(...bindings)
     .run();
+
+  // Sync to client D1 if role or blocked changed (non-blocking)
+  if (role !== undefined || blocked !== undefined) {
+    syncDomainToClient(env, domainId).catch(e =>
+      console.warn("Client sync failed:", e)
+    );
+  }
 
   return c.json({ ok: true });
 }
@@ -1106,6 +1126,13 @@ export async function handleDeleteDomain(c: Context<{ Bindings: Env }>) {
         console.warn(`DNS record not found for ${domain.domain_name}: ${findResult.error}`);
       }
     }
+  }
+
+  // Delete from client D1 first (before we lose domain info)
+  if (domain.key_id) {
+    deleteDomainFromClient(env, domain.key_id, domain.domain_name).catch(e =>
+      console.warn("Client sync delete failed:", e)
+    );
   }
 
   // Очищаем связанные записи перед удалением
