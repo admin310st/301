@@ -254,6 +254,7 @@ CREATE TABLE IF NOT EXISTS account_keys (
     last_used TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     external_account_id TEXT,
+    client_env TEXT,                    -- JSON: client environment IDs (D1, KV, Workers)
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
 
@@ -271,6 +272,7 @@ COMMENT ON COLUMN account_keys.expires_at IS 'Срок действия ключ
 COMMENT ON COLUMN account_keys.last_used IS 'Дата последнего использования ключа.';
 COMMENT ON COLUMN account_keys.created_at IS 'Дата добавления ключа.';
 COMMENT ON COLUMN account_keys.external_account_id TEXT IS 'Внешний id.';
+COMMENT ON COLUMN account_keys.client_env IS 'JSON с ID ресурсов на CF клиента: d1_id, kv_id, health_worker, tds_worker.';
 
 -- ======================================================
 -- III. PROJECTS
