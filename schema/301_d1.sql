@@ -254,6 +254,7 @@ CREATE TABLE IF NOT EXISTS domains (
     FOREIGN KEY (parent_id) REFERENCES domains(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_domains_account_id ON domains(account_id);
+CREATE INDEX IF NOT EXISTS idx_domains_project_id ON domains(project_id);
 CREATE INDEX IF NOT EXISTS idx_domains_site_id ON domains(site_id);
 CREATE INDEX IF NOT EXISTS idx_domains_zone_id ON domains(zone_id);
 CREATE INDEX IF NOT EXISTS idx_domains_key_id ON domains(key_id);

@@ -446,7 +446,7 @@ export async function handleListDomains(c: Context<{ Bindings: Env }>) {
   }
 
   if (projectId) {
-    conditions.push("p.id = ?");
+    conditions.push("d.project_id = ?");
     bindings.push(parseInt(projectId));
   }
 
