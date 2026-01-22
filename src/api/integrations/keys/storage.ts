@@ -81,6 +81,7 @@ export interface KeyRecord {
   expires_at: string | null;
   last_used: string | null;
   created_at: string;
+  client_env: string | null;  // JSON: client environment IDs (D1, KV, Workers)
 }
 
 /** Расшифрованные данные ключа */
@@ -202,9 +203,9 @@ export async function createKey(
 export async function getKey(env: Env, keyId: number): Promise<KeyRecord | null> {
   const row = await env.DB301.prepare(
     `
-    SELECT 
+    SELECT
       id, account_id, provider, provider_scope, key_alias,
-      external_account_id, kv_key, status, expires_at, last_used, created_at
+      external_account_id, kv_key, status, expires_at, last_used, created_at, client_env
     FROM account_keys
     WHERE id = ?
     `
@@ -270,9 +271,9 @@ export async function listKeys(
   provider?: ProviderId
 ): Promise<KeyRecord[]> {
   let query = `
-    SELECT 
+    SELECT
       id, account_id, provider, provider_scope, key_alias,
-      external_account_id, kv_key, status, expires_at, last_used, created_at
+      external_account_id, kv_key, status, expires_at, last_used, created_at, client_env
     FROM account_keys
     WHERE account_id = ?
   `;

@@ -517,27 +517,33 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
     // Проверяем есть ли другой CF ключ (для replace)
     const otherCFKey = await env.DB301.prepare(
       `SELECT id, external_account_id, provider_scope, kv_key
-       FROM account_keys 
+       FROM account_keys
        WHERE account_id = ? AND provider = 'cloudflare' AND status = 'active' AND external_account_id != ?
        LIMIT 1`
     )
       .bind(accountId, cf_account_id)
       .first<ExistingKeyInfo & { external_account_id: string }>();
 
-    if (otherCFKey) {
-      if (!confirm_replace) {
-        return Errors.cfAccountConflict(
-          c,
-          otherCFKey.external_account_id,
-          otherCFKey.id,
-          cf_account_id
-        );
+    // Лимит достигнут?
+    if (quota.current >= quota.limit) {
+      if (otherCFKey) {
+        // Есть другой CF ключ — предлагаем замену
+        if (!confirm_replace) {
+          return Errors.cfAccountConflict(
+            c,
+            otherCFKey.external_account_id,
+            otherCFKey.id,
+            cf_account_id
+          );
+        }
+        scenario = "replace";
+        existingActiveKey = otherCFKey;
+      } else {
+        // Нет других ключей, но лимит достигнут (edge case)
+        return Errors.quotaExceeded(c, quota.limit, quota.current, quota.plan);
       }
-      scenario = "replace";
-      existingActiveKey = otherCFKey;
-    } else if (quota.current >= quota.limit) {
-      return Errors.quotaExceeded(c, quota.limit, quota.current, quota.plan);
     }
+    // else: лимит позволяет — просто добавляем новый (scenario остаётся "create")
   }
 
   // 5.3 Резервируем место (INSERT pending) — только для create/replace
