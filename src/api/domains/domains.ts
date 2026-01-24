@@ -638,7 +638,7 @@ export async function handleCreateDomain(c: Context<{ Bindings: Env }>) {
     {
       type: "A",
       name: domain_name,
-      content: "1.1.1.1",
+      content: "192.0.2.1",
       proxied: true,
     },
     keyData.secrets.token
@@ -816,7 +816,7 @@ export async function handleBatchCreateDomains(c: Context<{ Bindings: Env }>) {
       {
         type: "A",
         name: shortName,  // CF сам добавит .root_domain
-        content: "1.1.1.1",
+        content: "192.0.2.1",
         proxied: true,
       },
       token

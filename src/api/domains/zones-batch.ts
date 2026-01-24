@@ -78,6 +78,43 @@ interface BatchCreateResponse {
 const CF_API_BASE = "https://api.cloudflare.com/client/v4";
 const MAX_DOMAINS_PER_BATCH = 10;
 
+// ============================================================
+// CF API: LIST ZONES
+// ============================================================
+
+/**
+ * GET /zones — получить список зон в CF аккаунте
+ */
+async function cfListZones(
+  cfAccountId: string,
+  token: string
+): Promise<{ ok: true; zones: CFZone[] } | { ok: false; error: string }> {
+  try {
+    const response = await fetch(
+      `${CF_API_BASE}/zones?account.id=${cfAccountId}&per_page=50`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const data = (await response.json()) as CFApiResponse<CFZone[]>;
+
+    if (!response.ok || !data.success) {
+      return {
+        ok: false,
+        error: data.errors?.[0]?.message || "Failed to list zones",
+      };
+    }
+
+    return { ok: true, zones: data.result || [] };
+  } catch {
+    return { ok: false, error: "CF API request failed" };
+  }
+}
+
 /**
  * Маппинг ошибок CF → наши коды
  */
@@ -395,7 +432,21 @@ export async function handleBatchCreateZones(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: false, error: quotaCheck.error }, 403);
   }
 
-  // 6. Обрабатываем домены последовательно
+  // 6. Получаем существующие зоны из CF
+  const existingZonesResult = await cfListZones(cfAccountId, token);
+  const existingCfZones = new Map<string, CFZone>();
+
+  if (existingZonesResult.ok) {
+    console.log(`[CF LIST ZONES] Found ${existingZonesResult.zones.length} zones:`,
+      existingZonesResult.zones.map(z => z.name));
+    for (const zone of existingZonesResult.zones) {
+      existingCfZones.set(zone.name.toLowerCase(), zone);
+    }
+  } else {
+    console.log(`[CF LIST ZONES] Error:`, existingZonesResult.error);
+  }
+
+  // 7. Обрабатываем домены последовательно
   const results: BatchCreateResponse["results"] = {
     success: [],
     failed: [],
@@ -404,32 +455,64 @@ export async function handleBatchCreateZones(c: Context<{ Bindings: Env }>) {
   let zonesCreated = 0;
   let domainsCreated = 0;
 
-  for (const domain of uniqueDomains) {
-    // 6.1 Создаём зону в CF
-    const cfResult = await cfCreateZone(cfAccountId, domain, token);
+  for (let i = 0; i < uniqueDomains.length; i++) {
+    const domain = uniqueDomains[i];
 
-    if (!cfResult.ok) {
-      // Ошибка CF
-      const mapped = mapCFError(cfResult.code, cfResult.message);
-      results.failed.push({
-        domain,
-        error: mapped.code,
-        error_message: mapped.message,
-      });
-      continue;
+    let cfZone: CFZone;
+
+    // Проверяем существует ли зона в CF
+    const existingZone = existingCfZones.get(domain.toLowerCase());
+
+    if (existingZone) {
+      // Зона уже есть в CF — используем её
+      cfZone = existingZone;
+      console.log(`Zone ${domain} already exists in CF, using existing`);
+    } else {
+      // Пауза между созданиями (кроме первой новой) — CF rate limiting
+      if (zonesCreated > 0) {
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      }
+
+      // Создаём зону в CF
+      console.log(`[CF CREATE ZONE] Creating: ${domain}`);
+      const cfResult = await cfCreateZone(cfAccountId, domain, token);
+
+      if (!cfResult.ok) {
+        console.log(`[CF CREATE ZONE] Failed: ${domain}, code=${cfResult.code}, msg=${cfResult.message}`);
+        const mapped = mapCFError(cfResult.code, cfResult.message);
+        results.failed.push({
+          domain,
+          error: mapped.code,
+          error_message: mapped.message,
+        });
+        continue;
+      }
+
+      console.log(`[CF CREATE ZONE] Success: ${domain}, cf_zone_id=${cfResult.zone.id}`);
+      cfZone = cfResult.zone;
+      zonesCreated++;
+
+      // Fetch зоны — подтверждает создание
+      try {
+        const zoneDetails = await fetch(`${CF_API_BASE}/zones/${cfZone.id}`, {
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        });
+        await zoneDetails.json();
+      } catch {
+        // Игнорируем
+      }
     }
 
-    const cfZone = cfResult.zone;
     const nsExpected = cfZone.name_servers.join(",");
     const plan = mapCFPlan(cfZone.plan);
 
-    // 6.2 Создаём A запись 1.1.1.1 (placeholder)
+    // 6.2 Создаём A запись (placeholder IP из TEST-NET-1, RFC 5737)
     const dnsResult = await cfCreateDNS(
       cfZone.id,
       {
         type: "A",
         name: "@",
-        content: "1.1.1.1",
+        content: "192.0.2.1",
         proxied: true,
       },
       token
@@ -440,7 +523,35 @@ export async function handleBatchCreateZones(c: Context<{ Bindings: Env }>) {
       console.warn(`DNS A record failed for ${domain}: ${dnsResult.error}`);
     }
 
-    // 6.3 Записываем зону в D1
+    // 6.3 Проверяем не занята ли зона другим аккаунтом в D1
+    const existingD1Zone = await env.DB301.prepare(
+      `SELECT id, account_id FROM zones WHERE cf_zone_id = ?`
+    )
+      .bind(cfZone.id)
+      .first<{ id: number; account_id: number }>();
+
+    if (existingD1Zone) {
+      if (existingD1Zone.account_id !== accountId) {
+        // Зона принадлежит другому аккаунту
+        results.failed.push({
+          domain,
+          error: "zone_owned_by_another_account",
+          error_message: "Зона уже принадлежит другому аккаунту в системе.",
+        });
+        continue;
+      }
+      // Зона уже есть у нас — пропускаем создание, используем существующую
+      results.success.push({
+        domain,
+        zone_id: existingD1Zone.id,
+        cf_zone_id: cfZone.id,
+        ns: cfZone.name_servers,
+        status: "existing",
+      } as any);
+      continue;
+    }
+
+    // 6.4 Записываем зону в D1
     let zoneId: number;
     try {
       const insertResult = await env.DB301.prepare(

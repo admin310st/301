@@ -440,21 +440,27 @@ export async function syncZonesInternal(
       const plan = mapCFPlan(cfZone.plan);
       const verified = status === "active" ? 1 : 0;
 
-      // Проверяем существует ли зона в D1
+      // Проверяем существует ли зона в D1 (UNIQUE на cf_zone_id)
       const existingZone = await env.DB301.prepare(
-        `SELECT id FROM zones WHERE cf_zone_id = ? AND account_id = ?`
+        `SELECT id, account_id FROM zones WHERE cf_zone_id = ?`
       )
-        .bind(cfZone.id, accountId)
-        .first<{ id: number }>();
+        .bind(cfZone.id)
+        .first<{ id: number; account_id: number }>();
 
       let zoneId: number;
 
       if (existingZone) {
-        // UPDATE существующей зоны
+        // Зона уже существует — проверяем владельца
+        if (existingZone.account_id !== accountId) {
+          // Зона принадлежит другому аккаунту — пропускаем
+          stats.errors.push(`Zone ${cfZone.name}: already owned by another account`);
+          continue;
+        }
+        // UPDATE существующей зоны (наша)
         zoneId = existingZone.id;
         await env.DB301.prepare(
-          `UPDATE zones 
-           SET key_id = ?, status = ?, plan = ?, ns_expected = ?, verified = ?, 
+          `UPDATE zones
+           SET key_id = ?, status = ?, plan = ?, ns_expected = ?, verified = ?,
                last_sync_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
            WHERE id = ?`
         )
@@ -720,6 +726,21 @@ export async function handleCreateZone(c: Context<{ Bindings: Env }>) {
   const nsExpected = cfZone.name_servers.join(",");
   const status = mapCFStatus(cfZone.status);
   const plan = mapCFPlan(cfZone.plan);
+
+  // Проверяем не занята ли зона другим аккаунтом
+  const existingZone = await env.DB301.prepare(
+    `SELECT id, account_id FROM zones WHERE cf_zone_id = ?`
+  )
+    .bind(cfZone.id)
+    .first<{ id: number; account_id: number }>();
+
+  if (existingZone) {
+    if (existingZone.account_id !== accountId) {
+      return c.json({ ok: false, error: "zone_owned_by_another_account" }, 409);
+    }
+    // Зона уже есть у нас — возвращаем существующую
+    return c.json({ ok: true, zone_id: existingZone.id, existing: true });
+  }
 
   // Сохраняем зону в D1
   const insertResult = await env.DB301.prepare(
