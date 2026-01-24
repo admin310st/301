@@ -6,6 +6,7 @@ import { startOmniFlow } from "../lib/start";
 import { hashPassword, validatePasswordStrength } from "../lib/password";
 import { verifyTurnstileToken } from "../lib/turnstile";
 import { registerGuard } from "../lib/ratelimit";
+import { detectLang } from "../lib/messaging/i18n";
 
 const app = new Hono();
 
@@ -118,15 +119,23 @@ app.post("/", async (c) => {
   }
 
   // ========================================
-  // 9. OMNIFLOW (БЕЗ ПОВТОРНОЙ ПРОВЕРКИ TURNSTILE!)
+  // 9. ОПРЕДЕЛЕНИЕ ЯЗЫКА
+  // ========================================
+
+  const acceptLang = c.req.header("Accept-Language");
+  const lang = detectLang(acceptLang);
+
+  // ========================================
+  // 10. OMNIFLOW (БЕЗ ПОВТОРНОЙ ПРОВЕРКИ TURNSTILE!)
   // ========================================
 
   const result = await startOmniFlow(env, {
     identifier: email,
     mode: "register",
-    payload: { 
+    payload: {
       password_hash,
-      origin
+      origin,
+      lang,
     },
     ip,
     ua,
@@ -135,7 +144,7 @@ app.post("/", async (c) => {
   });
 
   // ========================================
-  // 10. РЕЗУЛЬТАТ
+  // 11. РЕЗУЛЬТАТ
   // ========================================
 
   return c.json({

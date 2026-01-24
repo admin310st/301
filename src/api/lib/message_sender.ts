@@ -18,6 +18,7 @@ export interface SendMessageInput {
   code?: string;              // OTP код (для TG/SMS)
   template?: "verify" | "login" | "reset" | "invite" | "action";
   origin?: string;
+  lang?: "ru" | "en";         // язык письма
 }
 
 /**

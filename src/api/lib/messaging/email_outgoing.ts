@@ -20,10 +20,12 @@ export async function sendEmailOutgoing(
   const isDev = env.ENV_MODE === "dev" || env.WORKERS_ENV === "dev";
   
   if (isDev) {
-    const template = getEmailTemplate(data.template, data.token, env);
+    const lang = data.lang || "en";
+    const template = getEmailTemplate(data.template, data.token, env, lang, data.origin);
     console.log("[EMAIL DEV MODE] Skipping real send:", {
       to: data.identifier,
       subject: template.subject,
+      lang,
       verify_url: `${env.OAUTH_REDIRECT_BASE}/auth/verify?token=${data.token}`
     });
     return; // Выход БЕЗ отправки
@@ -39,7 +41,8 @@ export async function sendEmailOutgoing(
 
   // Получаем шаблон письма
   const origin = data.origin;
-  const template = getEmailTemplate(data.template, data.token, env, "ru", origin);
+  const lang = data.lang || "en";
+  const template = getEmailTemplate(data.template, data.token, env, lang, origin);
 
   // Формируем payload для MailerSend API
   const payload = {

@@ -88,7 +88,8 @@ export async function startOmniFlow(
     token,
     template,
     code,
-    origin: payload?.origin
+    origin: payload?.origin,
+    lang: payload?.lang,
   });
 
   // ---- Ответ UI ----
