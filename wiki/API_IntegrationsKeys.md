@@ -271,12 +271,11 @@ sequenceDiagram
 ```
 
 
-# ============================================================
-# POST /integrations/cloudflare/init
-# Создание working token из bootstrap token
-# ============================================================
+### POST /integrations/cloudflare/init
+ Создание working token из bootstrap token
 
-# Переменные (заменить на свои)
+#### Переменные (заменить на свои)
+
 API_URL="https://api.301.st"
 JWT_TOKEN="your_jwt_token"
 CF_ACCOUNT_ID="your_cloudflare_account_id"
@@ -292,70 +291,69 @@ curl -X POST https://api.301.st/integrations/cloudflare/init \
     "key_alias": "Main CF Account"
   }'
 
-# ============================================================
-# RESPONSES
-# ============================================================
+RESPONSES
 
-# SUCCESS (200)
-# {
-#   "ok": true,
-#   "key_id": 123
-# }
+```
+ SUCCESS (200)
+ {
+   "ok": true,
+   "key_id": 123
+ }
 
-# ERROR: Missing fields (400)
-# {
-#   "ok": false,
-#   "error": "missing_fields",
-#   "fields": ["cf_account_id", "bootstrap_token"]
-# }
+ ERROR: Missing fields (400)
+ {
+   "ok": false,
+   "error": "missing_fields",
+   "fields": ["cf_account_id", "bootstrap_token"]
+ }
 
-# ERROR: Invalid bootstrap token (400)
-# {
-#   "ok": false,
-#   "error": "bootstrap_invalid",
-#   "message": "Invalid API Token"
-# }
+ ERROR: Invalid bootstrap token (400)
+ {
+   "ok": false,
+   "error": "bootstrap_invalid",
+   "message": "Invalid API Token"
+ }
 
-# ERROR: Bootstrap not active (400)
-# {
-#   "ok": false,
-#   "error": "bootstrap_not_active",
-#   "status": "expired"
-# }
+ ERROR: Bootstrap not active (400)
+ {
+   "ok": false,
+   "error": "bootstrap_not_active",
+   "status": "expired"
+ }
 
-# ERROR: Permission groups failed (400)
-# {
-#   "ok": false,
-#   "error": "permission_groups_failed",
-#   "message": "Authentication error"
-# }
+ ERROR: Permission groups failed (400)
+ {
+   "ok": false,
+   "error": "permission_groups_failed",
+   "message": "Authentication error"
+ }
 
-# ERROR: Missing permissions (400)
-# {
-#   "ok": false,
-#   "error": "permissions_missing",
-#   "missing": ["D1 Read", "D1 Write", "Workers KV Storage Read"]
-# }
+ ERROR: Missing permissions (400)
+ {
+   "ok": false,
+   "error": "permissions_missing",
+   "missing": ["D1 Read", "D1 Write", "Workers KV Storage Read"]
+ }
 
-# ERROR: Token creation failed (500)
-# {
-#   "ok": false,
-#   "error": "token_creation_failed",
-#   "message": "..."
-# }
+ ERROR: Token creation failed (500)
+ {
+   "ok": false,
+   "error": "token_creation_failed",
+   "message": "..."
+ }
 
-# ERROR: Working token invalid (500)
-# {
-#   "ok": false,
-#   "error": "working_token_invalid",
-#   "message": "..."
-# }
+ ERROR: Working token invalid (500)
+ {
+   "ok": false,
+   "error": "working_token_invalid",
+   "message": "..."
+ }
 
-# ERROR: Storage failed (500)
-# {
-#   "ok": false,
-#   "error": "storage_failed"
-# }
+ ERROR: Storage failed (500)
+ {
+   "ok": false,
+   "error": "storage_failed"
+ }
 ```
 
 ### 2.2 Требуемые права Cloudflare
