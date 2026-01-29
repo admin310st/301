@@ -75,6 +75,7 @@ interface BatchCreateDomainsRequest {
 interface UpdateDomainRequest {
   role?: "acceptor" | "donor" | "reserve";
   site_id?: number | null;
+  project_id?: number | null;
   blocked?: boolean;
   blocked_reason?: "unavailable" | "ad_network" | "hosting_registrar" | "government" | "manual" | null;
 }
@@ -458,13 +459,13 @@ export async function handleListDomains(c: Context<{ Bindings: Env }>) {
             d.blocked, d.blocked_reason, d.ssl_status, d.expired_at,
             d.created_at, d.updated_at,
             s.site_name, s.status as site_status,
-            p.id as project_id, p.project_name,
+            d.project_id, p.project_name,
             t.threat_score, t.categories as threat_categories, t.checked_at as threat_checked_at,
             COALESCE(r.clicks_yesterday, 0) as clicks_yesterday,
             COALESCE(r.clicks_today, 0) as clicks_today
      FROM domains d
      LEFT JOIN sites s ON d.site_id = s.id
-     LEFT JOIN projects p ON s.project_id = p.id
+     LEFT JOIN projects p ON d.project_id = p.id
      LEFT JOIN domain_threats t ON d.id = t.domain_id
      LEFT JOIN (
        SELECT domain_id,
@@ -505,14 +506,14 @@ export async function handleGetDomain(c: Context<{ Bindings: Env }>) {
   const { account_id: accountId } = auth;
 
   const domain = await env.DB301.prepare(
-    `SELECT d.*, 
+    `SELECT d.*,
             z.cf_zone_id, z.status as zone_status, z.ns_expected,
             s.site_name, s.status as site_status,
-            p.id as project_id, p.project_name
+            p.project_name
      FROM domains d
      LEFT JOIN zones z ON d.zone_id = z.id
      LEFT JOIN sites s ON d.site_id = s.id
-     LEFT JOIN projects p ON s.project_id = p.id
+     LEFT JOIN projects p ON d.project_id = p.id
      WHERE d.id = ? AND d.account_id = ?`
   )
     .bind(domainId, accountId)
@@ -906,7 +907,7 @@ export async function handleUpdateDomain(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: false, error: "invalid_json" }, 400);
   }
 
-  const { role, site_id, blocked, blocked_reason } = body;
+  const { role, site_id, project_id, blocked, blocked_reason } = body;
 
   // Собираем UPDATE
   const updates: string[] = ["updated_at = CURRENT_TIMESTAMP"];
@@ -920,6 +921,11 @@ export async function handleUpdateDomain(c: Context<{ Bindings: Env }>) {
   if (site_id !== undefined) {
     updates.push("site_id = ?");
     bindings.push(site_id);
+  }
+
+  if (project_id !== undefined) {
+    updates.push("project_id = ?");
+    bindings.push(project_id);
   }
 
   if (blocked !== undefined) {
