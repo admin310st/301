@@ -14,7 +14,7 @@ import googleCallback from "./auth/oauth/google/callback";
 import githubStart from "./auth/oauth/github/start";
 import githubCallback from "./auth/oauth/github/callback";
 import { handleInitKeyCF } from "./integrations/providers/cloudflare/initkey";
-import { handleInitKeyNamecheap } from "./integrations/providers/namecheap/initkey";
+import namecheapRouter from "./integrations/providers/namecheap/router";
 import { handleInitKeyVirusTotal, handleGetVirusTotalQuota } from "./integrations/providers/virustotal/initkey";
 import {
   handleListTemplates,
@@ -131,7 +131,7 @@ app.route("/auth/oauth/github/callback", githubCallback);
 // --- Integrations ---
 app.route("/integrations/keys", keysRouter);
 app.post("/integrations/cloudflare/init", handleInitKeyCF);
-app.post("/integrations/namecheap/init", handleInitKeyNamecheap);
+app.route("/integrations/namecheap", namecheapRouter);
 app.post("/integrations/virustotal/init", handleInitKeyVirusTotal);
 app.get("/integrations/virustotal/quota", handleGetVirusTotalQuota);
 
