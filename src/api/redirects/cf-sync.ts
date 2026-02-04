@@ -411,8 +411,9 @@ async function applyZoneRedirects(
     return result;
   }
 
+  const appliedRules = cfRuleset.rules || [];
   result.cf_ruleset_id = cfRuleset.id;
-  result.rules_applied = cfRuleset.rules.length;
+  result.rules_applied = appliedRules.length;
 
   // 5. Обновляем cf_ruleset_id в zones (кэш)
   if (zone.cf_ruleset_id !== cfRuleset.id) {
@@ -424,8 +425,8 @@ async function applyZoneRedirects(
   }
 
   // 6. Обновляем cf_rule_id и sync_status в redirect_rules
-  for (let i = 0; i < cfRuleset.rules.length; i++) {
-    const cfRule = cfRuleset.rules[i];
+  for (let i = 0; i < appliedRules.length; i++) {
+    const cfRule = appliedRules[i];
     const ruleId = ruleMapping.get(i);
 
     if (ruleId && cfRule.id) {
@@ -466,12 +467,22 @@ export async function handleApplyZoneRedirects(c: Context<{ Bindings: Env }>) {
   const env = c.env;
   const zoneId = parseInt(c.req.param("id"));
 
+  if (isNaN(zoneId)) {
+    return c.json({ ok: false, error: "invalid_zone_id" }, 400);
+  }
+
   const auth = await requireEditor(c, env);
   if (!auth) {
     return c.json({ ok: false, error: "forbidden" }, 403);
   }
 
-  const result = await applyZoneRedirects(env, zoneId, auth.account_id);
+  let result;
+  try {
+    result = await applyZoneRedirects(env, zoneId, auth.account_id);
+  } catch (e: any) {
+    console.error("[apply-redirects] Unhandled error:", e);
+    return c.json({ ok: false, error: "internal_error", message: e.message }, 500);
+  }
 
   if (result.errors.length > 0 && result.rules_applied === 0) {
     return c.json({
