@@ -267,7 +267,17 @@ async function getZoneWithToken(
     return { ok: false, error: "zone_not_activated" };
   }
 
-  const keyData = await getDecryptedKey(env, zone.key_id);
+  if (!zone.key_id) {
+    return { ok: false, error: "zone_no_key" };
+  }
+
+  let keyData;
+  try {
+    keyData = await getDecryptedKey(env, zone.key_id);
+  } catch (e: any) {
+    return { ok: false, error: e.message || "key_decrypt_failed" };
+  }
+
   if (!keyData) {
     return { ok: false, error: "key_invalid" };
   }
