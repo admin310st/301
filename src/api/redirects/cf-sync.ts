@@ -335,6 +335,20 @@ async function applyZoneRedirects(
   // 4. Применяем в CF
   let cfRuleset: CFRuleset | null = null;
 
+  // Если нет enabled правил и нет существующего ruleset — нечего применять
+  if (cfRules.length === 0 && !zone.cf_ruleset_id) {
+    // Помечаем disabled правила как synced
+    await env.DB301.prepare(
+      `UPDATE redirect_rules
+       SET sync_status = 'synced', last_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+       WHERE zone_id = ? AND account_id = ? AND enabled = 0 AND sync_status = 'pending'`
+    )
+      .bind(zoneId, accountId)
+      .run();
+
+    return result; // Success, nothing to apply
+  }
+
   if (zone.cf_ruleset_id) {
     // Обновляем существующий ruleset (1 CF вызов)
     const updateResult = await cfUpdateRuleset(zone.cf_zone_id, zone.cf_ruleset_id, cfRules, token);
