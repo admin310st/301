@@ -3,5 +3,6 @@ node_modules/
 .wrangler/
 dist/
 .env
+.secrets
 wrangler.toml
 src/**/wrangler.toml

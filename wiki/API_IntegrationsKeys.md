@@ -514,27 +514,29 @@ curl -X POST https://api.301.st/integrations/namecheap/init \
 | `ip_not_whitelisted` | 400 | IP не в whitelist Namecheap |
 | `namecheap_key_already_exists` | 409 | Ключ для этого username уже существует |
 
-**Архитектура прокси (Squid):**
+**Архитектура прокси (Traefik relay):**
 
-Для работы с Namecheap API используется собственный Squid forward proxy на VPS (`51.68.21.133:8443`). Cloudflare Workers подключаются через расширение `cf.proxy` в `fetch()`.
+Для работы с Namecheap API используется Traefik reverse-proxy на VPS (`relay.301.st` → `51.68.21.133`). Worker делает обычный `fetch()` к relay-эндпоинту, Traefik проксирует запрос к `api.namecheap.com`.
 
-- **Squid** — стандартный forward proxy с Basic Auth и whitelist доменов (`namecheap.com`, `namesilo.com`)
-- **ClientIp** в URL подставляется автоматически (IP Squid сервера)
-- Пользователь должен добавить IP Squid в whitelist Namecheap
+- **Traefik relay** — reverse proxy с Basic Auth, `passHostHeader: false` (Namecheap получает `Host: api.namecheap.com`)
+- **ClientIp** в URL подставляется автоматически (IP relay-сервера)
+- Пользователь должен добавить IP relay-сервера в whitelist Namecheap
 
 ```
-CF Worker --fetch(cf.proxy)--> Squid (51.68.21.133:8443) --> Namecheap API
+CF Worker --fetch()--> Traefik relay (relay.301.st) --> api.namecheap.com
 ```
+
+> **Почему не Squid?** `cf.proxy` в Cloudflare Workers — это механизм routing между зонами, не HTTP forward proxy. Worker не может ходить через Squid напрямую. Traefik relay работает как обычный HTTPS endpoint, к которому Worker обращается стандартным `fetch()`.
 
 **Хранение в KV (`KV_CREDENTIALS`):**
 
 | KV ключ | Содержимое | Назначение |
 |---------|------------|------------|
-| `proxy:namecheap` | `{"url": "http://user:pass@IP:PORT", "ip": "IP"}` | Squid proxy конфиг |
+| `proxy:namecheap` | `{"relay_url": "https://relay.301.st", "relay_auth": "Basic base64(...)", "ip": "51.68.21.133"}` | Relay конфиг |
 
 ```bash
 wrangler kv:key put --binding=KV_CREDENTIALS "proxy:namecheap" \
-  '{"url":"http://apiuser:PASSWORD@51.68.21.133:8443","ip":"51.68.21.133"}'
+  '{"relay_url":"https://relay.301.st","relay_auth":"Basic YXBpdXNlcjpQQVNTV09SRA==","ip":"51.68.21.133"}'
 ```
 
 **IP Whitelist:**
@@ -555,14 +557,14 @@ Namecheap требует whitelist IP адресов. При ошибке `ip_no
 1. UI вызывает `GET /integrations/namecheap/proxy-ips` → показывает IP пользователю
 2. Пользователь добавляет IP в Namecheap → Profile → Tools → API Access → Whitelisted IPs
 3. Пользователь вводит credentials → `POST /integrations/namecheap/init`
-4. CF Worker → Squid proxy → Namecheap API (верификация)
+4. CF Worker → Traefik relay (relay.301.st) → Namecheap API (верификация)
 5. При успехе — ключ шифруется и сохраняется в KV_CREDENTIALS + D1 (через `storage.ts`)
 
 ### 3.2 GET /integrations/namecheap/proxy-ips
 
 Получение списка IP-адресов прокси для добавления в whitelist Namecheap.
 
-**Источник данных:** IP из KV ключа `proxy:namecheap`.
+**Источник данных:** IP из KV ключа `proxy:namecheap` (поле `ip` из relay-конфига).
 
 **Требует:** `Authorization: Bearer <access_token>`
 
