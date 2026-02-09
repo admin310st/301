@@ -514,51 +514,27 @@ curl -X POST https://api.301.st/integrations/namecheap/init \
 | `ip_not_whitelisted` | 400 | IP не в whitelist Namecheap |
 | `namecheap_key_already_exists` | 409 | Ключ для этого username уже существует |
 
-**Архитектура прокси (Gateway):**
+**Архитектура прокси (Squid):**
 
-Cloudflare Workers не поддерживают стандартные HTTP-прокси. Для работы с Namecheap API используется промежуточный gateway-сервис на VPS (`src/system/gateway.py`).
+Для работы с Namecheap API используется собственный Squid forward proxy на VPS (`51.68.21.133:8443`). Cloudflare Workers подключаются через расширение `cf.proxy` в `fetch()`.
 
-- **Gateway** принимает POST с URL Namecheap API в body, проксирует через HTTP-прокси
-- **Fallback** между прокси (2-3 шт.) реализован внутри gateway
-- **ClientIp** в URL подставляется gateway автоматически (IP текущего прокси)
-- Пользователь должен добавить IP всех прокси в whitelist Namecheap
-
-**Режимы деплоя gateway:**
-
-| Режим | Схема | KV конфиг |
-|-------|-------|-----------|
-| Прямой | `CF Worker → gateway.py:8080` | `["VPS_IP:8080:gw_user:gw_pass"]` |
-| С nginx | `CF Worker → nginx:443 → gateway.py:8080` | `["gw.example.com:443:gw_user:gw_pass"]` |
+- **Squid** — стандартный forward proxy с Basic Auth и whitelist доменов (`namecheap.com`, `namesilo.com`)
+- **ClientIp** в URL подставляется автоматически (IP Squid сервера)
+- Пользователь должен добавить IP Squid в whitelist Namecheap
 
 ```
-# Прямой (без TLS):
-CF Worker --HTTP--> VPS:8080 (gateway.py) --> Proxy 1/2/3 --> Namecheap API
-
-# С nginx (TLS, рекомендуется для прода):
-CF Worker --HTTPS--> nginx:443 --> 127.0.0.1:8080 (gateway.py) --> Proxy 1/2/3 --> Namecheap API
+CF Worker --fetch(cf.proxy)--> Squid (51.68.21.133:8443) --> Namecheap API
 ```
-
-> CF Worker автоматически выбирает `https://` для порта 443, `http://` для остальных.
 
 **Хранение в KV (`KV_CREDENTIALS`):**
 
 | KV ключ | Содержимое | Назначение |
 |---------|------------|------------|
-| `proxies:namecheap` | `["host:port:user:pass"]` | Gateway credentials для CF Worker |
-| `proxy-ips:namecheap` | `["185.218.1.220", ...]` | IP прокси для показа пользователю |
+| `proxy:namecheap` | `{"url": "http://user:pass@IP:PORT", "ip": "IP"}` | Squid proxy конфиг |
 
 ```bash
-# Вариант A: прямой запуск (python3 gateway.py)
-wrangler kv:key put --binding=KV_CREDENTIALS "proxies:namecheap" \
-  '["203.0.113.10:8080:gw_user:gw_secret_pass"]'
-
-# Вариант B: через nginx с TLS
-wrangler kv:key put --binding=KV_CREDENTIALS "proxies:namecheap" \
-  '["gw.example.com:443:gw_user:gw_secret_pass"]'
-
-# Proxy IPs для whitelist (показываются через GET /proxy-ips)
-wrangler kv:key put --binding=KV_CREDENTIALS "proxy-ips:namecheap" \
-  '["185.218.1.220", "185.218.2.100", "172.252.57.50"]'
+wrangler kv:key put --binding=KV_CREDENTIALS "proxy:namecheap" \
+  '{"url":"http://apiuser:PASSWORD@51.68.21.133:8443","ip":"51.68.21.133"}'
 ```
 
 **IP Whitelist:**
@@ -570,7 +546,7 @@ Namecheap требует whitelist IP адресов. При ошибке `ip_no
   "ok": false,
   "error": "ip_not_whitelisted",
   "message": "Add these IPs to your Namecheap API whitelist",
-  "ips": "185.218.1.220, 185.218.2.100, 172.252.57.50"
+  "ips": "51.68.21.133"
 }
 ```
 
@@ -579,14 +555,14 @@ Namecheap требует whitelist IP адресов. При ошибке `ip_no
 1. UI вызывает `GET /integrations/namecheap/proxy-ips` → показывает IP пользователю
 2. Пользователь добавляет IP в Namecheap → Profile → Tools → API Access → Whitelisted IPs
 3. Пользователь вводит credentials → `POST /integrations/namecheap/init`
-4. CF Worker → gateway (VPS) → proxy → Namecheap API (верификация)
-5. При успехе — ключ сохраняется в D1
+4. CF Worker → Squid proxy → Namecheap API (верификация)
+5. При успехе — ключ шифруется и сохраняется в KV_CREDENTIALS + D1 (через `storage.ts`)
 
 ### 3.2 GET /integrations/namecheap/proxy-ips
 
 Получение списка IP-адресов прокси для добавления в whitelist Namecheap.
 
-**Источник данных:** KV ключ `proxy-ips:namecheap` (хранится отдельно от gateway credentials).
+**Источник данных:** IP из KV ключа `proxy:namecheap`.
 
 **Требует:** `Authorization: Bearer <access_token>`
 
@@ -602,7 +578,7 @@ curl -X GET https://api.301.st/integrations/namecheap/proxy-ips \
 ```json
 {
   "ok": true,
-  "ips": ["185.218.1.220", "185.218.2.100", "172.252.57.50"]
+  "ips": ["51.68.21.133"]
 }
 ```
 
