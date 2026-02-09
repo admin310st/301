@@ -4,60 +4,61 @@
 // - проверка валидности ключа
 // - список доменов → для UI 301
 // - смена NS на указанные (из CF зоны)
-// Работает через Squid прокси (cf.proxy), формат Namecheap = XML
+// Работает через Traefik relay (relay.301.st), формат Namecheap = XML
 
 import type { Env } from "../../../types/worker";
 
 // ============================================================
-// PROXY TYPES & HELPERS
+// RELAY TYPES & HELPERS
 // ============================================================
 
-export interface SquidProxyConfig {
-  url: string;
-  ip: string;
+export interface RelayConfig {
+  relay_url: string;   // "https://relay.301.st"
+  relay_auth: string;  // "Basic base64(apiuser:pass)"
+  ip: string;          // "51.68.21.133" (для ClientIp в Namecheap)
 }
 
 /**
- * Получает конфиг Squid прокси из KV
- * KV key: "proxy:namecheap" → { "url": "http://user:pass@IP:PORT", "ip": "IP" }
+ * Получает конфиг relay из KV
+ * KV key: "proxy:namecheap" → { "relay_url": "...", "relay_auth": "...", "ip": "..." }
  */
-export async function getProxyConfig(env: Env): Promise<SquidProxyConfig | null> {
-  const config = await env.KV_CREDENTIALS.get("proxy:namecheap", "json") as SquidProxyConfig | null;
-  if (!config || !config.url || !config.ip) return null;
+export async function getRelayConfig(env: Env): Promise<RelayConfig | null> {
+  const config = await env.KV_CREDENTIALS.get("proxy:namecheap", "json") as RelayConfig | null;
+  if (!config || !config.relay_url || !config.relay_auth || !config.ip) return null;
   return config;
 }
 
 /**
- * Получает IP прокси для whitelist в Namecheap
+ * Получает IP relay-сервера для whitelist в Namecheap
  */
-export async function getProxyIps(env: Env): Promise<string[]> {
-  const config = await getProxyConfig(env);
+export async function getRelayIps(env: Env): Promise<string[]> {
+  const config = await getRelayConfig(env);
   return config ? [config.ip] : [];
 }
 
 /**
- * Выполняет GET-запрос через Squid прокси (cf.proxy)
+ * Выполняет GET-запрос через Traefik relay
  */
-async function fetchViaSquidProxy(
-  proxyUrl: string,
-  targetUrl: string,
+async function fetchViaRelay(
+  relayBaseUrl: string,
+  relayAuth: string,
+  targetPath: string,
   timeoutMs = 10_000
 ): Promise<{ ok: boolean; body?: string; error?: string }> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(targetUrl, {
+    const response = await fetch(`${relayBaseUrl}${targetPath}`, {
       method: "GET",
       signal: controller.signal,
-      // @ts-expect-error cf.proxy is a Cloudflare Workers extension
-      cf: { proxy: proxyUrl },
+      headers: { Authorization: relayAuth },
     });
 
     clearTimeout(timeoutId);
 
     if (!response.ok) {
-      return { ok: false, error: `proxy_http_${response.status}` };
+      return { ok: false, error: `relay_http_${response.status}` };
     }
 
     const body = await response.text();
@@ -66,19 +67,17 @@ async function fetchViaSquidProxy(
     clearTimeout(timeoutId);
 
     if (err instanceof Error && err.name === "AbortError") {
-      return { ok: false, error: "proxy_timeout" };
+      return { ok: false, error: "relay_timeout" };
     }
 
     const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `proxy_error: ${message}` };
+    return { ok: false, error: `relay_error: ${message}` };
   }
 }
 
 // ============================================================
 // NAMECHEAP API HELPERS
 // ============================================================
-
-const NAMECHEAP_API_URL = "https://api.namecheap.com/xml.response";
 
 /** Секреты Namecheap (расшифрованные) */
 export interface NamecheapSecrets {
@@ -87,9 +86,9 @@ export interface NamecheapSecrets {
 }
 
 /**
- * Строит URL для команды Namecheap API
+ * Строит path+query для команды Namecheap API (без host)
  */
-export function buildNamecheapUrl(
+export function buildNamecheapPath(
   username: string,
   apiKey: string,
   clientIp: string,
@@ -105,7 +104,7 @@ export function buildNamecheapUrl(
     ...extraParams,
   });
 
-  return `${NAMECHEAP_API_URL}?${params.toString()}`;
+  return `/xml.response?${params.toString()}`;
 }
 
 // Внутренний helper: XML → JS
@@ -144,13 +143,13 @@ export async function namecheapVerifyKey(
   env: Env,
   secrets: NamecheapSecrets
 ): Promise<{ ok: boolean; error?: string; balance?: string; proxyIp?: string }> {
-  const proxy = await getProxyConfig(env);
-  if (!proxy) {
-    return { ok: false, error: "no_proxy_configured" };
+  const relay = await getRelayConfig(env);
+  if (!relay) {
+    return { ok: false, error: "no_relay_configured" };
   }
 
-  const url = buildNamecheapUrl(secrets.username, secrets.apiKey, proxy.ip, "namecheap.users.getBalances");
-  const result = await fetchViaSquidProxy(proxy.url, url);
+  const path = buildNamecheapPath(secrets.username, secrets.apiKey, relay.ip, "namecheap.users.getBalances");
+  const result = await fetchViaRelay(relay.relay_url, relay.relay_auth, path);
 
   if (!result.ok) {
     return { ok: false, error: result.error };
@@ -164,7 +163,7 @@ export async function namecheapVerifyKey(
     return {
       ok: true,
       balance: balanceMatch?.[1],
-      proxyIp: proxy.ip,
+      proxyIp: relay.ip,
     };
   }
 
@@ -188,13 +187,13 @@ export async function namecheapListDomains(
   env: Env,
   secrets: NamecheapSecrets
 ): Promise<{ ok: boolean; domains?: { domain: string; expires: string }[]; error?: string }> {
-  const proxy = await getProxyConfig(env);
-  if (!proxy) {
-    return { ok: false, error: "no_proxy_configured" };
+  const relay = await getRelayConfig(env);
+  if (!relay) {
+    return { ok: false, error: "no_relay_configured" };
   }
 
-  const url = buildNamecheapUrl(secrets.username, secrets.apiKey, proxy.ip, "namecheap.domains.getList");
-  const result = await fetchViaSquidProxy(proxy.url, url);
+  const path = buildNamecheapPath(secrets.username, secrets.apiKey, relay.ip, "namecheap.domains.getList");
+  const result = await fetchViaRelay(relay.relay_url, relay.relay_auth, path);
 
   if (!result.ok) {
     return { ok: false, error: result.error };
@@ -231,16 +230,16 @@ export async function namecheapSetNs(
     return { ok: false, error: "no_nameservers" };
   }
 
-  const proxy = await getProxyConfig(env);
-  if (!proxy) {
-    return { ok: false, error: "no_proxy_configured" };
+  const relay = await getRelayConfig(env);
+  if (!relay) {
+    return { ok: false, error: "no_relay_configured" };
   }
 
   const { sld, tld } = parseDomain(fqdn);
-  const url = buildNamecheapUrl(
+  const path = buildNamecheapPath(
     secrets.username,
     secrets.apiKey,
-    proxy.ip,
+    relay.ip,
     "namecheap.domains.dns.setCustom",
     {
       SLD: sld,
@@ -248,7 +247,7 @@ export async function namecheapSetNs(
       Nameservers: nameservers.join(","),
     }
   );
-  const result = await fetchViaSquidProxy(proxy.url, url);
+  const result = await fetchViaRelay(relay.relay_url, relay.relay_auth, path);
 
   if (!result.ok) {
     return { ok: false, error: result.error };

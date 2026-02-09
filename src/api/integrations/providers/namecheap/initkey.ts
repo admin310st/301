@@ -4,7 +4,7 @@ import { Context } from "hono";
 import { Env } from "../../../types/worker";
 import { requireOwner } from "../../../lib/auth";
 import { createKey, findKeyByExternalId } from "../../keys/storage";
-import { getProxyIps, namecheapVerifyKey } from "./namecheap";
+import { getRelayIps, namecheapVerifyKey } from "./namecheap";
 import type { NamecheapSecrets } from "./namecheap";
 
 // TYPES
@@ -28,7 +28,7 @@ interface InitKeyRequest {
  *
  * Flow:
  * 1. Validate input
- * 2. Verify key via namecheap.users.getBalances (with Squid proxy)
+ * 2. Verify key via namecheap.users.getBalances (with relay proxy)
  * 3. Store via storage.ts (encrypt → KV, metadata → D1)
  * 4. Return success
  */
@@ -73,7 +73,7 @@ export async function handleInitKeyNamecheap(c: Context<{ Bindings: Env }>): Pro
   if (!verification.ok) {
     // Специфичные сообщения для UI
     if (verification.error === "ip_not_whitelisted") {
-      const proxyIps = (await getProxyIps(env)).join(", ");
+      const proxyIps = (await getRelayIps(env)).join(", ");
 
       return c.json({
         ok: false,

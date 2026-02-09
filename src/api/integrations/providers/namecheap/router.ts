@@ -2,7 +2,7 @@
 
 import { Hono } from "hono";
 import { handleInitKeyNamecheap } from "./initkey";
-import { namecheapListDomains, namecheapSetNs, getProxyIps } from "./namecheap";
+import { namecheapListDomains, namecheapSetNs, getRelayIps } from "./namecheap";
 import type { NamecheapSecrets } from "./namecheap";
 import { requireOwner } from "../../../lib/auth";
 import { getDecryptedKey, verifyKeyOwnership } from "../../keys/storage";
@@ -23,7 +23,7 @@ router.get("/proxy-ips", async (c) => {
     return c.json({ ok: false, error: "owner_required" }, 403);
   }
 
-  const ips = await getProxyIps(env);
+  const ips = await getRelayIps(env);
   return c.json({ ok: true, ips });
 });
 
