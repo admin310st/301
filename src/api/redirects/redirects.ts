@@ -17,6 +17,75 @@ import {
   type TemplateParams,
 } from "./templates";
 import { getPreset, expandPreset, listPresets, type PresetParams } from "./presets";
+import { getDecryptedKey } from "../integrations/keys/storage";
+
+// ============================================================
+// CF DNS HELPER
+// ============================================================
+
+const CF_API_BASE = "https://api.cloudflare.com/client/v4";
+
+/**
+ * При создании T3/T4 canonical redirect — автоматически создаём DNS A-record для www.
+ * Без этой записи CF Redirect Rule не сработает (запрос не дойдёт до CF).
+ * Тихо пропускаем если запись уже существует (CF вернёт 81057).
+ */
+async function ensureWwwDNS(
+  env: Env,
+  zoneId: number,
+  sourceDomain: string,
+  accountId: number
+): Promise<{ created: boolean; error?: string }> {
+  const apex = sourceDomain.replace(/^www\./, "");
+  const wwwName = `www.${apex}`;
+
+  // Получаем zone и token
+  const zone = await env.DB301.prepare(
+    `SELECT cf_zone_id, key_id FROM zones WHERE id = ? AND account_id = ?`
+  )
+    .bind(zoneId, accountId)
+    .first<{ cf_zone_id: string; key_id: number }>();
+
+  if (!zone?.cf_zone_id || !zone.key_id) return { created: false };
+
+  let keyData;
+  try {
+    keyData = await getDecryptedKey(env, zone.key_id);
+  } catch {
+    return { created: false, error: "key_decrypt_failed" };
+  }
+  if (!keyData) return { created: false, error: "key_invalid" };
+
+  const token = keyData.secrets.token;
+
+  try {
+    const res = await fetch(`${CF_API_BASE}/zones/${zone.cf_zone_id}/dns_records`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        type: "A",
+        name: wwwName,
+        content: "192.0.2.1",
+        proxied: true,
+        ttl: 1,
+      }),
+    });
+
+    const data = (await res.json()) as { success: boolean; errors?: Array<{ code: number; message: string }> };
+
+    if (data.success) return { created: true };
+
+    // 81057 = "Record already exists" — не ошибка
+    if (data.errors?.some((e) => e.code === 81057)) return { created: false };
+
+    return { created: false, error: data.errors?.[0]?.message || "dns_create_failed" };
+  } catch {
+    return { created: false, error: "cf_api_error" };
+  }
+}
 
 // ============================================================
 // TYPES
@@ -588,6 +657,13 @@ export async function handleCreateRedirect(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: false, error: "create_failed" }, 500);
   }
 
+  // T3/T4 canonical: автоматически создаём www DNS A-record
+  let wwwDnsCreated: boolean | undefined;
+  if (template_id === "T3" || template_id === "T4") {
+    const dns = await ensureWwwDNS(env, domainCheck.domain.zone_id, domainCheck.domain.domain_name, auth.account_id);
+    wwwDnsCreated = dns.created;
+  }
+
   // Обновляем роль домена на 'donor' только для шаблонов, меняющих трафик
   // T3/T4 (www canonical) не меняют роль
   let newDomainRole: string | undefined;
@@ -615,6 +691,7 @@ export async function handleCreateRedirect(c: Context<{ Bindings: Env }>) {
       sync_status: "pending",
       created_at: result.created_at,
     },
+    www_dns_created: wwwDnsCreated,
     zone_limit: {
       used: limitCheck.used + 1,
       max: limitCheck.max,
@@ -701,6 +778,14 @@ export async function handleCreatePreset(c: Context<{ Bindings: Env }>) {
     }
   }
 
+  // T3/T4 в preset: автоматически создаём www DNS A-record
+  const hasCanonical = expandedRules.some((r) => r.template_id === "T3" || r.template_id === "T4");
+  let wwwDnsCreated: boolean | undefined;
+  if (hasCanonical) {
+    const dns = await ensureWwwDNS(env, domainCheck.domain.zone_id, domainCheck.domain.domain_name, auth.account_id);
+    wwwDnsCreated = dns.created;
+  }
+
   // Обновляем роль домена на 'donor' только если есть шаблоны, меняющие трафик
   // T3/T4 (www canonical) не меняют роль
   let newDomainRole: string | undefined;
@@ -715,6 +800,7 @@ export async function handleCreatePreset(c: Context<{ Bindings: Env }>) {
 
   return c.json({
     ok: true,
+    www_dns_created: wwwDnsCreated,
     preset_id,
     preset_name: preset.name,
     created_count: createdIds.length,
@@ -832,38 +918,77 @@ export async function handleDeleteRedirect(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: false, error: check.error }, 404);
   }
 
-  const domainId = check.redirect.domain_id;
+  const redirect = check.redirect;
+  const domainId = redirect.domain_id;
+  const presetId = redirect.preset_id;
 
-  await env.DB301.prepare(
-    `DELETE FROM redirect_rules WHERE id = ? AND account_id = ?`
-  )
-    .bind(redirectId, auth.account_id)
-    .run();
+  // Если redirect часть preset — удаляем ВСЕ правила этого preset для данного домена
+  // Preset — атомарная единица: нельзя оставить T3 без T1
+  let deletedIds: number[] = [redirectId];
 
-  // Проверяем остались ли donor-редиректы у домена (T1, T5, T6, T7)
-  // T3/T4 (www canonical) не влияют на роль
-  const remainingDonor = await env.DB301.prepare(
-    `SELECT COUNT(*) as count FROM redirect_rules
-     WHERE domain_id = ? AND template_id IN ('T1', 'T5', 'T6', 'T7')`
+  if (presetId) {
+    const presetRules = await env.DB301.prepare(
+      `SELECT id FROM redirect_rules
+       WHERE domain_id = ? AND preset_id = ? AND account_id = ?`
+    )
+      .bind(domainId, presetId, auth.account_id)
+      .all<{ id: number }>();
+
+    deletedIds = (presetRules.results || []).map((r) => r.id);
+
+    await env.DB301.prepare(
+      `DELETE FROM redirect_rules
+       WHERE domain_id = ? AND preset_id = ? AND account_id = ?`
+    )
+      .bind(domainId, presetId, auth.account_id)
+      .run();
+  } else {
+    await env.DB301.prepare(
+      `DELETE FROM redirect_rules WHERE id = ? AND account_id = ?`
+    )
+      .bind(redirectId, auth.account_id)
+      .run();
+  }
+
+  // Проверяем роль домена после удаления
+  // Только donor-домены (role='donor') сбрасываются в 'reserve'
+  // Primary/acceptor домены сохраняют роль
+  const domain = await env.DB301.prepare(
+    `SELECT role FROM domains WHERE id = ?`
   )
     .bind(domainId)
-    .first<{ count: number }>();
+    .first<{ role: string }>();
 
   let newRole: string | undefined;
 
-  // Если donor-редиректов больше нет — возвращаем роль в 'reserve'
-  if (!remainingDonor || remainingDonor.count === 0) {
-    await env.DB301.prepare(
-      `UPDATE domains SET role = 'reserve', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+  if (domain?.role === "donor") {
+    const remainingDonor = await env.DB301.prepare(
+      `SELECT COUNT(*) as count FROM redirect_rules
+       WHERE domain_id = ? AND template_id IN ('T1', 'T5', 'T6', 'T7')`
     )
       .bind(domainId)
-      .run();
-    newRole = "reserve";
+      .first<{ count: number }>();
+
+    if (!remainingDonor || remainingDonor.count === 0) {
+      // Также очищаем оставшиеся T3/T4 если больше нет donor-правил
+      await env.DB301.prepare(
+        `DELETE FROM redirect_rules WHERE domain_id = ? AND template_id IN ('T3', 'T4')`
+      )
+        .bind(domainId)
+        .run();
+
+      await env.DB301.prepare(
+        `UPDATE domains SET role = 'reserve', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+      )
+        .bind(domainId)
+        .run();
+      newRole = "reserve";
+    }
   }
 
   return c.json({
     ok: true,
-    deleted_id: redirectId,
+    deleted_ids: deletedIds,
     domain_id: domainId,
     domain_role: newRole,
   });

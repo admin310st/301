@@ -545,9 +545,9 @@ export async function handleBatchCreateZones(c: Context<{ Bindings: Env }>) {
         domain,
         zone_id: existingD1Zone.id,
         cf_zone_id: cfZone.id,
-        ns: cfZone.name_servers,
+        name_servers: cfZone.name_servers,
         status: "existing",
-      } as any);
+      });
       continue;
     }
 
