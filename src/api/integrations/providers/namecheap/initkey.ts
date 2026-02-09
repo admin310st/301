@@ -2,9 +2,10 @@
 
 import { Context } from "hono";
 import { Env } from "../../../types/worker";
-import { encrypt } from "../../../lib/crypto";
 import { requireOwner } from "../../../lib/auth";
+import { createKey, findKeyByExternalId } from "../../keys/storage";
 import { getProxyIps, namecheapVerifyKey } from "./namecheap";
+import type { NamecheapSecrets } from "./namecheap";
 
 // TYPES
 
@@ -27,10 +28,9 @@ interface InitKeyRequest {
  *
  * Flow:
  * 1. Validate input
- * 2. Get proxies from KV
- * 3. Verify key via namecheap.users.getBalances (with proxy fallback)
- * 4. Encrypt & store in D1 + KV
- * 5. Return success
+ * 2. Verify key via namecheap.users.getBalances (with Squid proxy)
+ * 3. Store via storage.ts (encrypt → KV, metadata → D1)
+ * 4. Return success
  */
 export async function handleInitKeyNamecheap(c: Context<{ Bindings: Env }>): Promise<Response> {
   const env = c.env;
@@ -61,16 +61,14 @@ export async function handleInitKeyNamecheap(c: Context<{ Bindings: Env }>): Pro
 
   const { account_id: accountId } = auth;
 
-  // 3. Encrypt credentials for verification
-  const secrets = {
+  // 3. Prepare secrets for verification
+  const secrets: NamecheapSecrets = {
     apiKey: api_key.trim(),
     username: username.trim(),
   };
 
-  const encrypted = await encrypt(secrets, env.MASTER_SECRET);
-
   // 4. Verify key via Namecheap API
-  const verification = await namecheapVerifyKey(env, encrypted);
+  const verification = await namecheapVerifyKey(env, secrets);
 
   if (!verification.ok) {
     // Специфичные сообщения для UI
@@ -92,12 +90,7 @@ export async function handleInitKeyNamecheap(c: Context<{ Bindings: Env }>): Pro
   }
 
   // 5. Check for duplicate (same username for this account)
-  const existing = await env.DB301.prepare(
-    `SELECT id FROM account_keys
-     WHERE account_id = ? AND provider = 'namecheap' AND external_account_id = ?`
-  )
-    .bind(accountId, username.trim().toLowerCase())
-    .first();
+  const existing = await findKeyByExternalId(env, accountId, "namecheap", username.trim().toLowerCase());
 
   if (existing) {
     return c.json({
@@ -107,28 +100,25 @@ export async function handleInitKeyNamecheap(c: Context<{ Bindings: Env }>): Pro
     }, 409);
   }
 
-  // 6. Store in D1
+  // 6. Store via storage.ts (encrypt → KV_CREDENTIALS, metadata → D1)
   const tokenName = key_alias?.trim() || `namecheap-${username}`;
 
-  const result = await env.DB301.prepare(
-    `INSERT INTO account_keys
-      (account_id, provider, name, key_encrypted, external_account_id, status, created_at, updated_at)
-     VALUES (?, 'namecheap', ?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-  )
-    .bind(
-      accountId,
-      tokenName,
-      JSON.stringify(encrypted),
-      username.trim().toLowerCase()
-    )
-    .run();
+  const result = await createKey(env, {
+    account_id: accountId,
+    provider: "namecheap",
+    key_alias: tokenName,
+    secrets,
+    external_account_id: username.trim().toLowerCase(),
+  });
 
-  const keyId = result.meta?.last_row_id;
+  if (!result.ok) {
+    return c.json({ ok: false, error: result.error }, 500);
+  }
 
   // 7. Success
   return c.json({
     ok: true,
-    key_id: keyId,
+    key_id: result.key_id,
     message: "Namecheap integration configured successfully",
     balance: verification.balance,
   });

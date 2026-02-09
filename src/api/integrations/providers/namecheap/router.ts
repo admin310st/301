@@ -3,7 +3,9 @@
 import { Hono } from "hono";
 import { handleInitKeyNamecheap } from "./initkey";
 import { namecheapListDomains, namecheapSetNs, getProxyIps } from "./namecheap";
+import type { NamecheapSecrets } from "./namecheap";
 import { requireOwner } from "../../../lib/auth";
+import { getDecryptedKey, verifyKeyOwnership } from "../../keys/storage";
 import type { Env } from "../../../types/worker";
 
 const router = new Hono<{ Bindings: Env }>();
@@ -40,20 +42,26 @@ router.get("/domains", async (c) => {
     return c.json({ ok: false, error: "key_id_required" }, 400);
   }
 
-  // Fetch key from DB
-  const key = await env.DB301.prepare(
-    `SELECT key_encrypted FROM account_keys
-     WHERE id = ? AND account_id = ? AND provider = 'namecheap' AND status = 'active'`
-  )
-    .bind(keyId, auth.account_id)
-    .first<{ key_encrypted: string }>();
-
-  if (!key) {
+  // Verify ownership
+  const isOwner = await verifyKeyOwnership(env, keyId, auth.account_id);
+  if (!isOwner) {
     return c.json({ ok: false, error: "key_not_found" }, 404);
   }
 
-  const encrypted = JSON.parse(key.key_encrypted);
-  const result = await namecheapListDomains(env, encrypted);
+  // Decrypt key via storage.ts
+  let secrets: NamecheapSecrets;
+  try {
+    const decrypted = await getDecryptedKey(env, keyId);
+    if (!decrypted) {
+      return c.json({ ok: false, error: "key_not_found" }, 404);
+    }
+    secrets = decrypted.secrets as NamecheapSecrets;
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ ok: false, error: message }, 400);
+  }
+
+  const result = await namecheapListDomains(env, secrets);
 
   if (!result.ok) {
     return c.json({ ok: false, error: result.error }, 500);
@@ -94,20 +102,26 @@ router.post("/set-ns", async (c) => {
     return c.json({ ok: false, error: "nameservers_required" }, 400);
   }
 
-  // Fetch key from DB
-  const key = await env.DB301.prepare(
-    `SELECT key_encrypted FROM account_keys
-     WHERE id = ? AND account_id = ? AND provider = 'namecheap' AND status = 'active'`
-  )
-    .bind(key_id, auth.account_id)
-    .first<{ key_encrypted: string }>();
-
-  if (!key) {
+  // Verify ownership
+  const isOwner = await verifyKeyOwnership(env, key_id, auth.account_id);
+  if (!isOwner) {
     return c.json({ ok: false, error: "key_not_found" }, 404);
   }
 
-  const encrypted = JSON.parse(key.key_encrypted);
-  const result = await namecheapSetNs(env, encrypted, domain, nameservers);
+  // Decrypt key via storage.ts
+  let secrets: NamecheapSecrets;
+  try {
+    const decrypted = await getDecryptedKey(env, key_id);
+    if (!decrypted) {
+      return c.json({ ok: false, error: "key_not_found" }, 404);
+    }
+    secrets = decrypted.secrets as NamecheapSecrets;
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ ok: false, error: message }, 400);
+  }
+
+  const result = await namecheapSetNs(env, secrets, domain, nameservers);
 
   if (!result.ok) {
     return c.json({ ok: false, error: result.error }, 400);

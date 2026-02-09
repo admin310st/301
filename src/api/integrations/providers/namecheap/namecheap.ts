@@ -4,90 +4,54 @@
 // - проверка валидности ключа
 // - список доменов → для UI 301
 // - смена NS на указанные (из CF зоны)
-// Работает через прокси, формат Namecheap = XML
+// Работает через Squid прокси (cf.proxy), формат Namecheap = XML
 
-import { decrypt } from "../../../lib/crypto";
 import type { Env } from "../../../types/worker";
-import type { ProviderKeyData } from "../../keys/schema";
 
 // ============================================================
 // PROXY TYPES & HELPERS
 // ============================================================
 
-export interface ProxyConfig {
+export interface SquidProxyConfig {
+  url: string;
   ip: string;
-  port: number;
-  user: string;
-  pass: string;
 }
 
 /**
- * Парсит строку прокси формата "IP:PORT:USER:PASS"
+ * Получает конфиг Squid прокси из KV
+ * KV key: "proxy:namecheap" → { "url": "http://user:pass@IP:PORT", "ip": "IP" }
  */
-export function parseProxy(proxyString: string): ProxyConfig | null {
-  const parts = proxyString.split(":");
-  if (parts.length !== 4) return null;
-
-  const [ip, portStr, user, pass] = parts;
-  const port = parseInt(portStr, 10);
-
-  if (!ip || isNaN(port) || !user || !pass) return null;
-
-  return { ip, port, user, pass };
+export async function getProxyConfig(env: Env): Promise<SquidProxyConfig | null> {
+  const config = await env.KV_CREDENTIALS.get("proxy:namecheap", "json") as SquidProxyConfig | null;
+  if (!config || !config.url || !config.ip) return null;
+  return config;
 }
 
 /**
- * Получает список прокси из KV
- */
-export async function getProxies(env: Env): Promise<ProxyConfig[]> {
-  const raw = await env.KV_CREDENTIALS.get("proxies:namecheap", "json") as string[] | null;
-
-  if (!raw || !Array.isArray(raw)) {
-    return [];
-  }
-
-  const proxies: ProxyConfig[] = [];
-  for (const str of raw) {
-    const parsed = parseProxy(str);
-    if (parsed) proxies.push(parsed);
-  }
-
-  return proxies;
-}
-
-/**
- * Получает список IP прокси для whitelist в Namecheap
- * Хранятся отдельно от gateway credentials
+ * Получает IP прокси для whitelist в Namecheap
  */
 export async function getProxyIps(env: Env): Promise<string[]> {
-  const ips = await env.KV_CREDENTIALS.get("proxy-ips:namecheap", "json") as string[] | null;
-  return ips && Array.isArray(ips) ? ips : [];
+  const config = await getProxyConfig(env);
+  return config ? [config.ip] : [];
 }
 
 /**
- * Выполняет запрос через прокси с Basic Auth
+ * Выполняет GET-запрос через Squid прокси (cf.proxy)
  */
-export async function fetchViaProxy(
-  proxy: ProxyConfig,
+async function fetchViaSquidProxy(
+  proxyUrl: string,
   targetUrl: string,
-  timeoutMs: number = 10000
+  timeoutMs = 10_000
 ): Promise<{ ok: boolean; body?: string; error?: string }> {
-  const scheme = proxy.port === 443 ? "https" : "http";
-  const proxyUrl = `${scheme}://${proxy.ip}:${proxy.port}`;
-  const auth = btoa(`${proxy.user}:${proxy.pass}`);
-
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(proxyUrl, {
-      method: "POST",
-      headers: {
-        "Authorization": `Basic ${auth}`,
-        "Content-Type": "text/plain",
-      },
-      body: targetUrl,
+    const response = await fetch(targetUrl, {
+      method: "GET",
       signal: controller.signal,
+      // @ts-expect-error cf.proxy is a Cloudflare Workers extension
+      cf: { proxy: proxyUrl },
     });
 
     clearTimeout(timeoutId);
@@ -98,40 +62,16 @@ export async function fetchViaProxy(
 
     const body = await response.text();
     return { ok: true, body };
-  } catch (err: any) {
+  } catch (err: unknown) {
     clearTimeout(timeoutId);
 
-    if (err.name === "AbortError") {
+    if (err instanceof Error && err.name === "AbortError") {
       return { ok: false, error: "proxy_timeout" };
     }
 
-    return { ok: false, error: `proxy_error: ${err.message}` };
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `proxy_error: ${message}` };
   }
-}
-
-/**
- * Выполняет запрос с fallback по списку прокси
- */
-export async function fetchWithProxyFallback(
-  proxies: ProxyConfig[],
-  buildUrl: (proxyIp: string) => string
-): Promise<{ ok: boolean; body?: string; proxyUsed?: ProxyConfig; error?: string }> {
-  if (proxies.length === 0) {
-    return { ok: false, error: "no_proxies_configured" };
-  }
-
-  for (const proxy of proxies) {
-    const url = buildUrl(proxy.ip);
-    const result = await fetchViaProxy(proxy, url);
-
-    if (result.ok) {
-      return { ok: true, body: result.body, proxyUsed: proxy };
-    }
-
-    console.warn(`[Namecheap] Proxy ${proxy.ip}:${proxy.port} failed: ${result.error}`);
-  }
-
-  return { ok: false, error: "all_proxies_failed" };
 }
 
 // ============================================================
@@ -139,6 +79,12 @@ export async function fetchWithProxyFallback(
 // ============================================================
 
 const NAMECHEAP_API_URL = "https://api.namecheap.com/xml.response";
+
+/** Секреты Namecheap (расшифрованные) */
+export interface NamecheapSecrets {
+  apiKey: string;
+  username: string;
+}
 
 /**
  * Строит URL для команды Namecheap API
@@ -196,15 +142,15 @@ function parseDomain(zoneName: string): { sld: string; tld: string } {
 // 1) Проверка ключа Namecheap
 export async function namecheapVerifyKey(
   env: Env,
-  encrypted: any
+  secrets: NamecheapSecrets
 ): Promise<{ ok: boolean; error?: string; balance?: string; proxyIp?: string }> {
-  const data = await decrypt<ProviderKeyData>(encrypted, env.MASTER_SECRET);
-  const proxies = await getProxies(env);
+  const proxy = await getProxyConfig(env);
+  if (!proxy) {
+    return { ok: false, error: "no_proxy_configured" };
+  }
 
-  const result = await fetchWithProxyFallback(
-    proxies,
-    (proxyIp) => buildNamecheapUrl(data.username, data.apiKey, proxyIp, "namecheap.users.getBalances")
-  );
+  const url = buildNamecheapUrl(secrets.username, secrets.apiKey, proxy.ip, "namecheap.users.getBalances");
+  const result = await fetchViaSquidProxy(proxy.url, url);
 
   if (!result.ok) {
     return { ok: false, error: result.error };
@@ -218,7 +164,7 @@ export async function namecheapVerifyKey(
     return {
       ok: true,
       balance: balanceMatch?.[1],
-      proxyIp: result.proxyUsed?.ip,
+      proxyIp: proxy.ip,
     };
   }
 
@@ -240,15 +186,15 @@ export async function namecheapVerifyKey(
 // 2) Получение списка доменов
 export async function namecheapListDomains(
   env: Env,
-  encrypted: any
+  secrets: NamecheapSecrets
 ): Promise<{ ok: boolean; domains?: { domain: string; expires: string }[]; error?: string }> {
-  const data = await decrypt<ProviderKeyData>(encrypted, env.MASTER_SECRET);
-  const proxies = await getProxies(env);
+  const proxy = await getProxyConfig(env);
+  if (!proxy) {
+    return { ok: false, error: "no_proxy_configured" };
+  }
 
-  const result = await fetchWithProxyFallback(
-    proxies,
-    (proxyIp) => buildNamecheapUrl(data.username, data.apiKey, proxyIp, "namecheap.domains.getList")
-  );
+  const url = buildNamecheapUrl(secrets.username, secrets.apiKey, proxy.ip, "namecheap.domains.getList");
+  const result = await fetchViaSquidProxy(proxy.url, url);
 
   if (!result.ok) {
     return { ok: false, error: result.error };
@@ -277,7 +223,7 @@ export async function namecheapListDomains(
 // 3) Смена NS на указанные (из CF зоны)
 export async function namecheapSetNs(
   env: Env,
-  encrypted: any,
+  secrets: NamecheapSecrets,
   fqdn: string,
   nameservers: string[]
 ): Promise<{ ok: boolean; error?: string }> {
@@ -285,24 +231,24 @@ export async function namecheapSetNs(
     return { ok: false, error: "no_nameservers" };
   }
 
-  const data = await decrypt<ProviderKeyData>(encrypted, env.MASTER_SECRET);
-  const proxies = await getProxies(env);
-  const { sld, tld } = parseDomain(fqdn);
+  const proxy = await getProxyConfig(env);
+  if (!proxy) {
+    return { ok: false, error: "no_proxy_configured" };
+  }
 
-  const result = await fetchWithProxyFallback(
-    proxies,
-    (proxyIp) => buildNamecheapUrl(
-      data.username,
-      data.apiKey,
-      proxyIp,
-      "namecheap.domains.dns.setCustom",
-      {
-        SLD: sld,
-        TLD: tld,
-        Nameservers: nameservers.join(","),
-      }
-    )
+  const { sld, tld } = parseDomain(fqdn);
+  const url = buildNamecheapUrl(
+    secrets.username,
+    secrets.apiKey,
+    proxy.ip,
+    "namecheap.domains.dns.setCustom",
+    {
+      SLD: sld,
+      TLD: tld,
+      Nameservers: nameservers.join(","),
+    }
   );
+  const result = await fetchViaSquidProxy(proxy.url, url);
 
   if (!result.ok) {
     return { ok: false, error: result.error };
