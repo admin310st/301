@@ -470,7 +470,7 @@ curl -X POST https://api.301.st/integrations/cloudflare/init \
 
 Инициализация интеграции с Namecheap.
 
-**Требует:** `Authorization: Bearer <access_token>`
+**Требует:** `Authorization: Bearer <access_token>`, роль `owner`
 
 **Параметры запроса:**
 
@@ -478,70 +478,60 @@ curl -X POST https://api.301.st/integrations/cloudflare/init \
 |------|-----|-------------|----------|
 | `username` | string | да | Namecheap username |
 | `api_key` | string | да | API Key из Namecheap Dashboard |
-| `key_alias` | string | нет | Название для UI |
+| `key_alias` | string | нет | Название для UI (по умолчанию: `namecheap-{username}`) |
 
-**Пример запроса:**
+**Пример запроса (из browser console):**
 
-```bash
-curl -X POST https://api.301.st/integrations/namecheap/init \
-  -H "Authorization: Bearer <access_token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "myuser",
-    "api_key": "abc123secretkey",
-    "key_alias": "Personal Namecheap"
-  }'
+```js
+fetch("https://api.301.st/integrations/namecheap/init", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer " + token
+  },
+  body: JSON.stringify({
+    username: "myuser",
+    api_key: "abc123secretkey",
+    key_alias: "Personal Namecheap"
+  })
+}).then(r => r.json()).then(console.log)
 ```
 
-**Успешный ответ:**
+> **Тестирование:** JWT содержит fingerprint (хэш IP + User-Agent). Тестировать можно ТОЛЬКО из браузера на `app.301.st`. curl с любого другого IP/UA вернёт `owner_required` из-за несовпадения fingerprint.
+
+**Успешный ответ (200):**
 
 ```json
 {
   "ok": true,
-  "key_id": 15,
+  "key_id": 22,
   "message": "Namecheap integration configured successfully",
-  "balance": "125.50"
+  "balance": "8.32"
 }
 ```
 
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `key_id` | number | ID созданного ключа в D1 `account_keys` |
+| `balance` | string | Баланс аккаунта Namecheap (USD) |
+
 **Ошибки:**
 
-| Код | HTTP | Описание |
-|-----|------|----------|
-| `username_required` | 400 | Не передан username |
-| `api_key_required` | 400 | Не передан api_key |
-| `invalid_api_key` | 400 | Неверный API key |
-| `ip_not_whitelisted` | 400 | IP не в whitelist Namecheap |
-| `namecheap_key_already_exists` | 409 | Ключ для этого username уже существует |
+| Код | HTTP | Описание | UI действие |
+|-----|------|----------|-------------|
+| `invalid_json` | 400 | Невалидный JSON | Показать общую ошибку |
+| `username_required` | 400 | Не передан username | Валидация формы |
+| `api_key_required` | 400 | Не передан api_key | Валидация формы |
+| `owner_required` | 403 | Нет прав owner или невалидный токен | Перелогин |
+| `invalid_api_key` | 400 | Неверный API key | «Проверьте API ключ» |
+| `ip_not_whitelisted` | 400 | IP relay не в whitelist Namecheap | Показать IP из `ips` |
+| `namecheap_key_already_exists` | 409 | Ключ для этого username уже есть | Показать `existing_key_id` |
+| `no_relay_configured` | 400 | Relay не настроен (нет KV) | «Сервис временно недоступен» |
+| `relay_timeout` | 400 | Relay не ответил за 10 сек | «Повторите попытку» |
+| `relay_http_*` | 400 | Relay вернул HTTP ошибку | «Сервис временно недоступен» |
+| `namecheap_error_*` | 400 | Ошибка Namecheap API | Показать message |
 
-**Архитектура прокси (Traefik relay):**
-
-Для работы с Namecheap API используется Traefik reverse-proxy на VPS (`relay.301.st` → `51.68.21.133`). Worker делает обычный `fetch()` к relay-эндпоинту, Traefik проксирует запрос к `api.namecheap.com`.
-
-- **Traefik relay** — reverse proxy с Basic Auth, `passHostHeader: false` (Namecheap получает `Host: api.namecheap.com`)
-- **ClientIp** в URL подставляется автоматически (IP relay-сервера)
-- Пользователь должен добавить IP relay-сервера в whitelist Namecheap
-
-```
-CF Worker --fetch()--> Traefik relay (relay.301.st) --> api.namecheap.com
-```
-
-> **Почему не Squid?** `cf.proxy` в Cloudflare Workers — это механизм routing между зонами, не HTTP forward proxy. Worker не может ходить через Squid напрямую. Traefik relay работает как обычный HTTPS endpoint, к которому Worker обращается стандартным `fetch()`.
-
-**Хранение в KV (`KV_CREDENTIALS`):**
-
-| KV ключ | Содержимое | Назначение |
-|---------|------------|------------|
-| `proxy:namecheap` | `{"relay_url": "https://relay.301.st", "relay_auth": "Basic base64(...)", "ip": "51.68.21.133"}` | Relay конфиг |
-
-```bash
-wrangler kv:key put --binding=KV_CREDENTIALS "proxy:namecheap" \
-  '{"relay_url":"https://relay.301.st","relay_auth":"Basic YXBpdXNlcjpQQVNTV09SRA==","ip":"51.68.21.133"}'
-```
-
-**IP Whitelist:**
-
-Namecheap требует whitelist IP адресов. При ошибке `ip_not_whitelisted` API возвращает список IP для добавления:
+**Пример ошибки `ip_not_whitelisted`:**
 
 ```json
 {
@@ -552,30 +542,99 @@ Namecheap требует whitelist IP адресов. При ошибке `ip_no
 }
 ```
 
-**Flow подключения Namecheap:**
+**Пример ошибки `namecheap_key_already_exists`:**
 
-1. UI вызывает `GET /integrations/namecheap/proxy-ips` → показывает IP пользователю
-2. Пользователь добавляет IP в Namecheap → Profile → Tools → API Access → Whitelisted IPs
-3. Пользователь вводит credentials → `POST /integrations/namecheap/init`
-4. CF Worker → Traefik relay (relay.301.st) → Namecheap API (верификация)
-5. При успехе — ключ шифруется и сохраняется в KV_CREDENTIALS + D1 (через `storage.ts`)
-
-### 3.2 GET /integrations/namecheap/proxy-ips
-
-Получение списка IP-адресов прокси для добавления в whitelist Namecheap.
-
-**Источник данных:** IP из KV ключа `proxy:namecheap` (поле `ip` из relay-конфига).
-
-**Требует:** `Authorization: Bearer <access_token>`
-
-**Пример запроса:**
-
-```bash
-curl -X GET https://api.301.st/integrations/namecheap/proxy-ips \
-  -H "Authorization: Bearer <access_token>"
+```json
+{
+  "ok": false,
+  "error": "namecheap_key_already_exists",
+  "existing_key_id": 22
+}
 ```
 
-**Успешный ответ:**
+---
+
+### 3.2 Архитектура прокси (Traefik relay)
+
+Worker не может обращаться к Namecheap API напрямую — Namecheap проверяет IP, а IP Cloudflare Workers динамические. Используется Traefik reverse-proxy на VPS.
+
+```
+Browser → CF Worker (api.301.st)
+              ↓ fetch("https://relay.301.st/xml.response?...")
+         Traefik relay (relay.301.st / 51.68.21.133)
+              ↓ passHostHeader: false → Host: api.namecheap.com
+         api.namecheap.com ← видит IP: 51.68.21.133 (whitelisted)
+```
+
+**Ключевые моменты:**
+- Worker обращается к `https://relay.301.st/...` (по hostname, НЕ по IP — Traefik требует TLS SNI)
+- Traefik заменяет `Host` header на `api.namecheap.com` (`passHostHeader: false`)
+- Basic Auth защищает relay от несанкционированного доступа
+- `ClientIp` в query string = IP relay-сервера (51.68.21.133), этот IP whitelisted в Namecheap
+
+**Хранение конфига в KV (`KV_CREDENTIALS`, ключ `proxy:namecheap`):**
+
+```json
+{
+  "relay_url": "https://relay.301.st",
+  "relay_host": "relay.301.st",
+  "relay_auth": "Basic <base64(user:pass)>",
+  "ip": "51.68.21.133"
+}
+```
+
+| Поле | Назначение |
+|------|------------|
+| `relay_url` | Base URL для `fetch()` из Worker |
+| `relay_host` | Hostname relay (используется для валидации конфига) |
+| `relay_auth` | Basic Auth header для Traefik |
+| `ip` | IP relay-сервера — подставляется как `ClientIp` в Namecheap API запросы и возвращается через `proxy-ips` |
+
+---
+
+### 3.3 UI Flow подключения Namecheap
+
+**Шаг 1: Получение IP для whitelist**
+
+UI вызывает `GET /integrations/namecheap/proxy-ips` и показывает IP пользователю.
+
+**Шаг 2: Пользователь настраивает Namecheap**
+
+Пользователь заходит в Namecheap → Profile → Tools → API Access:
+1. Включает API Access (если выключен)
+2. Добавляет IP из шага 1 в Whitelisted IPs
+3. Копирует API Key
+
+**Шаг 3: Ввод credentials**
+
+UI показывает форму:
+- Username (обязательное)
+- API Key (обязательное)
+- Alias (необязательное)
+
+**Шаг 4: Инициализация**
+
+UI вызывает `POST /integrations/namecheap/init`.
+
+**Шаг 5: Обработка результата**
+
+| Ответ | UI действие |
+|-------|-------------|
+| `ok: true` | Показать success, сохранить `key_id`, показать `balance` |
+| `ip_not_whitelisted` | Показать IP из `ips` с инструкцией добавить в Namecheap |
+| `invalid_api_key` / `namecheap_error_1011102` | «Неверный API ключ или API доступ не включён» |
+| `namecheap_key_already_exists` | «Интеграция уже существует» + ссылка на existing_key_id |
+| `relay_timeout` / `relay_http_*` | «Сервис временно недоступен, повторите позже» |
+
+---
+
+### 3.4 GET /integrations/namecheap/proxy-ips
+
+Получение списка IP relay-сервера для whitelist в Namecheap.
+
+**Требует:** `Authorization: Bearer <access_token>`, роль `owner`
+
+**Успешный ответ (200):**
 
 ```json
 {
@@ -584,23 +643,15 @@ curl -X GET https://api.301.st/integrations/namecheap/proxy-ips \
 }
 ```
 
-**Ошибки:**
-
-| Код | HTTP | Описание |
-|-----|------|----------|
-| `owner_required` | 403 | Требуются права owner |
-
-**Использование:**
-
-UI вызывает этот endpoint перед показом формы добавления Namecheap интеграции, чтобы отобразить пользователю IP-адреса для whitelist в Namecheap Dashboard.
+**UI:** Вызвать при открытии формы подключения Namecheap. Показать IP с инструкцией: «Добавьте эти IP в Namecheap → Profile → Tools → API Access → Whitelisted IPs».
 
 ---
 
-### 3.3 GET /integrations/namecheap/domains
+### 3.5 GET /integrations/namecheap/domains
 
 Получение списка доменов из аккаунта Namecheap.
 
-**Требует:** `Authorization: Bearer <access_token>`
+**Требует:** `Authorization: Bearer <access_token>`, роль `owner`
 
 **Query параметры:**
 
@@ -608,70 +659,71 @@ UI вызывает этот endpoint перед показом формы до�
 |----------|-----|-------------|----------|
 | `key_id` | number | да | ID ключа Namecheap из account_keys |
 
-**Пример запроса:**
-
-```bash
-curl -X GET "https://api.301.st/integrations/namecheap/domains?key_id=15" \
-  -H "Authorization: Bearer <access_token>"
-```
-
-**Успешный ответ:**
+**Успешный ответ (200):**
 
 ```json
 {
   "ok": true,
   "domains": [
-    {
-      "domain": "example.com",
-      "expires": "01/15/2026"
-    },
-    {
-      "domain": "mysite.net",
-      "expires": "03/22/2025"
-    }
+    { "domain": "corecash.pro", "expires": "09/22/2026" },
+    { "domain": "finatron.pro", "expires": "09/22/2026" },
+    { "domain": "swerte.club", "expires": "10/01/2026" },
+    { "domain": "taskcenter.pro", "expires": "12/28/2026" }
   ]
 }
 ```
 
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `domains[].domain` | string | FQDN домена |
+| `domains[].expires` | string | Дата истечения (формат MM/DD/YYYY от Namecheap) |
+
 **Ошибки:**
 
-| Код | HTTP | Описание |
-|-----|------|----------|
-| `owner_required` | 403 | Требуются права owner |
-| `key_id_required` | 400 | Не передан key_id |
-| `key_not_found` | 404 | Ключ не найден или не принадлежит аккаунту |
-| `namecheap_api_error` | 500 | Ошибка API Namecheap |
+| Код | HTTP | Описание | UI действие |
+|-----|------|----------|-------------|
+| `owner_required` | 403 | Нет прав owner | Перелогин |
+| `key_id_required` | 400 | Не передан key_id | Валидация |
+| `key_not_found` | 404 | Ключ не найден | «Интеграция не найдена» |
+| `no_relay_configured` | 500 | Relay не настроен | «Сервис недоступен» |
+| `relay_timeout` | 500 | Таймаут relay | «Повторите попытку» |
+
+**UI:** Показать список доменов с возможностью выбрать домен для подключения к 301.st (установка NS через `set-ns`). Формат даты `expires` — американский (MM/DD/YYYY), при отображении конвертировать в локальный формат.
 
 ---
 
-### 3.4 POST /integrations/namecheap/set-ns
+### 3.6 POST /integrations/namecheap/set-ns
 
-Установка кастомных nameservers для домена в Namecheap (обычно NS от Cloudflare).
+Установка кастомных nameservers для домена в Namecheap (обычно NS от Cloudflare зоны).
 
-**Требует:** `Authorization: Bearer <access_token>`
+**Требует:** `Authorization: Bearer <access_token>`, роль `owner`
 
 **Параметры запроса:**
 
 | Поле | Тип | Обязательно | Описание |
 |------|-----|-------------|----------|
 | `key_id` | number | да | ID ключа Namecheap |
-| `domain` | string | да | Доменное имя (например, `example.com`) |
-| `nameservers` | string[] | да | Массив NS серверов |
+| `domain` | string | да | FQDN домена (например, `example.com`) |
+| `nameservers` | string[] | да | Массив NS серверов (минимум 1) |
 
-**Пример запроса:**
+**Пример запроса (из browser console):**
 
-```bash
-curl -X POST https://api.301.st/integrations/namecheap/set-ns \
-  -H "Authorization: Bearer <access_token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "key_id": 15,
-    "domain": "example.com",
-    "nameservers": ["ns1.cloudflare.com", "ns2.cloudflare.com"]
-  }'
+```js
+fetch("https://api.301.st/integrations/namecheap/set-ns", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer " + token
+  },
+  body: JSON.stringify({
+    key_id: 22,
+    domain: "example.com",
+    nameservers: ["ns1.cloudflare.com", "ns2.cloudflare.com"]
+  })
+}).then(r => r.json()).then(console.log)
 ```
 
-**Успешный ответ:**
+**Успешный ответ (200):**
 
 ```json
 {
@@ -682,35 +734,24 @@ curl -X POST https://api.301.st/integrations/namecheap/set-ns \
 
 **Ошибки:**
 
-| Код | HTTP | Описание |
-|-----|------|----------|
-| `owner_required` | 403 | Требуются права owner |
-| `key_id_required` | 400 | Не передан key_id |
-| `domain_required` | 400 | Не передан domain |
-| `nameservers_required` | 400 | Не передан или пустой массив nameservers |
-| `key_not_found` | 404 | Ключ не найден или не принадлежит аккаунту |
-| `no_nameservers` | 400 | Пустой список NS |
-| `invalid_domain` | 400 | Невалидный формат домена |
-| `namecheap_api_error` | 500 | Ошибка API Namecheap |
+| Код | HTTP | Описание | UI действие |
+|-----|------|----------|-------------|
+| `owner_required` | 403 | Нет прав owner | Перелогин |
+| `key_id_required` | 400 | Не передан key_id | Валидация |
+| `domain_required` | 400 | Не передан domain | Валидация |
+| `nameservers_required` | 400 | Пустой массив nameservers | Валидация |
+| `key_not_found` | 404 | Ключ не найден | «Интеграция не найдена» |
+| `no_nameservers` | 400 | Пустой список NS | Валидация |
+| `invalid_domain` | 400 | Невалидный формат домена | «Неверный формат домена» |
+| `no_relay_configured` | 400 | Relay не настроен | «Сервис недоступен» |
+| `relay_timeout` | 400 | Таймаут relay | «Повторите попытку» |
 
-**Пример использования с Cloudflare:**
+**UI flow: подключение домена к Cloudflare через Namecheap:**
 
-После создания зоны в Cloudflare, получите NS серверы из ответа и установите их в Namecheap:
-
-```bash
-# 1. Создать зону в CF и получить NS
-# ns1.cloudflare.com, ns2.cloudflare.com
-
-# 2. Установить NS в Namecheap
-curl -X POST https://api.301.st/integrations/namecheap/set-ns \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "key_id": 15,
-    "domain": "example.com",
-    "nameservers": ["ns1.cloudflare.com", "ns2.cloudflare.com"]
-  }'
-```
+1. Пользователь выбирает домен из списка (`GET /namecheap/domains`)
+2. UI создаёт зону в CF (если ещё нет) → получает NS серверы
+3. UI вызывает `POST /namecheap/set-ns` с NS от Cloudflare
+4. Показать success: «NS серверы обновлены. Изменения вступят в силу через 1-48 часов.»
 
 ---
 
@@ -879,17 +920,17 @@ curl -X DELETE https://api.301.st/integrations/keys/42 \
 
 ## 6. Таблица endpoints
 
-| Endpoint | Метод | Auth | Описание |
-|----------|-------|------|----------|
-| `/integrations/cloudflare/init` | POST | ✅ JWT | Инициализация Cloudflare |
-| `/integrations/namecheap/init` | POST | ✅ JWT | Инициализация Namecheap |
-| `/integrations/namecheap/proxy-ips` | GET | ✅ JWT | IP для whitelist Namecheap |
-| `/integrations/namecheap/domains` | GET | ✅ JWT | Список доменов Namecheap |
-| `/integrations/namecheap/set-ns` | POST | ✅ JWT | Установка NS для домена |
-| `/integrations/keys` | GET | ✅ JWT | Список ключей |
-| `/integrations/keys/:id` | GET | ✅ JWT | Получить ключ |
-| `/integrations/keys/:id` | PATCH | ✅ JWT | Обновить ключ |
-| `/integrations/keys/:id` | DELETE | ✅ JWT | Удалить ключ |
+| Endpoint | Метод | Auth | Роль | Описание |
+|----------|-------|------|------|----------|
+| `/integrations/cloudflare/init` | POST | ✅ JWT | owner | Инициализация Cloudflare |
+| `/integrations/namecheap/init` | POST | ✅ JWT | owner | Инициализация Namecheap |
+| `/integrations/namecheap/proxy-ips` | GET | ✅ JWT | owner | IP relay для whitelist Namecheap |
+| `/integrations/namecheap/domains` | GET | ✅ JWT | owner | Список доменов из Namecheap |
+| `/integrations/namecheap/set-ns` | POST | ✅ JWT | owner | Установка NS для домена |
+| `/integrations/keys` | GET | ✅ JWT | owner | Список ключей аккаунта |
+| `/integrations/keys/:id` | GET | ✅ JWT | owner | Получить ключ |
+| `/integrations/keys/:id` | PATCH | ✅ JWT | owner | Обновить ключ |
+| `/integrations/keys/:id` | DELETE | ✅ JWT | owner | Удалить ключ |
 
 ---
 

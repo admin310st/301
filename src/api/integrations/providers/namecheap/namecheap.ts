@@ -14,8 +14,9 @@ import type { Env } from "../../../types/worker";
 
 export interface RelayConfig {
   relay_url: string;   // "https://relay.301.st"
+  relay_host: string;  // "relay.301.st" (для Host header и TLS SNI)
   relay_auth: string;  // "Basic base64(apiuser:pass)"
-  ip: string;          // "51.68.21.133" (для ClientIp в Namecheap)
+  ip: string;          // "51.68.21.133" (для ClientIp в Namecheap и прямого fetch)
 }
 
 /**
@@ -24,7 +25,7 @@ export interface RelayConfig {
  */
 export async function getRelayConfig(env: Env): Promise<RelayConfig | null> {
   const config = await env.KV_CREDENTIALS.get("proxy:namecheap", "json") as RelayConfig | null;
-  if (!config || !config.relay_url || !config.relay_auth || !config.ip) return null;
+  if (!config || !config.relay_url || !config.relay_auth || !config.ip || !config.relay_host) return null;
   return config;
 }
 
@@ -40,8 +41,7 @@ export async function getRelayIps(env: Env): Promise<string[]> {
  * Выполняет GET-запрос через Traefik relay
  */
 async function fetchViaRelay(
-  relayBaseUrl: string,
-  relayAuth: string,
+  relay: RelayConfig,
   targetPath: string,
   timeoutMs = 10_000
 ): Promise<{ ok: boolean; body?: string; error?: string }> {
@@ -49,10 +49,14 @@ async function fetchViaRelay(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${relayBaseUrl}${targetPath}`, {
+    // Fetch через hostname — Traefik требует корректный SNI для роутинга
+    const url = `${relay.relay_url}${targetPath}`;
+    const response = await fetch(url, {
       method: "GET",
       signal: controller.signal,
-      headers: { Authorization: relayAuth },
+      headers: {
+        Authorization: relay.relay_auth,
+      },
     });
 
     clearTimeout(timeoutId);
@@ -107,16 +111,26 @@ export function buildNamecheapPath(
   return `/xml.response?${params.toString()}`;
 }
 
-// Внутренний helper: XML → JS
-function parseXml(xml: string): Document {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(xml, "application/xml");
+// Внутренние XML-хелперы (regex, DOMParser недоступен в Workers)
 
-  if (doc.querySelector("parsererror")) {
-    throw new Error("invalid_xml_response");
+function xmlAttr(xml: string, tag: string, attr: string): string | null {
+  const re = new RegExp(`<${tag}[^>]*\\s${attr}="([^"]*)"`, "i");
+  return re.exec(xml)?.[1] ?? null;
+}
+
+function xmlError(xml: string): { code: string | null; message: string } {
+  const m = /<Error\s+Number="([^"]*)"[^>]*>([\s\S]*?)<\/Error>/i.exec(xml);
+  return m ? { code: m[1], message: m[2].trim() } : { code: null, message: "unknown_error" };
+}
+
+function xmlDomains(xml: string): { domain: string; expires: string }[] {
+  const results: { domain: string; expires: string }[] = [];
+  const re = /<Domain\s[^>]*Name="([^"]*)"[^>]*Expires="([^"]*)"[^>]*\/?>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    results.push({ domain: m[1], expires: m[2] });
   }
-
-  return doc;
+  return results;
 }
 
 // Helper: разбить зону на SLD и TLD
@@ -149,17 +163,17 @@ export async function namecheapVerifyKey(
   }
 
   const path = buildNamecheapPath(secrets.username, secrets.apiKey, relay.ip, "namecheap.users.getBalances");
-  const result = await fetchViaRelay(relay.relay_url, relay.relay_auth, path);
+  const result = await fetchViaRelay(relay, path);
 
   if (!result.ok) {
     return { ok: false, error: result.error };
   }
 
-  const xml = parseXml(result.body!);
-  const status = xml.querySelector("ApiResponse")?.getAttribute("Status");
+  const body = result.body!;
+  const status = xmlAttr(body, "ApiResponse", "Status");
 
   if (status === "OK") {
-    const balanceMatch = result.body!.match(/AvailableBalance="([\d.]+)"/);
+    const balanceMatch = body.match(/AvailableBalance="([\d.]+)"/);
     return {
       ok: true,
       balance: balanceMatch?.[1],
@@ -168,9 +182,7 @@ export async function namecheapVerifyKey(
   }
 
   // Parse error
-  const errorEl = xml.querySelector("Error");
-  const errorCode = errorEl?.getAttribute("Number");
-  const errorMsg = errorEl?.textContent || "unknown_error";
+  const { code: errorCode, message: errorMsg } = xmlError(body);
 
   if (errorCode === "1011150") {
     return { ok: false, error: "invalid_api_key" };
@@ -193,30 +205,21 @@ export async function namecheapListDomains(
   }
 
   const path = buildNamecheapPath(secrets.username, secrets.apiKey, relay.ip, "namecheap.domains.getList");
-  const result = await fetchViaRelay(relay.relay_url, relay.relay_auth, path);
+  const result = await fetchViaRelay(relay, path);
 
   if (!result.ok) {
     return { ok: false, error: result.error };
   }
 
-  const xml = parseXml(result.body!);
-  const status = xml.querySelector("ApiResponse")?.getAttribute("Status");
+  const body = result.body!;
+  const status = xmlAttr(body, "ApiResponse", "Status");
 
   if (status !== "OK") {
-    const errorEl = xml.querySelector("Error");
-    return { ok: false, error: errorEl?.textContent || "unknown_error" };
+    const { message } = xmlError(body);
+    return { ok: false, error: message };
   }
 
-  const domains: { domain: string; expires: string }[] = [];
-  const items = xml.querySelectorAll("Domain");
-  items.forEach((item) => {
-    domains.push({
-      domain: item.getAttribute("Name") || "",
-      expires: item.getAttribute("Expires") || "",
-    });
-  });
-
-  return { ok: true, domains };
+  return { ok: true, domains: xmlDomains(body) };
 }
 
 // 3) Смена NS на указанные (из CF зоны)
@@ -247,21 +250,21 @@ export async function namecheapSetNs(
       Nameservers: nameservers.join(","),
     }
   );
-  const result = await fetchViaRelay(relay.relay_url, relay.relay_auth, path);
+  const result = await fetchViaRelay(relay, path);
 
   if (!result.ok) {
     return { ok: false, error: result.error };
   }
 
-  const xml = parseXml(result.body!);
-  const status = xml.querySelector("ApiResponse")?.getAttribute("Status");
+  const body = result.body!;
+  const status = xmlAttr(body, "ApiResponse", "Status");
 
   if (status === "OK") {
     return { ok: true };
   }
 
-  const errorEl = xml.querySelector("Error");
-  return { ok: false, error: errorEl?.textContent || "unknown_error" };
+  const { message } = xmlError(body);
+  return { ok: false, error: message };
 }
 
 // Deprecated alias для совместимости
