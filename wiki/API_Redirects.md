@@ -489,9 +489,18 @@ curl -X POST "https://api.301.st/domains/45/redirects" \
   "zone_limit": {
     "used": 3,
     "max": 10
-  }
+  },
+  "www_dns_created": true,
+  "domain_role": "donor"
 }
 ```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `www_dns_created` | boolean/undefined | `true` если создана DNS A-record для `www.{apex}` (только для T3/T4) |
+| `domain_role` | string/undefined | Новая роль домена, если изменилась (`"donor"` для T1/T5/T6/T7) |
+
+> **Автоматическое создание www DNS:** При создании T3 или T4 redirect API автоматически создаёт DNS A-record `www.{apex} → 192.0.2.1` (proxied) в Cloudflare, если запись ещё не существует. Без этой записи CF не может обработать запросы к `www.` субдомену и redirect rule не сработает.
 
 **Ошибки:**
 
@@ -575,9 +584,18 @@ curl -X POST "https://api.301.st/domains/45/redirects/preset" \
   "zone_limit": {
     "used": 5,
     "max": 10
-  }
+  },
+  "www_dns_created": true,
+  "domain_role": "donor"
 }
 ```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `www_dns_created` | boolean/undefined | `true` если создана DNS A-record для `www.{apex}` (пресеты с T3/T4) |
+| `domain_role` | string/undefined | Новая роль домена, если изменилась (`"donor"` для пресетов с T1/T5/T6/T7) |
+
+> **Автоматическое создание www DNS:** Если пресет содержит T3 или T4, API автоматически создаёт DNS A-record `www.{apex} → 192.0.2.1` (proxied). Подробнее — см. секцию 6.
 
 **Пример запроса (P5 — Full Migration с path redirects):**
 
@@ -609,7 +627,9 @@ curl -X POST "https://api.301.st/domains/45/redirects/preset" \
   "zone_limit": {
     "used": 7,
     "max": 10
-  }
+  },
+  "www_dns_created": true,
+  "domain_role": "donor"
 }
 ```
 
@@ -705,7 +725,7 @@ curl -X PATCH "https://api.301.st/redirects/1" \
 
 ## 9. DELETE /redirects/:id
 
-Удалить редирект.
+Удалить редирект. Если редирект является частью пресета — удаляются **все правила пресета** для этого домена.
 
 **Требует:** `Authorization: Bearer <access_token>` (editor или owner)
 
@@ -716,16 +736,42 @@ curl -X DELETE "https://api.301.st/redirects/1" \
   -H "Authorization: Bearer <access_token>"
 ```
 
-**Успешный ответ:**
+**Успешный ответ (одиночное правило):**
 
 ```json
 {
   "ok": true,
-  "deleted_id": 1
+  "deleted_ids": [1],
+  "domain_id": 45,
+  "domain_role": "reserve"
 }
 ```
 
-> **Примечание:** Правило удаляется из D1. Для удаления из CF нужно вызвать `POST /zones/:id/apply-redirects`.
+**Успешный ответ (правило из пресета — каскадное удаление):**
+
+```json
+{
+  "ok": true,
+  "deleted_ids": [4, 5],
+  "domain_id": 45,
+  "domain_role": "reserve"
+}
+```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `deleted_ids` | number[] | Массив ID удалённых правил (1 для одиночного, N для пресета) |
+| `domain_id` | number | ID домена |
+| `domain_role` | string/undefined | Новая роль, если изменилась. Только для `donor` → `reserve` |
+
+> **Каскадное удаление пресетов:** Если удаляемое правило имеет `preset_id`, API удаляет **все** правила с тем же `preset_id` и `domain_id`. Это гарантирует атомарность — нельзя оставить "осиротевшие" части пресета.
+
+> **Управление ролью домена:**
+> - Роль `donor` сбрасывается в `reserve` только когда не остаётся ни одного правила T1/T5/T6/T7 для домена
+> - Роли `primary` и `acceptor` **не затрагиваются** при удалении редиректов
+> - При сбросе роли в `reserve` автоматически удаляются осиротевшие T3/T4 (canonical) правила домена
+
+> **Примечание:** Правила удаляются из D1. Для удаления из CF нужно вызвать `POST /zones/:id/apply-redirects`.
 
 **Ошибки:**
 
@@ -935,7 +981,13 @@ curl -X GET "https://api.301.st/zones/12/redirect-status" \
 > **Влияние на роль домена:**
 > - **T1, T5, T6, T7** — устанавливают роль `donor` (перенаправляют трафик)
 > - **T3, T4** — не меняют роль (canonical-редиректы для www-нормализации)
-> - При удалении всех редиректов T1/T5/T6/T7 роль возвращается в `reserve`
+> - При удалении всех редиректов T1/T5/T6/T7 роль возвращается в `reserve`, а осиротевшие T3/T4 удаляются автоматически
+
+> **Автоматическое создание www DNS (T3, T4):**
+> - При создании T3 или T4 API автоматически создаёт DNS A-record `www.{apex} → 192.0.2.1` (proxied) в Cloudflare
+> - Без этой записи CF не может обработать запросы к `www.` субдомену и redirect rule не сработает
+> - Если запись уже существует — пропускается без ошибки
+> - В ответе возвращается поле `www_dns_created: true/false`
 
 ---
 
