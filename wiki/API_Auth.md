@@ -1155,7 +1155,20 @@ UI действия:
 
 ---
 
-## 7.7 Ошибки безопасности
+## 7.7 Ошибки Change Password
+
+| Код | HTTP | Описание | Действие UI |
+|-----|------|----------|-------------|
+| `unauthorized` | 401 | Нет access_token | Redirect на login |
+| `current_password_and_new_password_required` | 400 | Не переданы поля | Валидация формы |
+| `oauth_only` | 400 | Только OAuth-вход | Показать провайдера |
+| `wrong_password` | 400 | Неверный текущий пароль | Показать ошибку |
+| `password_too_weak` | 400 | Слабый новый пароль | Показать требования |
+| `same_password` | 400 | Новый = текущий | Предложить другой |
+
+---
+
+## 7.8 Ошибки безопасности
 
 | Код | HTTP | Описание | Действие UI |
 |-----|------|----------|-------------|
@@ -1455,6 +1468,91 @@ flowchart TD
     H -->|csrf_invalid| I[⚠️ Начать заново]
     H -->|✅ OK| J[✅ Пароль изменён!<br/>Redirect → /login]
 ```
+---
+
+## 9.7 POST /auth/change_password — смена пароля (авторизованный)
+
+```mermaid
+flowchart LR
+  UI -->|current + new password| ChangePass[/POST \/auth\/change_password/]
+  ChangePass --> Validate[[Проверка текущего пароля]]
+  Validate --> Hash[[Хэш нового пароля]]
+  Hash --> Revoke[[Инвалидация refresh-токенов]]
+  Revoke --> Success[[ok: password_changed]]
+  Success --> UI
+```
+
+**Описание:**
+Смена пароля залогиненным пользователем. Не использует OmniFlow, CSRF или reset-сессию — требует только валидный access_token и текущий пароль.
+
+**Заголовки:**
+
+```
+Content-Type: application/json
+Authorization: Bearer <access_token>
+```
+
+**Параметры запроса:**
+
+| Поле | Тип | Обязательно | Описание |
+|------|-----|-------------|----------|
+| `current_password` | string | да | Текущий пароль |
+| `new_password` | string | да | Новый пароль (требования из 3.3) |
+
+**Пример запроса:**
+
+```javascript
+// Из Browser Console на app.301.st
+fetch("https://api.301.st/auth/change_password", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer " + token
+  },
+  body: JSON.stringify({
+    current_password: "OldPass123",
+    new_password: "NewSecurePass456"
+  })
+}).then(r => r.json()).then(console.log)
+```
+
+**Успешный ответ:**
+
+```json
+{
+  "ok": true,
+  "message": "password_changed"
+}
+```
+
+**После успеха:**
+* Пароль обновлён в БД
+* Все refresh-токены пользователя инвалидированы
+* Пользователю нужно заново войти на всех устройствах
+
+**Ошибки:**
+
+| Код | HTTP | Описание | Действие UI |
+|-----|------|----------|-------------|
+| `unauthorized` | 401 | Нет или невалидный access_token | Redirect на login |
+| `current_password_and_new_password_required` | 400 | Не переданы оба поля | Валидация формы |
+| `oauth_only` | 400 | Пользователь без пароля (только OAuth) | Показать провайдера |
+| `wrong_password` | 400 | Неверный текущий пароль | Показать ошибку |
+| `password_too_weak` | 400 | Новый пароль не соответствует требованиям | Показать требования (3.3) |
+| `same_password` | 400 | Новый пароль совпадает с текущим | Предложить другой |
+
+**Поведение UI:**
+
+```mermaid
+flowchart TD
+    A[Настройки аккаунта] --> B[Форма смены пароля<br/>current + new + confirm]
+    B -->|POST /auth/change_password| C{Результат}
+    C -->|wrong_password| D[Неверный текущий пароль]
+    C -->|password_too_weak| E[Показать требования]
+    C -->|same_password| F[Пароли совпадают]
+    C -->|ok| G[Пароль изменён!<br/>Redirect на login]
+```
+
 ---
 
 # 10. Безопасность на стороне UI
@@ -1834,6 +1932,7 @@ console.log(document.cookie);  // refresh_id НЕ должен быть виде
 | `/auth/me` | GET | — | `Authorization` | — | — |
 | `/auth/reset_password` | POST | ✅ | — | — | body |
 | `/auth/confirm_password` | POST | — | `credentials` | ✅ | body |
+| `/auth/change_password` | POST | — | `Authorization` | — | body |
 | `/auth/oauth/google/start` | GET | — | — | — | `?redirect_host=` |
 | `/auth/oauth/github/start` | GET | — | — | — | `?redirect_host=` |
 
