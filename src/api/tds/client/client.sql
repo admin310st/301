@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS tds_rules (
     action TEXT NOT NULL,         -- redirect | block | pass | mab_redirect
     action_url TEXT,              -- Redirect URL (supports {country}, {device}, {path}, {host})
     status_code INTEGER DEFAULT 302,
+    variants TEXT,                 -- JSON: [{"url":"...","alpha":1,"beta":1,"impressions":0,"conversions":0}]
+    algorithm TEXT DEFAULT 'thompson_sampling',  -- thompson_sampling | ucb | epsilon_greedy
 
     -- Metadata
     active INTEGER DEFAULT 1,

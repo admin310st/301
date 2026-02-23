@@ -54,11 +54,14 @@ export const logicJsonSchema = z.object({
   action_url: z.string().url().max(2048).nullable().optional(),
   status_code: statusCodeSchema.optional().default(302),
   // MAB fields (used when action = mab_redirect)
+  algorithm: z.enum(["thompson_sampling", "ucb", "epsilon_greedy"]).optional().default("thompson_sampling"),
   variants: z.array(z.object({
     url: z.string().url().max(2048),
     weight: z.number().min(0).max(1).optional(),
     alpha: z.number().min(0).optional().default(1),
     beta: z.number().min(0).optional().default(1),
+    impressions: z.number().min(0).optional().default(0),
+    conversions: z.number().min(0).optional().default(0),
   })).max(20).optional(),
 }).refine(
   (data) => {

@@ -94,6 +94,8 @@ export async function handleTdsSync(c: Context<{ Bindings: Env }>) {
       action: logic.action || "pass",
       action_url: logic.action_url || null,
       status_code: logic.status_code || 302,
+      variants: logic.variants || null,
+      algorithm: logic.algorithm || "thompson_sampling",
       active: true,
     };
   });

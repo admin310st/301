@@ -31,6 +31,17 @@ export interface Env {
   TDS_ANALYTICS: AnalyticsEngineDataset;
 }
 
+type MABAlgorithm = "thompson_sampling" | "ucb" | "epsilon_greedy";
+
+interface MABVariant {
+  url: string;
+  weight?: number;
+  alpha: number;
+  beta: number;
+  impressions: number;
+  conversions: number;
+}
+
 interface TDSRule {
   id: number;
   domain_name: string;
@@ -40,6 +51,8 @@ interface TDSRule {
   action_url: string | null;
   status_code: number;
   active: boolean;
+  variants?: MABVariant[] | null;
+  algorithm?: MABAlgorithm;
 }
 
 interface RuleConditions {
@@ -210,8 +223,18 @@ async function handleTDSRequest(
         country: context.country,
         device: context.device,
       };
-      ctx.waitUntil(emitEvent(env, ctx, event));
 
+      // MAB redirect: select variant, track impression, emit with variant_url
+      if (rule.action === "mab_redirect" && rule.variants && rule.variants.length >= 2) {
+        const selected = selectVariant(rule.variants, rule.algorithm || "thompson_sampling");
+        event.variant_url = selected.url;
+        ctx.waitUntil(emitEvent(env, ctx, event));
+        ctx.waitUntil(upsertMabStat(env, rule.id, selected.url));
+        const url = substituteVariables(selected.url, context);
+        return buildRedirect(url, rule.status_code || 302, `tds:${rule.id}:mab`, false);
+      }
+
+      ctx.waitUntil(emitEvent(env, ctx, event));
       return executeAction(rule, context);
     }
   }
@@ -465,6 +488,139 @@ function substituteVariables(url: string, ctx: RequestContext): string {
 }
 
 // ============================================================
+// MAB ALGORITHMS
+// ============================================================
+
+function selectVariant(variants: MABVariant[], algorithm: MABAlgorithm): MABVariant {
+  switch (algorithm) {
+    case "thompson_sampling": return selectThompsonSampling(variants);
+    case "ucb":               return selectUCB(variants);
+    case "epsilon_greedy":    return selectEpsilonGreedy(variants);
+    default:                  return selectThompsonSampling(variants);
+  }
+}
+
+function selectThompsonSampling(variants: MABVariant[]): MABVariant {
+  let bestVariant = variants[0];
+  let maxTheta = -1;
+
+  for (const variant of variants) {
+    const theta = randomBeta(variant.alpha || 1, variant.beta || 1);
+    if (theta > maxTheta) {
+      maxTheta = theta;
+      bestVariant = variant;
+    }
+  }
+
+  return bestVariant;
+}
+
+function selectUCB(variants: MABVariant[]): MABVariant {
+  const totalImpressions = variants.reduce((sum, v) => sum + (v.impressions || 0), 0);
+
+  let bestVariant = variants[0];
+  let maxUCB = -Infinity;
+
+  for (const variant of variants) {
+    if (!variant.impressions || variant.impressions === 0) {
+      return variant; // Priority to unexplored
+    }
+
+    const mean = (variant.conversions || 0) / variant.impressions;
+    const exploration = Math.sqrt((2 * Math.log(totalImpressions)) / variant.impressions);
+    const ucb = mean + exploration;
+
+    if (ucb > maxUCB) {
+      maxUCB = ucb;
+      bestVariant = variant;
+    }
+  }
+
+  return bestVariant;
+}
+
+function selectEpsilonGreedy(variants: MABVariant[], epsilon = 0.1): MABVariant {
+  // Exploration: random choice
+  if (Math.random() < epsilon) {
+    return variants[Math.floor(Math.random() * variants.length)];
+  }
+
+  // Exploitation: best by conversion rate
+  let bestVariant = variants[0];
+  let maxMean = -1;
+
+  for (const variant of variants) {
+    if (!variant.impressions || variant.impressions === 0) {
+      return variant; // Priority to unexplored
+    }
+
+    const mean = (variant.conversions || 0) / variant.impressions;
+    if (mean > maxMean) {
+      maxMean = mean;
+      bestVariant = variant;
+    }
+  }
+
+  return bestVariant;
+}
+
+// --- Math helpers (Marsaglia-Tsang method for Gamma → Beta) ---
+
+function randomBeta(alpha: number, beta: number): number {
+  const x = randomGamma(alpha, 1);
+  const y = randomGamma(beta, 1);
+  return x / (x + y);
+}
+
+function randomGamma(alpha: number, _beta: number): number {
+  if (alpha < 1) {
+    return randomGamma(alpha + 1, _beta) * Math.pow(Math.random(), 1 / alpha);
+  }
+
+  const d = alpha - 1 / 3;
+  const c = 1 / Math.sqrt(9 * d);
+
+  while (true) {
+    let x: number;
+    let v: number;
+    do {
+      x = randomNormal();
+      v = Math.pow(1 + c * x, 3);
+    } while (v <= 0);
+
+    const u = Math.random();
+    if (u < 1 - 0.0331 * Math.pow(x, 4)) {
+      return d * v;
+    }
+    if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) {
+      return d * v;
+    }
+  }
+}
+
+function randomNormal(): number {
+  const u1 = Math.random();
+  const u2 = Math.random();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+// --- MAB Stats ---
+
+async function upsertMabStat(env: Env, ruleId: number, variantUrl: string): Promise<void> {
+  try {
+    await env.DB.prepare(`
+      INSERT INTO mab_stats (rule_id, variant_url, impressions, updated_at)
+      VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+      ON CONFLICT(rule_id, variant_url) DO UPDATE SET
+        impressions = impressions + 1,
+        updated_at = CURRENT_TIMESTAMP
+    `).bind(ruleId, variantUrl).run();
+  } catch {
+    // Best effort — don't block on stats failure
+  }
+}
+
+// ============================================================
 // THREE-CHANNEL STATISTICS
 // ============================================================
 
@@ -694,8 +850,8 @@ async function autoSync(env: Env): Promise<void> {
     for (const rule of data.rules || []) {
       ruleStmts.push(
         env.DB.prepare(`
-          INSERT INTO tds_rules (id, domain_name, priority, conditions, action, action_url, status_code, active)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO tds_rules (id, domain_name, priority, conditions, action, action_url, status_code, variants, algorithm, active)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).bind(
           rule.id,
           rule.domain_name,
@@ -704,6 +860,8 @@ async function autoSync(env: Env): Promise<void> {
           rule.action,
           rule.action_url,
           rule.status_code || 302,
+          rule.variants ? JSON.stringify(rule.variants) : null,
+          rule.algorithm || "thompson_sampling",
           rule.active ? 1 : 0,
         ),
       );
@@ -774,8 +932,8 @@ async function handleManualSync(env: Env): Promise<Response> {
 
     for (const rule of data.rules || []) {
       await env.DB.prepare(`
-        INSERT INTO tds_rules (id, domain_name, priority, conditions, action, action_url, status_code, active)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO tds_rules (id, domain_name, priority, conditions, action, action_url, status_code, variants, algorithm, active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         rule.id,
         rule.domain_name,
@@ -784,6 +942,8 @@ async function handleManualSync(env: Env): Promise<Response> {
         rule.action,
         rule.action_url,
         rule.status_code || 302,
+        rule.variants ? JSON.stringify(rule.variants) : null,
+        rule.algorithm || "thompson_sampling",
         rule.active ? 1 : 0,
       ).run();
     }
@@ -893,6 +1053,8 @@ async function getRulesForDomain(env: Env, hostname: string): Promise<TDSRule[]>
     action: string;
     action_url: string | null;
     status_code: number;
+    variants: string | null;
+    algorithm: string | null;
     active: number;
   }>();
 
@@ -904,6 +1066,8 @@ async function getRulesForDomain(env: Env, hostname: string): Promise<TDSRule[]>
     action: row.action as "redirect" | "block" | "pass" | "mab_redirect",
     action_url: row.action_url,
     status_code: row.status_code,
+    variants: row.variants ? JSON.parse(row.variants) : null,
+    algorithm: (row.algorithm as MABAlgorithm) || "thompson_sampling",
     active: row.active === 1,
   }));
 }

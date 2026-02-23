@@ -844,6 +844,8 @@ CREATE TABLE IF NOT EXISTS tds_rules (
     action TEXT NOT NULL,
     action_url TEXT,
     status_code INTEGER DEFAULT 302,
+    variants TEXT,
+    algorithm TEXT DEFAULT 'thompson_sampling',
     active INTEGER DEFAULT 1,
     synced_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -861,6 +863,18 @@ CREATE TABLE IF NOT EXISTS domain_config (
     bot_action TEXT DEFAULT 'pass',
     bot_redirect_url TEXT,
     synced_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- MAB Stats
+CREATE TABLE IF NOT EXISTS mab_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id INTEGER NOT NULL,
+    variant_url TEXT NOT NULL,
+    impressions INTEGER DEFAULT 0,
+    conversions INTEGER DEFAULT 0,
+    revenue REAL DEFAULT 0,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(rule_id, variant_url)
 );
 
 -- Sync Status
