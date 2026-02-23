@@ -1,326 +1,547 @@
-# Cloudflare для TDS-платформы: базовые условия, правила и бизнес-модель
+# TDS (Traffic Distribution System) — Спецификация
 
-# 5. Модель TDS ("набор с правилами")
+## 1. Обзор
 
-TDS — распределение трафика по правилам. Реализуйте через Workers (динамика). Правила: Условия + Действие, обрабатываются сверху вниз (первое совпадение — выполняется).
+TDS — модуль распределения трафика по правилам (geo, device, UTM, bot detection, MAB A/B). В отличие от Redirects (push-модель через CF Redirect Rules API), TDS использует **pull-модель**: Client Worker деплоится на аккаунт клиента, сам тянет правила из 301.st API, кеширует в локальную D1 и обрабатывает запросы на edge.
 
-## Базовые условия (на Free)
-- Гео: `request.cf.country` (~250 стран, e.g., "RU").
-- User-Agent: `request.headers.get('User-Agent')` — для устройства (mobile/desktop), OS, браузера (парсинг, e.g., `/Mobile/i.test(ua)`).
-- Боты/Поисковики: По User-Agent (e.g., `Googlebot`, `YandexBot`). Нет готового флага от CF — проверяйте ключевые строки.
-- Другие: IP (`CF-Connecting-IP`), путь, параметры URL, hostname.
+**Ключевое преимущество pull-модели:** после деплоя worker'а изменение правил **не требует CF API вызовов** — worker забирает правила сам. Это критично для Free-тарифа.
 
-## Пример структуры TDS-набора
-- Правило 1: Гео = RU, Device = Mobile → Redirect to лендинг A.
-- Правило 2: Гео = RU → Софт-блок.
-- Правило 3: Default → Универсальный редирект.
-- Максимум правил: Технически неограничено, практично 5–10 на один набор.
+### Сравнение с Redirects
 
-### Основной подход: Workers (бесплатно, гибко)
-- **Как работает**: Один Worker привязывается к маршрутам в разных зонах (e.g., `brand-ru.org/*`, `brand-us.com/*`).
-- **Автоматизация**: Платформа деплоит Worker, добавляет маршруты через API. Клиент нажимает "Заблокировать" — система обновляет конфиг.
-- **Плюсы**: Нет лимитов на количество (только 100k запросов), динамическая логика (гео, EU). Гибкость - возможно управление через TDS-Worker и редирект-Worker.
-- **Минусы**: Требует кода (но платформа скрывает от клиента).
-
-#### Пример. простой редирект-Worker
-```
-export default {
-  fetch(request) {
-    return Response.redirect('https://active-brand.com', 302);
-  }
-}
-```
-#### Пример. Универсальный редирект-Worker на аккаунте клиента
-```
-const REDIRECTS = {
-  'old1.example.com': 'https://active1.brand.com',
-  'spam2.example.net': 'https://active1.brand.com',
-  'geo-old.example.org': 'https://active2.brand.com',
-  // ...
-};
-```
-
-
-Альтернатива: Worker у клиента статический, а список редиректов обновляется через Wrangler API при изменении и редеплоим Worker через API, когда клиент меняет настройки.
-
-### 1. SmartLink (UTM/параметрический TDS)
-Цель: управление трафиком по входящим ссылкам (кампаниям, источникам, креативам).
-- «Кампании / UTM-правила»
-
-Как работает:
-- Клиент размещает на сайте/в рекламе ссылку вида:
-  - https://brand.com/?utm_source=fb&utm_campaign=summer
-- Воркер парсит URL-параметры и принимает решение:
-  - utm_source=fb → редирект на оффер A
-  - utm_source=google → cloak
-  - sub1=geo → редирект на гео-лендинг
-Особенности:
-- Логика привязана к сайту (зоне)
-- Правила = набор условий по параметрам
-- Не зависит от CF-метаданных (гео, UA и т.д.) — работает чисто по URL
-Используется для:
-- A/B-тестов
-- Разделения трафика по источникам
-- DeepLink’ов в офферах
-Это «точечный» TDS — срабатывает только при наличии нужных параметров. 
-
-#### 2. SmartShield (CF-метаданные + правила)
-Цель: автоматическая защита от модераторов, ботов, нежелательных гео — без участия пользователя. 
-- «Автофильтр / Защита»
-
-Как работает:
-Любой заход на домен проходит через Worker
-Worker анализирует метаданные от Cloudflare:
-Гео (request.cf.country)
-ASN (request.cf.asn)
-User-Agent
-TLS-версия
-Client Hints
-- Принимает решение:
-- Если бот / модератор / запрещённая гео → отдаёт белый сайт
-- Если целевой трафик → редирект на оффер
-Особенности:
-- Работает на всех запросах, даже без параметров
-- Логика — «грубая фильтрация» по среде запроса
-Используется для:
-- Софт-блокировок
-- Защиты от банов
-- Гео-таргетинга «по умолчанию»
-Это «фоновый» TDS — работает незаметно для пользователя. 
-
-
-
-## 1. Базовые условия («сигналы»), доступные в Cloudflare Worker бесплатно
-
-Cloudflare автоматически добавляет в запрос заголовки и свойства, которые можно использовать без внешних API:
-
-| УСЛОВИЕ              | КАК ПОЛУЧИТЬ                          | ПРИМЕР ЗНАЧЕНИЯ                | ПРИМЕЧАНИЕ |
-|----------------------|---------------------------------------|--------------------------------|------------|
-| Гео (страна)        | `request.cf.country`                 | `"RU"`, `"US"`                | ISO 3166-1 alpha-2, ~250 значений (не 320 — таких стран нет) |
-| Регион/город        | `request.cf.region`, `request.cf.city` | `"Moscow"`, `"California"`  | Менее надёжны, могут быть пустыми |
-| User-Agent          | `request.headers.get('User-Agent')`  | `"Mozilla/5.0 ..."`           | Нужен парсинг (например, через `ua-parser-js`) |
-| Устройство          | `request.cf.clientTcpRtt` + UA → вывод | —                           | Cloudflare **не даёт** прямой флаг «mobile/desktop» — нужно определять самим |
-| Операционная система| Через UA                             | `"Android"`, `"iOS"`, `"Windows"` | Требует парсинга |
-| Браузер             | Через UA                             | `"Chrome"`, `"Safari"`       | Требует парсинга |
-| IP-адрес            | `request.headers.get('CF-Connecting-IP')` | `"203.0.113.42"`          | Можно использовать для чёрных списков |
-| Параметры URL       | `new URL(request.url).searchParams`  | `?utm_source=spam`            | Полный контроль |
-| Путь (path)         | `new URL(request.url).pathname`      | `"/offer"`                    | — |
-| Хост (домен)        | `new URL(request.url).hostname`      | `"brand-ru.org"`              | Ключ для выбора TDS-конфига |
-
-> **Важно**: Cloudflare **не предоставляет** готовый флаг `isMobile` на бесплатном тарифе.  
-> Нужен  лёгкий парсер (например, `is-mobile`) — работает быстро и не требует внешних вызовов.
+| | Redirects | TDS |
+|---|-----------|-----|
+| Модель | Push (CF Redirect Rules API) | Pull (Client Worker) |
+| Условия | Hostname, Path | Geo, Device, OS, Browser, Bot, UTM, Path, Referrer |
+| CF API при изменении правил | 1-2 вызова | **0** |
+| Гранулярность статистики | Per-host | Per-rule |
+| Каналов сбора статистики | 1 (CF GraphQL) | 3 (DO + AE + D1) |
+| Лимиты клиента | 0% (нативные CF rules) | ~56% Worker/DO |
 
 ---
 
-## 2. Как устроены «правила» в TDS-наборе
+## 2. Два типа TDS-правил
 
-**Правила обрабатываются сверху вниз, первое совпавшее — выполняется.**  
-Это классическая модель `match-first`, как в Page Rules или firewall.
+### SmartLink (параметрический)
 
-### Пример структуры правила (внутри одном TDS-наборе):
+Условия по URL-параметрам: `utm_source`, `utm_campaign`, `sub*`, `click_id`.
 
-| № | УСЛОВИЯ                        | ДЕЙСТВИЕ                              |
-|---|--------------------------------|---------------------------------------|
-| 1 | Гео = RU, Устройство = Mobile | → Редирект на лендинг A              |
-| 2 | Гео = RU                      | → Софт-блок (302 на белый сайт)      |
-| 3 | Гео = US, Источник = fb.com   | → Редирект на лендинг B              |
-| 4 | Любое гео                     | → Редирект на универсальный лендинг  |
+- Срабатывает **только при наличии** нужных параметров
+- Используется для A/B-тестов, разделения по источникам, DeepLink
 
-> Если запрос из RU с мобилки — сработает **правило 1**, остальные игнорируются.
+### SmartShield (защитный)
 
----
+Условия по CF-метаданным: geo, device, OS, browser, bot, ASN.
 
-## 3. Бизнес-модель: Free vs Paid
+- Фоновая фильтрация: боты → белый сайт, целевой трафик → оффер
+- Работает на **всех запросах** без параметров
 
-### Бесплатный тариф (Free Plan)
-- Клиент получает возможность создать **оди TDS-набор** (один набор правил)  
-- Максимум **5–10 правил** (ограничение UI/удобства, не техническое)  
-- Все правила — на основе доступных сигналов (гео, UA, параметры и т.д.)  
-- **Worker — один**, привязан ко всем доменам клиента  
-- Конфигурация хранится **у вас** (в D1/KV), клиент выбирает шаблон  
+### Общие действия (actions)
 
-> **Цель**: дать рабочий TDS **«из коробки»** для кастомной настройки.
+| Действие | Описание |
+|----------|----------|
+| `redirect` | 301/302 на URL (с подстановкой: `{country}`, `{device}`, `{path}`, `{host}`) |
+| `block` | 403 Forbidden |
+| `pass` | Пропустить к origin |
+| `mab_redirect` | MAB-алгоритм выбирает вариант (Paid план) |
 
 ---
 
-### Платный тариф (Paid Plan)
-- Клиент может создать **несколько TDS-наборов**  
-- Каждый набора — **независимый набор правил**  
-- Привязка к **домену или группе доменов**  
-- Возможности:  
-  - A/B-тестирование (2 набора на один домен с весами)  
-  - Разные стратегии под гео/источник  
-  - Сложные цепочки (например, pre-TDS → geo-split → device-split)  
-
-> **Цель**: дать **гибкость продвинутому арбитражнику**.
-```
-## Доступные сигналы в Cloudflare Worker (бесплатный тариф)
-
-**Все перечисленные данные доступны в любом Worker’е на бесплатном тарифе:**
-
-| Сигнал              | Как получить                                      | Пример значения               |
-|---------------------|---------------------------------------------------|-------------------------------|
-| **Страна**          | `request.cf.country`                              | `"RU"`, `"US"`                |
-| **IP-адрес**        | `request.headers.get('CF-Connecting-IP')`         | `"203.0.113.1"`               |
-| **User-Agent**      | `request.headers.get('User-Agent')`               | `"Mozilla/5.0 ..."`           |
-| **Хост (домен)**    | `new URL(request.url).hostname`                   | `"brand-ru.org"`              |
-| **Путь**            | `new URL(request.url).pathname`                   | `"/offer"`                    |
-| **Параметры URL**   | `new URL(request.url).searchParams`               | `?utm_source=fb`              |
-
-> **TDS-правилах без внешних API и платных тарифов.**
-
-Определение ботов и поисковиков (на Free)
-Поисковые боты (Googlebot, YandexBot, Bingbot и др.) явно указывают себя в User-Agent.
-Решение: проверка User-Agent на наличие ключевых строк.
-Пример условия в TDS:
-```
-const isSearchBot = /Googlebot|bingbot|YandexBot|Baiduspider/i.test(ua);
-```
-«Плохие» боты (сканеры, парсеры) определяются по подозрительным UA (HeadlessChrome, python-requests и т.п.).
-
-Базовые условия (на Free):
-- Гео: request.cf.country (250+ стран)
-- Устройство: определяется через User-Agent (mobile / desktop)
-- Источник: User-Agent → поиск ботов (Googlebot, YandexBot и др.)
-- Параметры URL, путь, домен
-
-
-
-## Сравнение архитектуры редирект-Worker’ов 
-
-- Worker привязывается к маршруту: example.com/* или *.example.com/*
-- Один Worker может быть привязан к множеству маршрутов из разных зон
-- В коде Worker’а вы не знаете, из какой зоны пришёл запрос — только по request.url или заголовкам
-> Это ключевой момент: Worker — общий, а логика — должна разветвляться внутри.
-
-### Вариант 1 зона + поддомены → один сложный Worker
-
-Пример:
+## 3. Архитектура
 
 ```
-const url = new URL(request.url);
-const host = url.hostname; // us.brand.com, ru.brand.com, ...
+┌─────────────────────────────────────────────────────┐
+│                 301.st Platform                       │
+│                                                       │
+│  DB301 (D1)                                           │
+│  ┌───────────────┐                                    │
+│  │ tds_rules      │  ← CRUD через API                │
+│  │ tds_params     │  ← справочник параметров          │
+│  │ rule_domain_map│  ← привязка правил к доменам      │
+│  │ tds_stats      │  ← агрегаты с клиентов            │
+│  └───────┬───────┘                                    │
+│          │                                            │
+│  API Worker (src/api/)                                │
+│  ┌─────────────────────────────┐                      │
+│  │ CRUD:  /tds/rules           │ ← UI (app.301.st)   │
+│  │ Sync:  /tds/sync            │ ← Client Worker      │
+│  │ Stats: /tds/postback        │ ← MAB конверсии      │
+│  └─────────────────────────────┘                      │
+└───────────────────────────────────────────────────────┘
+                         │
+    ┌────────────────────┘
+    │  301.st деплоит Worker на аккаунт клиента
+    ▼
+┌─────────────────────────────────────────────────────┐
+│          Customer Cloudflare Account (Free)           │
+│                                                       │
+│  TDS Worker (301-tds)      Durable Object (TdsCounter)│
+│  ┌──────────────────┐     ┌──────────────────┐        │
+│  │ Routes: N доменов │     │ In-memory agg    │        │
+│  │ Rules: per-domain │────▶│ alarm (15 мин):  │        │
+│  │                   │     │  flush → D1      │        │
+│  │ Три канала:       │     └────────┬─────────┘        │
+│  │  ├─ AE (always)   │             │                   │
+│  │  ├─ DO (primary)  │             ▼                   │
+│  │  └─ D1 (fallback) │    Client D1 (301-tds)         │
+│  └──────────────────┘     ┌──────────────────┐        │
+│                            │ tds_rules (cache) │        │
+│  Analytics Engine          │ domain_config     │        │
+│  ┌──────────────────┐     │ stats_hourly      │        │
+│  │ TDS data points   │     │ mab_stats         │        │
+│  │ 3 мес retention   │     │ sync_status       │        │
+│  │ 100k points/день  │     └──────────────────┘        │
+│  └──────────────────┘                                  │
+└─────────────────────────────────────────────────────┘
+```
 
-if (host === 'ru.brand.com') {
-  if (country === 'RU') return tdsRU(request);
-  else return redirect('https://global.brand.com');
-} 
-else if (host === 'us.brand.com') {
-  if (userAgent.includes('bot')) return block();
-  else return tdsUS(request);
+---
+
+## 4. Жизненный цикл правила
+
+### Статусы правила (tds_rules.status)
+
+| Статус | Значение |
+|--------|----------|
+| `draft` | Создано, не привязано к доменам |
+| `active` | Привязано, доступно для sync |
+| `disabled` | Отключено владельцем |
+
+### Статусы привязки (rule_domain_map.binding_status)
+
+| Статус | Значение |
+|--------|----------|
+| `pending` | Привязка создана, ждёт sync |
+| `applied` | Worker забрал правило |
+| `failed` | Ошибка sync |
+| `removed` | Отвязано |
+
+### Поток
+
+```
+POST /tds/rules          →  tds_rules (status: draft)
+POST /tds/rules/:id/domains  →  rule_domain_map (binding_status: pending)
+                                  tds_rules (status: active)
+Client Worker GET /tds/sync   →  rule_domain_map (binding_status: applied)
+Visitor → Worker → matchRule()  →  action (redirect/block/pass)
+```
+
+---
+
+## 5. API Endpoints
+
+### Файлы
+
+```
+src/api/tds/
+├── conditions.ts     # Zod-валидация conditions/actions/logic_json
+├── presets.ts        # Пресеты S1-S5, L1-L3 + expandTdsPreset()
+├── tds.ts            # CRUD handlers
+├── sync.ts           # Worker sync + MAB postback
+└── client/
+    ├── index.ts      # Client Worker + TdsCounter DO
+    └── client.sql    # Client D1 schema
+```
+
+### Справочники
+
+| Endpoint | Метод | Auth | Описание |
+|----------|-------|------|----------|
+| `/tds/presets` | GET | JWT | Список пресетов для UI |
+| `/tds/params` | GET | JWT | Справочник доступных параметров |
+
+### CRUD правил
+
+| Endpoint | Метод | Auth | Описание |
+|----------|-------|------|----------|
+| `/tds/rules` | GET | JWT | Список правил аккаунта |
+| `/tds/rules/:id` | GET | JWT | Одно правило + привязки |
+| `/tds/rules` | POST | editor | Создать правило вручную |
+| `/tds/rules/from-preset` | POST | editor | Создать из пресета |
+| `/tds/rules/:id` | PATCH | editor | Обновить |
+| `/tds/rules/:id` | DELETE | editor | Удалить (каскад rule_domain_map) |
+| `/tds/rules/reorder` | PATCH | editor | Изменить приоритеты |
+
+### Привязка к доменам
+
+| Endpoint | Метод | Auth | Описание |
+|----------|-------|------|----------|
+| `/tds/rules/:id/domains` | POST | editor | Привязать к доменам |
+| `/tds/rules/:id/domains` | GET | JWT | Список привязок |
+| `/tds/rules/:id/domains/:domainId` | DELETE | editor | Отвязать |
+
+### Синхронизация и постбэк
+
+| Endpoint | Метод | Auth | Описание |
+|----------|-------|------|----------|
+| `/tds/sync` | GET | Service JWT | Данные для Worker sync (version-based delta) |
+| `/tds/postback` | POST | — | Фиксация конверсии MAB |
+
+---
+
+## 6. Пресеты
+
+Каждый пресет = одна запись `tds_rules` (не несколько, как в Redirects).
+
+### SmartShield пресеты (S1-S5)
+
+| ID | Название | Фиксированные условия | Пользователь задаёт | Приоритет |
+|----|----------|----------------------|---------------------|-----------|
+| S1 | Bot Shield | `bot: true` | `action` (redirect\|block), `action_url` | 10 |
+| S2 | Geo Filter | — | `geo[]`, `action_url` | 50 |
+| S3 | Mobile Redirect | `device: "mobile"` | `action_url` | 40 |
+| S4 | Desktop Redirect | `device: "desktop"` | `action_url` | 40 |
+| S5 | Geo + Mobile | `device: "mobile"` | `geo[]`, `action_url` | 30 |
+
+### SmartLink пресеты (L1-L3)
+
+| ID | Название | Фиксированные условия | Пользователь задаёт | Приоритет |
+|----|----------|----------------------|---------------------|-----------|
+| L1 | UTM Split | — | `utm_source[]`, `action_url` | 50 |
+| L2 | Facebook Traffic | `utm_source: ["facebook","fb","fb_ads","meta"]`, `match_params: ["fbclid"]` | `action_url` | 40 |
+| L3 | Google Traffic | `utm_source: ["google","google_ads"]`, `match_params: ["gclid"]` | `action_url` | 40 |
+
+### Пример создания из пресета
+
+```json
+POST /tds/rules/from-preset
+{
+  "preset_id": "S5",
+  "params": {
+    "geo": ["RU", "KZ", "UA"],
+    "action_url": "https://m.offer.example.com/cis"
+  },
+  "domain_ids": [45, 46],
+  "rule_name": "CIS Mobile Offer"
 }
-// ... и так далее для 5+ гео, с вложенными условиями
 ```
-Проблемы:
 
-- Растёт глубина вложенности (2–3 уровня условий)
-- Сложно тестировать, отлаживать, обновлять
-- При добавлении нового гео — меняется общий код
-- Ошибки в одном блоке могут повлиять на другие
+---
 
-### Вариант: N зон (N доменов) → Worker с плоской логикой
+## 7. Условия и валидация (conditions.ts)
 
-Подход:
-- Один универсальный Worker, но каждому домену — своя конфигурация
-- Конфигурация передаётся через секреты (env) или загружается по hostname
+### RuleConditions
 
-```
-// Worker один для всех, но логика — по данным
-const CONFIG = {
-  'brand-us.com': { geo: 'US', rules: ['bot-block', 'ios-redirect'] },
-  'brand-ru.org': { geo: 'RU', rules: ['soft-block', 'desktop-only'] },
-  // ...
-};
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `geo` | `string[]` | ISO 3166-1 alpha-2 (RU, US, ...) — включение |
+| `geo_exclude` | `string[]` | Исключение стран |
+| `device` | `"mobile" \| "desktop" \| "any"` | Устройство |
+| `os` | `string[]` | Android, iOS, Windows, macOS, Linux, iPadOS |
+| `browser` | `string[]` | Chrome, Safari, Firefox, Edge, Opera |
+| `bot` | `boolean` | Является ботом |
+| `utm_source` | `string[]` | Значения utm_source |
+| `utm_campaign` | `string[]` | Значения utm_campaign |
+| `match_params` | `string[]` | OR-логика: совпадение если ЛЮБОЙ из параметров в URL |
+| `path` | `string` | Regex для пути |
+| `referrer` | `string` | Regex для реферера |
 
-const host = new URL(request.url).hostname;
-const config = CONFIG[host];
+### match_params — OR-логика для click ID
 
-if (!config) return new Response('Not configured', { status: 404 });
+Пресеты L2/L3 требуют OR: «utm_source=facebook ИЛИ fbclid в URL».
 
-// Плоская обработка:
-if (config.geo === 'RU' && country === 'RU') {
-  return handleTDS(request, 'ru');
+Логика в `matchRule()`:
+- Если `match_params` задан и один из параметров найден в URL → условие выполнено, `utm_source` проверка пропускается
+- Если `match_params` задан, но ни один не найден И `utm_source` не совпадает → правило не матчится
+
+### LogicJson (хранится в tds_rules.logic_json)
+
+```typescript
+{
+  conditions: RuleConditions;
+  action: "redirect" | "block" | "pass" | "mab_redirect";
+  action_url: string | null;
+  status_code: 301 | 302 | 307;
+  variants?: Array<{             // Только для mab_redirect
+    url: string;
+    alpha: number;               // Thompson Sampling параметр
+    beta: number;
+  }>;
 }
-if (config.rules.includes('bot-block') && isBot(userAgent)) {
-  return block();
+```
+
+---
+
+## 8. Client Worker (src/api/tds/client/index.ts)
+
+### Edge-оптимизации
+
+| Оптимизация | Описание | Экономия |
+|-------------|----------|----------|
+| **Bypass статики** | `.css/.js/.png/.jpg/...` не проходят TDS | ~30-50% запросов |
+| **Cache-Control** | `public, max-age=300` для URL-only правил | 10-100x для повторов |
+| **Client Hints** | `Sec-CH-UA-Mobile` → точнее UA | Точность device |
+| **iPad ≠ mobile** | iPad → desktop (стандарт арбитражных TDS) | Корректность |
+| **Anti-loop** | `_tdspass` param предотвращает цикл | Предотвращение 5xx |
+| **Kill switch** | `DISABLE_TDS=true` env var | Мгновенное отключение |
+| **X-Edge-Redirect** | Debug header в DevTools | Отладка |
+| **Accept-CH** | На passthrough-ответах запрашивает Client Hints | Будущие запросы |
+
+### Device detection
+
+Приоритет: Client Hints → UA fallback. iPad исключён из mobile.
+
+```
+Sec-CH-UA-Mobile: ?1 → mobile
+Sec-CH-UA-Mobile: ?0 → desktop
+Нет заголовка → UA regex (без iPad) → mobile | desktop
+```
+
+### Cache-Control стратегия
+
+| Тип правила | Cache-Control | Причина |
+|-------------|---------------|---------|
+| Только по URL/path | `public, max-age=300` | Одинаковый результат для всех |
+| По geo/device/UA | `private, no-cache` | Зависит от клиента |
+| MAB | `private, no-cache` | Каждый запрос = новый выбор |
+
+### Env bindings
+
+```typescript
+interface Env {
+  DB: D1Database;                          // Client D1 (кеш правил + статистика)
+  JWT_TOKEN: string;                       // Сервисный JWT для API
+  ACCOUNT_ID: string;                      // ID аккаунта в 301.st
+  API_URL: string;                         // https://api.301.st
+  RULES_CACHE_TTL?: string;               // TTL sync в секундах (default: 300)
+  DISABLE_TDS?: string;                    // Kill switch
+  TDS_COUNTER: DurableObjectNamespace;     // DO для агрегации статистики
+  TDS_ANALYTICS: AnalyticsEngineDataset;   // AE для fire-and-forget записи
 }
-// ... условия на одном уровне
-```
- или
-
-меняем данные в CONFIG и загружам из вашего API по host.
-Тогда Worker вообще не содержит логики гео — только
-
-```
-const config = await fetch(`https://api.301.example/config?host=${host}`);
-return runTDS(request, config);
 ```
 
-> При 5 зонах (5 доменов) логика остаётся плоской и изолированной.
-> При 1 зоне с поддоменами — логика становится вложенной и хрупкой. 
+---
 
-Профессиональные TDS и арбитражные платформы предпочитают:
-- Отдельные домены под гео/нишу/канал
-- Единый Worker с внешней конфигурацией
-- Полная изоляция при блокировке
+## 9. Синхронизация правил (pull-модель)
 
+### Как работает
 
-Реализацияь на практике. 301 предлагает два варианта работы и два типа редирект-Worker.
+1. Client Worker хранит `version` hash в `sync_status`
+2. По TTL (default 300s) вызывает `GET /tds/sync?version={hash}`
+3. Платформа:
+   - Hash совпадает → **304 Not Modified** → 0 D1 writes
+   - Hash изменился → полный набор правил → DELETE + INSERT
 
-## Публикация Worker
+### Бюджет D1 writes
 
-Worker — это код.
-Маршрут (route) — это правило, где этот код запускать.
-Один и тот же код можно запускать на десятках доменов из разных зон.
+**Без delta sync:** 288 syncs/день × 2000 правил = **576k writes → превышение 100k лимита**
 
-Когда вы деплоите Worker через Wrangler или API, вы указываете маршруты — URL-шаблоны, при обращении к которым будет запущен ваш Worker.
+**С delta sync:** правила меняются редко → 99% sync = 0 writes → **~5k writes/день**
 
-Пример маршрутов:
+### Ответ API
 
-`example.com/*`
-`*.brand.net/*`
-`geo.offer.site/*`
-Каждый такой маршрут привязан к конкретной зоне в Cloudflare:
-
-example.com → зона с ID zone_abc
-brand.net → зона с ID zone_def
-offer.site → зона с ID zone_xyz
-**Worker — один.**
-
-Способ 1: Через `wrangler.toml`
-
-```
-name = "my-tds-worker"
-
-# Один Worker, но маршруты в разных зонах
-routes = [
-  { pattern = "brand-us.com/*",      zone_name = "brand-us.com" },
-  { pattern = "brand-ru.org/*",      zone_name = "brand-ru.org" },
-  { pattern = "offer.brand-eu.net/*", zone_name = "brand-eu.net" }
-]
-```
-Worker загружается один раз
-Cloudflare создаёт привязки к трём разным зонам
-Теперь запросы к любому из этих доменов запускают один и тот же код
-
-Способ через API (более гибко - в рамах 301)
-Сначала загружаете Worker-скрипт
-
-```
-PUT https://api.cloudflare.com/client/v4/accounts/{account_id}/workers/scripts/my-tds-worker
+```json
+{
+  "version": "a1b2c3d4e5f6",
+  "rules": [
+    {
+      "id": 1,
+      "domain_name": "example.com",
+      "priority": 10,
+      "conditions": { "geo": ["RU"], "device": "mobile" },
+      "action": "redirect",
+      "action_url": "https://offer.com/{country}",
+      "status_code": 302,
+      "active": true
+    }
+  ],
+  "configs": [
+    {
+      "domain_name": "example.com",
+      "tds_enabled": true,
+      "default_action": "pass",
+      "smartshield_enabled": true,
+      "bot_action": "pass"
+    }
+  ]
+}
 ```
 
-Потом привязываем его к маршруту в зоне A
+---
+
+## 10. Статистика (три канала)
+
+### Два контура платформы
+
+| | Redirects | TDS |
+|---|-----------|-----|
+| Источник | CF GraphQL Analytics | DO + AE + D1 (три канала) |
+| Гранулярность | Per-host | Per-rule, per-domain, per-hour |
+| Допустима потеря | Да | Нет (каждый переход важен) |
+| Расход лимитов клиента | 0 | ~56% Worker/DO |
+
+### Три канала TDS
+
 ```
-POST https://api.cloudflare.com/client/v4/zones/{zone_id_A}/workers/routes
-{ "pattern": "brand-us.com/*", "script": "my-tds-worker" }
+Worker request
+  │
+  ├─── 1. AE: writeDataPoint()        ← fire-and-forget, всегда
+  │
+  ├─── 2. DO: emit event → TdsCounter ← primary, агрегация в памяти
+  │     │
+  │     └── alarm (15 мин) → flush → Client D1 stats_hourly
+  │
+  └─── 3. D1 fallback (при ошибке DO) ← UPSERT в stats_hourly
 ```
 
-И к маршруту в зоне B
+**Логика:**
+- **AE** — всегда пишет, fire-and-forget, страховка с 3-мес retention
+- **DO** — основной путь, агрегация в памяти, batch flush каждые 15 мин
+- **D1** — fallback при ошибке DO (лимит 100k/день), UPSERT в `stats_hourly`
+- Формат D1 одинаковый (DO flush и fallback) → System Worker забирает без разницы
+
+### Durable Object: TdsCounter
+
+- Один DO instance (`idFromName("global")`) на worker
+- In-memory `Map<string, HourlyBucket>` — ключ: `domain:rule_id:hour`
+- Инкремент счётчиков без I/O на каждый запрос
+- Alarm каждые 15 минут → batch INSERT в `stats_hourly`
+- При ошибке flush → retry через 1 минуту
+
+**Почему 15 минут:**
+
+| Interval | Flush/день | D1 writes | % лимита |
+|----------|-----------|-----------|----------|
+| 5 мин | 288 | 63k | 63% |
+| **15 мин** | **96** | **24k** | **24%** ✅ |
+| 30 мин | 48 | 15k | 15% |
+
+### Analytics Engine
+
+```typescript
+env.TDS_ANALYTICS.writeDataPoint({
+  indexes: [event.domain],
+  blobs: [domain, rule_id, action, country, device, variant_url],
+  doubles: [1],  // count
+});
+```
+
+- Zero overhead (non-blocking)
+- Не расходует D1 writes
+- 3-месяц retention
+- SQL API для гибких запросов
+
+### Client D1: stats_hourly
+
+```sql
+CREATE TABLE stats_hourly (
+    domain_name TEXT NOT NULL,
+    rule_id INTEGER,
+    hour TEXT NOT NULL,          -- '2026-02-22T14'
+    hits INTEGER DEFAULT 0,
+    redirects INTEGER DEFAULT 0,
+    blocks INTEGER DEFAULT 0,
+    passes INTEGER DEFAULT 0,
+    by_country TEXT,             -- JSON: {"RU":150,"US":30}
+    by_device TEXT,              -- JSON: {"mobile":120,"desktop":60}
+    UNIQUE(domain_name, rule_id, hour)
+);
+```
+
+---
+
+## 11. MAB (Multi-Armed Bandits)
+
+### Где работает
+
+- **Выбор варианта** — на edge (Client Worker): Thompson Sampling / UCB / Epsilon-Greedy
+- **Обновление статистики** — AE + DO + D1 fallback (как обычные events)
+
+### Postback (конверсии)
 
 ```
-POST https://api.cloudflare.com/client/v4/zones/{zone_id_B}/workers/routes
-{ "pattern": "brand-ru.org/*", "script": "my-tds-worker" }
+Конверсия на оффере → POST /tds/postback
+{
+  "rule_id": 42,
+  "variant_url": "https://offer-a.com",
+  "converted": 1,
+  "revenue": 150
+}
 ```
 
+Платформа обновляет `alpha/beta` в `tds_rules.logic_json`. При следующем sync Worker получает обновлённые веса.
 
+Postback идёт на **301.st API** (не на клиентский Worker):
+- URL единый для всех клиентов
+- Платформа знает mapping `rule_id → account`
+- Не нужно раскрывать URL клиентского Worker'а
+
+### Plan gating
+
+| Функция | Free | Paid |
+|---------|------|------|
+| redirect, block, pass | ✅ | ✅ |
+| SmartLink (UTM) | ✅ | ✅ |
+| SmartShield (geo, bot) | ✅ | ✅ |
+| mab_redirect | ❌ | ✅ |
+
+---
+
+## 12. Бюджет CF Free Plan
+
+### Расчёт: 100 доменов, ~56k effective Worker invocations/день
+
+| Ресурс | Free лимит | Расход | % |
+|--------|-----------|--------|---|
+| Worker requests | 100k/день | 56k | 56% |
+| DO requests | 100k/день | 56k | 56% |
+| D1 rows read | 5M/день | 617k | 12% |
+| D1 rows written | 100k/день | 24k | 24% |
+| AE data points | 100k/день | 56k | 56% |
+
+### CF API при изменении правил
+
+| Сценарий | CF API calls |
+|----------|-------------|
+| Изменение logic_json/conditions | **0** — Worker заберёт при sync |
+| Добавление домена к правилу | 1-2 (re-seed + route) |
+| Удаление домена | 1-2 (re-seed + delete route) |
+| Включение/отключение правила | **0** |
+
+---
+
+## 13. Миграции
+
+### DB301 (платформа)
+
+```sql
+-- 0013_tds_rules_extend.sql
+ALTER TABLE tds_rules ADD COLUMN status TEXT DEFAULT 'draft';
+ALTER TABLE tds_rules ADD COLUMN preset_id TEXT;
+
+-- 0014_tds_stats.sql
+CREATE TABLE tds_stats (
+    account_id INTEGER NOT NULL,
+    domain_name TEXT NOT NULL,
+    rule_id INTEGER,
+    hour TEXT NOT NULL,
+    hits INTEGER DEFAULT 0,
+    redirects INTEGER DEFAULT 0,
+    blocks INTEGER DEFAULT 0,
+    passes INTEGER DEFAULT 0,
+    by_country TEXT,
+    by_device TEXT,
+    collected_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(account_id, domain_name, rule_id, hour)
+);
+```
+
+### Client D1 (client.sql)
+
+| Таблица | Назначение |
+|---------|------------|
+| `tds_rules` | Кеш правил (sync с API) |
+| `domain_config` | Настройки домена (tds_enabled, bot_action) |
+| `stats_hourly` | Почасовые агрегаты (DO flush + D1 fallback) |
+| `mab_stats` | Impressions/conversions по вариантам MAB |
+| `sync_status` | Version hash + last sync timestamp |
+
+---
+
+## 14. Связь с другими модулями
+
+- **Redirects** — нативные CF Redirect Rules (push-модель). TDS дополняет: сложная логика (geo/device/UTM) через Worker (pull-модель)
+- **Domains** — правила привязываются к доменам через `rule_domain_map`
+- **Sites** — группировка доменов в UI
+- **Workers/Config** — генерация `wrangler.toml`, setup D1/Worker/Secrets
+- **Integrations** — CF-токен клиента для деплоя Worker и сбора статистики
+- **System Worker** — cron: pull stats из Client D1 + AE SQL API → DB301.tds_stats

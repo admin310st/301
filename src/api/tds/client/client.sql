@@ -2,7 +2,8 @@
 -- 301 TDS Client D1 Schema
 -- ============================================================
 -- Local cache for TDS rules and config.
--- Synced from 301.st API.
+-- Synced from 301.st API (pull model).
+-- Stats collected via DO flush + D1 fallback.
 -- ============================================================
 
 -- TDS Rules Cache
@@ -13,9 +14,9 @@ CREATE TABLE IF NOT EXISTS tds_rules (
 
     -- Rule definition
     priority INTEGER DEFAULT 0,
-    conditions TEXT NOT NULL,     -- JSON: {"geo": ["RU"], "device": "mobile"}
-    action TEXT NOT NULL,         -- redirect | block | pass
-    action_url TEXT,              -- Redirect URL
+    conditions TEXT NOT NULL,     -- JSON: {"geo": ["RU"], "device": "mobile", "match_params": ["fbclid"]}
+    action TEXT NOT NULL,         -- redirect | block | pass | mab_redirect
+    action_url TEXT,              -- Redirect URL (supports {country}, {device}, {path}, {host})
     status_code INTEGER DEFAULT 302,
 
     -- Metadata
@@ -47,32 +48,41 @@ CREATE TABLE IF NOT EXISTS domain_config (
     synced_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
--- Request Log (optional, for analytics)
--- Enable via ENABLE_LOGGING=true
-CREATE TABLE IF NOT EXISTS request_log (
+-- Stats Hourly (DO alarm flush target + D1 fallback)
+-- Aggregated per domain + rule + hour
+CREATE TABLE IF NOT EXISTS stats_hourly (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     domain_name TEXT NOT NULL,
-
-    -- Request info
-    path TEXT,
-    country TEXT,
-    device TEXT,
-    user_agent TEXT,
-    ip TEXT,
-
-    -- Result
-    rule_id INTEGER,
-    action TEXT,
-
-    -- Timestamp
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    rule_id INTEGER,               -- NULL = no rule matched (default action)
+    hour TEXT NOT NULL,             -- '2026-02-22T14' (ISO hour)
+    hits INTEGER DEFAULT 0,
+    redirects INTEGER DEFAULT 0,
+    blocks INTEGER DEFAULT 0,
+    passes INTEGER DEFAULT 0,
+    by_country TEXT,                -- JSON: {"RU":150,"US":30}
+    by_device TEXT,                 -- JSON: {"mobile":120,"desktop":60}
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(domain_name, rule_id, hour)
 );
 
-CREATE INDEX IF NOT EXISTS idx_request_log_domain_time
-ON request_log(domain_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_stats_hourly_domain_hour
+ON stats_hourly(domain_name, hour DESC);
+
+-- MAB Stats (Multi-Armed Bandits)
+-- Impressions/conversions per rule variant
+CREATE TABLE IF NOT EXISTS mab_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id INTEGER NOT NULL,
+    variant_url TEXT NOT NULL,
+    impressions INTEGER DEFAULT 0,
+    conversions INTEGER DEFAULT 0,
+    revenue REAL DEFAULT 0,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(rule_id, variant_url)
+);
 
 -- Sync Status
--- Track last sync time for cache invalidation
+-- Track version hash and last sync time
 CREATE TABLE IF NOT EXISTS sync_status (
     key TEXT PRIMARY KEY,
     value TEXT,
@@ -80,5 +90,5 @@ CREATE TABLE IF NOT EXISTS sync_status (
 );
 
 -- Initialize sync status
+INSERT OR IGNORE INTO sync_status (key, value) VALUES ('version', NULL);
 INSERT OR IGNORE INTO sync_status (key, value) VALUES ('last_rules_sync', NULL);
-INSERT OR IGNORE INTO sync_status (key, value) VALUES ('last_config_sync', NULL);

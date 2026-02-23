@@ -108,6 +108,23 @@ import {
   handleGetZoneRedirectStatus,
 } from "./redirects/cf-sync";
 
+// TDS
+import {
+  handleListTdsPresets,
+  handleListTdsParams,
+  handleListTdsRules,
+  handleGetTdsRule,
+  handleCreateTdsRule,
+  handleCreateFromPreset,
+  handleUpdateTdsRule,
+  handleReorderTdsRules,
+  handleDeleteTdsRule,
+  handleBindDomains,
+  handleUnbindDomain,
+  handleListRuleDomains,
+} from "./tds/tds";
+import { handleTdsSync, handleTdsPostback } from "./tds/sync";
+
 // Cron
 import cronHandler from "./jobs/cron";
 
@@ -219,6 +236,31 @@ app.get("/zones/:id/redirect-limits", handleGetZoneRedirectLimits);
 // CF Apply (zone-level)
 app.post("/zones/:id/apply-redirects", handleApplyZoneRedirects);
 app.get("/zones/:id/redirect-status", handleGetZoneRedirectStatus);
+
+// --- TDS ---
+// Presets & Params
+app.get("/tds/presets", handleListTdsPresets);
+app.get("/tds/params", handleListTdsParams);
+
+// Sync (Client Worker pull)
+app.get("/tds/sync", handleTdsSync);
+
+// Postback (MAB conversions)
+app.post("/tds/postback", handleTdsPostback);
+
+// CRUD rules
+app.get("/tds/rules", handleListTdsRules);
+app.post("/tds/rules", handleCreateTdsRule);
+app.post("/tds/rules/from-preset", handleCreateFromPreset);
+app.patch("/tds/rules/reorder", handleReorderTdsRules);
+app.get("/tds/rules/:id", handleGetTdsRule);
+app.patch("/tds/rules/:id", handleUpdateTdsRule);
+app.delete("/tds/rules/:id", handleDeleteTdsRule);
+
+// Domain bindings
+app.post("/tds/rules/:id/domains", handleBindDomains);
+app.get("/tds/rules/:id/domains", handleListRuleDomains);
+app.delete("/tds/rules/:id/domains/:domainId", handleUnbindDomain);
 
 export default {
   fetch: app.fetch,
