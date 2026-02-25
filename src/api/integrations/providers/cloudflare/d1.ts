@@ -227,6 +227,48 @@ export async function getD1Database(
 }
 
 // ============================================================
+// DELETE
+// ============================================================
+
+/**
+ * Delete D1 database
+ *
+ * DELETE /accounts/{account_id}/d1/database/{database_id}
+ */
+export async function deleteD1Database(
+  cfAccountId: string,
+  databaseId: string,
+  token: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const response = await fetch(
+      `${CF_API_BASE}/accounts/${cfAccountId}/d1/database/${databaseId}`,
+      {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+
+    if (response.status === 404) {
+      return { ok: true }; // Already deleted
+    }
+
+    const data = (await response.json()) as CFApiResponse<null>;
+
+    if (!data.success) {
+      const errMsg = data.errors?.[0]?.message || "Failed to delete D1";
+      return { ok: false, error: errMsg };
+    }
+
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Network error" };
+  }
+}
+
+// ============================================================
 // SETUP FLOW
 // ============================================================
 

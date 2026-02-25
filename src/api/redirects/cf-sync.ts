@@ -20,6 +20,7 @@ import type { Env } from "../types/worker";
 import { requireEditor } from "../lib/auth";
 import { getDecryptedKey } from "../integrations/keys/storage";
 import { buildExpression, buildTarget, getTemplate } from "./templates";
+import { ensureClientEnvironment } from "../client-env/middleware";
 
 // ============================================================
 // TYPES
@@ -474,6 +475,13 @@ export async function handleApplyZoneRedirects(c: Context<{ Bindings: Env }>) {
   const auth = await requireEditor(c, env);
   if (!auth) {
     return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+
+  // Ensure client environment exists (fallback for accounts without it)
+  const envCheck = await ensureClientEnvironment(env, auth.account_id);
+  if (!envCheck.ok && envCheck.error !== "cloudflare_integration_required") {
+    console.warn("[apply-redirects] Client env setup failed:", envCheck.error);
+    // Non-blocking: continue with redirect apply even if client env fails
   }
 
   let result;

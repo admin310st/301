@@ -8,6 +8,7 @@
 
 import { Hono } from "hono";
 import { handleHealthWebhook } from "./health";
+import { handleDeployWebhook } from "./deploy";
 
 // ============================================================
 // TYPES
@@ -32,6 +33,9 @@ app.get("/", (c) => {
 
 // Health webhook from Client Worker
 app.post("/health", handleHealthWebhook);
+
+// Deploy webhook from Client Worker (self-check)
+app.post("/deploy", handleDeployWebhook);
 
 // 404 for unknown routes
 app.all("*", (c) => {

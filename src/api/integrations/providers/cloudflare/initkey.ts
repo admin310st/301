@@ -777,7 +777,7 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
   // Setup only for new integrations (not rotate)
   if (scenario !== "rotate") {
     try {
-      const { setupClientEnvironment } = await import("./client-env");
+      const { setupClientEnvironment } = await import("../../../client-env/setup");
       const envSetup = await setupClientEnvironment({
         cfAccountId: cf_account_id,
         cfToken: workingToken.value,
@@ -785,36 +785,25 @@ export async function handleInitKeyCF(c: Context<{ Bindings: Env }>) {
         env,
       });
 
-      if (envSetup.ok) {
+      if (envSetup.ok && envSetup.client_env) {
         clientEnvResult = {
-          d1: envSetup.d1 ? {
-            database_id: envSetup.d1.database_id,
-            created: envSetup.d1.created,
+          d1: envSetup.client_env.d1_id ? {
+            database_id: envSetup.client_env.d1_id,
+            created: true,
           } : undefined,
-          kv: envSetup.kv ? {
-            namespace_id: envSetup.kv.namespace_id,
-            created: envSetup.kv.created,
+          kv: envSetup.client_env.kv_id ? {
+            namespace_id: envSetup.client_env.kv_id,
+            created: true,
           } : undefined,
-          workers: envSetup.workers ? {
-            health: envSetup.workers.health ? {
-              deployed: envSetup.workers.health.deployed,
-            } : undefined,
-          } : undefined,
+          workers: {
+            health: envSetup.client_env.health_worker ? { deployed: true } : undefined,
+          },
         };
 
-        // Save client env IDs to separate field for future sync operations
-        if (envSetup.d1 || envSetup.kv) {
-          const clientEnv = JSON.stringify({
-            d1_id: envSetup.d1?.database_id,
-            kv_id: envSetup.kv?.namespace_id,
-            health_worker: envSetup.workers?.health?.deployed ?? false,
-            tds_worker: false,
-          });
-
-          await env.DB301.prepare(
-            "UPDATE account_keys SET client_env = ? WHERE id = ?"
-          ).bind(clientEnv, keyId).run();
-        }
+        // Save client_env to DB
+        await env.DB301.prepare(
+          "UPDATE account_keys SET client_env = ? WHERE id = ?"
+        ).bind(JSON.stringify(envSetup.client_env), keyId).run();
       } else {
         console.warn("Client environment setup failed:", envSetup.error);
       }

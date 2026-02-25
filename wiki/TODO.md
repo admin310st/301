@@ -84,6 +84,20 @@ _Нет открытых вопросов_
 
 ## Infrastructure
 
-_Нет открытых вопросов_
+### Client Environment — автодеплой на CF аккаунт клиента
+
+Реализовано: `src/api/client-env/` (middleware, setup, teardown, status, router)
+
+- [x] `ensureClientEnvironment()` — middleware (fast DB check → full setup)
+- [x] `setupClientEnvironment()` — all-or-nothing setup (D1, KV, Health, TDS workers)
+- [x] `teardownClientEnvironment()` — удаление всех ресурсов
+- [x] API: `POST /client-env/setup`, `DELETE /client-env`, `GET /client-env/status`
+- [x] Webhook `POST /deploy` — self-check от workers
+- [x] Self-check в health/TDS bundles (*/1 init cron → webhook → remove cron)
+- [x] TDS worker bundle (`src/api/tds/bundle.ts`)
+- [x] Rollback при ошибке на любом шаге
+- [x] Интеграция middleware в `apply-redirects`, `health/setup`
+- [ ] DO (TdsCounter) + AE (TDS_ANALYTICS) bindings в TDS worker deploy
+- [ ] Обновить wiki/Workers.md, wiki/Health_Check.md
 
 ---

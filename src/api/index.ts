@@ -88,6 +88,13 @@ import {
 import { handleGetDomainHealth } from "./domains/health";
 import { handleSetupClientWorker, handleGetClientStatus } from "./health/setup";
 
+// Client Environment
+import {
+  handleSetupClientEnv,
+  handleDeleteClientEnv,
+  handleGetClientEnvStatus,
+} from "./client-env/index";
+
 // Worker Configs
 import {
   handleGenerateConfig,
@@ -197,6 +204,11 @@ app.get("/domains/:id/health", handleGetDomainHealth);
 // --- Health Client ---
 app.post("/health/client/setup", handleSetupClientWorker);
 app.get("/health/client/status", handleGetClientStatus);
+
+// --- Client Environment ---
+app.post("/client-env/setup", handleSetupClientEnv);
+app.delete("/client-env", handleDeleteClientEnv);
+app.get("/client-env/status", handleGetClientEnvStatus);
 
 // --- Worker Configs ---
 app.post("/workers/config", handleGenerateConfig);

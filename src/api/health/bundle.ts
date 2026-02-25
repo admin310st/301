@@ -68,10 +68,83 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
+    // Self-check on first cron trigger
+    const setupStatus = await env.DB.prepare(
+      "SELECT value FROM sync_status WHERE key = 'setup_reported'"
+    ).first().catch(() => null);
+
+    if (!setupStatus || setupStatus.value === null) {
+      ctx.waitUntil(doSelfCheck(env));
+      return;
+    }
+
     console.log("[301-health] Cron triggered:", event.cron);
     ctx.waitUntil(runFullCycle(env));
   },
 };
+
+// ============================================================
+// SELF-CHECK (deploy verification)
+// ============================================================
+
+async function doSelfCheck(env) {
+  const checks = { d1: false, tables: [], secrets: [] };
+
+  try {
+    // Check D1 access
+    const tableCheck = await env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table'"
+    ).all();
+    checks.d1 = true;
+    checks.tables = (tableCheck.results || []).map(r => r.name);
+
+    // Check secrets
+    if (env.JWT_TOKEN) checks.secrets.push("JWT_TOKEN");
+    if (env.ACCOUNT_ID) checks.secrets.push("ACCOUNT_ID");
+
+    // Send deploy webhook
+    const webhookUrl = env.DEPLOY_WEBHOOK_URL || "https://webhook.301.st/deploy";
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + env.JWT_TOKEN,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        type: "setup_ok",
+        worker_name: "301-health",
+        account_id: parseInt(env.ACCOUNT_ID),
+        checks,
+        timestamp: new Date().toISOString(),
+      }),
+    });
+
+    if (response.ok) {
+      await env.DB.prepare(
+        "INSERT OR REPLACE INTO sync_status (key, value, updated_at) VALUES ('setup_reported', 'ok', datetime('now'))"
+      ).run();
+    }
+  } catch (err) {
+    // Send error webhook
+    try {
+      const webhookUrl = env.DEPLOY_WEBHOOK_URL || "https://webhook.301.st/deploy";
+      await fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + env.JWT_TOKEN,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          type: "setup_error",
+          worker_name: "301-health",
+          account_id: parseInt(env.ACCOUNT_ID),
+          error: err.message || "unknown",
+          timestamp: new Date().toISOString(),
+        }),
+      });
+    } catch {}
+  }
+}
 
 // ============================================================
 // FULL CYCLE

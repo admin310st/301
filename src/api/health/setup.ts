@@ -30,6 +30,7 @@ import {
   generateWranglerToml,
   getWorkerConfig,
 } from "../workers/config";
+import { ensureClientEnvironment } from "../client-env/middleware";
 
 // ============================================================
 // CONSTANTS
@@ -141,6 +142,18 @@ export async function handleSetupClientWorker(c: Context<{ Bindings: Env }>): Pr
   }
 
   const { account_id: accountId } = auth;
+
+  // 1.5 Try unified client-env setup first
+  const envResult = await ensureClientEnvironment(env, accountId);
+  if (envResult.ok && envResult.client_env?.ready) {
+    return c.json({
+      ok: true,
+      status: "ready",
+      message: "Client environment already configured via unified setup",
+      client_env: envResult.client_env,
+    });
+  }
+  // If middleware failed, fall through to legacy setup
 
   // 2. Parse body
   let body: SetupRequest = {};
