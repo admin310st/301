@@ -1,0 +1,8 @@
+{
+  "name": "webhook-301",
+  "private": true,
+  "dependencies": {
+    "hono": "^4.10.3",
+    "jose": "^6.1.0"
+  }
+}

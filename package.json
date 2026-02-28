@@ -1,0 +1,15 @@
+{
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260218.0",
+    "@typescript-eslint/eslint-plugin": "^8.54.0",
+    "@typescript-eslint/parser": "^8.54.0",
+    "eslint": "^9.39.2",
+    "typescript": "^5.9.3",
+    "wrangler": "^3.x"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "wrangler types --config src/api/wrangler.toml",
+    "build": "wrangler deploy --dry-run --outdir=dist --config src/api/wrangler.toml"
+  }
+}
