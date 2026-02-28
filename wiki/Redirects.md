@@ -13,6 +13,59 @@
 
 **Важно:** Избегайте DNS-редиректов (CNAME/A) — они не являются HTTP-редиректами и вредны для SEO.
 
+> **API endpoints:** см. [API_Redirects](API_Redirects)
+
+---
+
+## Нативная реализация через Cloudflare
+
+301.st использует **исключительно нативные Cloudflare Redirect Rules** (Single Redirects API) для базовых редиректов. Правила деплоятся через [Rulesets API](https://developers.cloudflare.com/rules/redirect-rules/) в фазу `http_request_dynamic_redirect`.
+
+### Почему нативный подход
+
+| Аспект | Нативные Redirect Rules | Workers |
+|--------|------------------------|---------|
+| Скорость | Мгновенно на edge, до Workers | ~1-5ms cold start |
+| Лимиты Workers | Не расходует | 100K req/day (Free) |
+| Стабильность | Инфраструктура CF, SLA 100% | Зависит от Worker runtime |
+| Стоимость | Бесплатно (до 10 правил/зону) | Платно после лимитов |
+| Сложная логика | Ограничена (нет geo/UA) | Полная гибкость |
+
+**Вывод:** Для простых редиректов (T1-T7) — нативные правила. Для сложной логики (geo, UA, A/B) — TDS через Workers.
+
+### Статистика редиректов
+
+Статистика срабатываний получается через **CF GraphQL Analytics API**:
+
+```graphql
+{
+  viewer {
+    zones(filter: { zoneTag: "<zone_id>" }) {
+      httpRequestsAdaptiveGroups(
+        filter: {
+          date_geq: "2026-02-27"
+          date_leq: "2026-02-28"
+          edgeResponseStatus_in: [301, 302]
+        }
+        limit: 1000
+        orderBy: [date_ASC]
+      ) {
+        dimensions {
+          clientRequestHTTPHost
+          date
+        }
+        count
+      }
+    }
+  }
+}
+```
+
+- Dataset: `httpRequestsAdaptiveGroups`
+- Фильтр: `edgeResponseStatus` 301/302
+- Group by: `clientRequestHTTPHost` — привязка к домену-источнику
+- Data retention (Free): **3 дня** — поэтому batch job собирает данные ежедневно в накопительные счётчики (см. секцию Analytics ниже)
+
 ---
 
 ## Подходы к реализации
