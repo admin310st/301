@@ -4,11 +4,16 @@
  * Client Environment Status
  *
  * Fast check from DB301, optional live check via CF API.
+ * Live check also performs lazy init cron cleanup.
  */
 
 import { Env } from "../types/worker";
 import { listKeys, getDecryptedKey } from "../integrations/keys/storage";
-import { checkWorkerExists } from "../integrations/providers/cloudflare/workers";
+import {
+  checkWorkerExists,
+  getWorkerCrons,
+  setWorkerCrons,
+} from "../integrations/providers/cloudflare/workers";
 import { checkD1Exists } from "../integrations/providers/cloudflare/d1";
 import { checkKVExists } from "../integrations/providers/cloudflare/kv";
 import {
@@ -16,6 +21,10 @@ import {
   CLIENT_KV_NAME,
   HEALTH_WORKER_NAME,
   TDS_WORKER_NAME,
+  HEALTH_CRON_INIT,
+  HEALTH_CRON_WORKING,
+  TDS_CRON_INIT,
+  TDS_CRON_WORKING,
   type ClientEnvResult,
 } from "./setup";
 
@@ -33,6 +42,7 @@ export interface ClientEnvStatusResult {
     kv: boolean;
     health_worker: boolean;
     tds_worker: boolean;
+    crons_cleaned?: boolean;
   };
 }
 
@@ -45,6 +55,7 @@ export interface ClientEnvStatusResult {
  *
  * Fast path: check client_env JSON in account_keys (~1ms)
  * Live path: verify resources actually exist on CF account
+ *            + lazy cleanup of init crons if environment is ready
  */
 export async function getClientEnvStatus(
   env: Env,
@@ -108,21 +119,35 @@ export async function getClientEnvStatus(
   const cfToken = decrypted.secrets.token;
   const cfAccountId = activeCfKey.external_account_id!;
 
-  const [d1Check, kvCheck, healthCheck, tdsCheck] = await Promise.all([
+  const [d1Check, kvCheck, healthCheck, tdsCheck, healthCrons, tdsCrons] = await Promise.all([
     checkD1Exists(cfAccountId, CLIENT_D1_NAME, cfToken),
     checkKVExists(cfAccountId, CLIENT_KV_NAME, cfToken),
     checkWorkerExists(cfAccountId, HEALTH_WORKER_NAME, cfToken),
     checkWorkerExists(cfAccountId, TDS_WORKER_NAME, cfToken),
+    getWorkerCrons(cfAccountId, HEALTH_WORKER_NAME, cfToken),
+    getWorkerCrons(cfAccountId, TDS_WORKER_NAME, cfToken),
   ]);
+
+  const allReady = d1Check.exists && kvCheck.exists && healthCheck.exists && tdsCheck.exists;
+
+  // 4. Lazy init cron cleanup
+  // If environment is ready, remove */1 init crons (best effort)
+  let cronsCleaned = false;
+  if (allReady && clientEnv.ready) {
+    cronsCleaned = await cleanupInitCrons(
+      cfAccountId, cfToken,
+      healthCrons.crons || [],
+      tdsCrons.crons || [],
+    );
+  }
 
   const liveCheck = {
     d1: d1Check.exists,
     kv: kvCheck.exists,
     health_worker: healthCheck.exists,
     tds_worker: tdsCheck.exists,
+    crons_cleaned: cronsCleaned || undefined,
   };
-
-  const allReady = liveCheck.d1 && liveCheck.kv && liveCheck.health_worker && liveCheck.tds_worker;
 
   return {
     ok: true,
@@ -130,4 +155,47 @@ export async function getClientEnvStatus(
     client_env: clientEnv,
     live_check: liveCheck,
   };
+}
+
+// ============================================================
+// LAZY CRON CLEANUP
+// ============================================================
+
+/**
+ * Remove init crons from workers if still present.
+ * Init cron pattern: every 1 minute. Replaced with working cron only.
+ * Called during live status check when environment is ready.
+ * Returns true if any crons were cleaned up.
+ */
+async function cleanupInitCrons(
+  cfAccountId: string,
+  cfToken: string,
+  healthCrons: string[],
+  tdsCrons: string[],
+): Promise<boolean> {
+  let cleaned = false;
+
+  // Health worker: remove init cron, keep working cron
+  if (healthCrons.includes(HEALTH_CRON_INIT)) {
+    const workingOnly = healthCrons.filter((c) => c !== HEALTH_CRON_INIT);
+    if (workingOnly.length === 0) workingOnly.push(HEALTH_CRON_WORKING);
+    const result = await setWorkerCrons(cfAccountId, HEALTH_WORKER_NAME, workingOnly, cfToken);
+    if (result.ok) {
+      console.log("[client-env] Cleaned init cron from 301-health");
+      cleaned = true;
+    }
+  }
+
+  // TDS worker: remove init cron, keep working cron
+  if (tdsCrons.includes(TDS_CRON_INIT)) {
+    const workingOnly = tdsCrons.filter((c) => c !== TDS_CRON_INIT);
+    if (workingOnly.length === 0) workingOnly.push(TDS_CRON_WORKING);
+    const result = await setWorkerCrons(cfAccountId, TDS_WORKER_NAME, workingOnly, cfToken);
+    if (result.ok) {
+      console.log("[client-env] Cleaned init cron from 301-tds");
+      cleaned = true;
+    }
+  }
+
+  return cleaned;
 }

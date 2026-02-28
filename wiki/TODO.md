@@ -92,12 +92,26 @@ _Нет открытых вопросов_
 - [x] `setupClientEnvironment()` — all-or-nothing setup (D1, KV, Health, TDS workers)
 - [x] `teardownClientEnvironment()` — удаление всех ресурсов
 - [x] API: `POST /client-env/setup`, `DELETE /client-env`, `GET /client-env/status`
-- [x] Webhook `POST /deploy` — self-check от workers
-- [x] Self-check в health/TDS bundles (*/1 init cron → webhook → remove cron)
+- [x] Webhook `POST /deploy` — self-check от workers (API key, SHA-256)
+- [x] Self-check в health/TDS bundles (*/1 init cron → webhook → setup_reported flag)
 - [x] TDS worker bundle (`src/api/tds/bundle.ts`)
 - [x] Rollback при ошибке на любом шаге
-- [x] Интеграция middleware в `apply-redirects`, `health/setup`
+- [x] Интеграция middleware в `apply-redirects`, `health/setup`, `tds/rules`
+- [x] E2E тест /deploy — полный цикл setup → self-check → webhook confirm
+- [x] Deploy webhook → DB confirmation (`client_env` JSON: `*_confirmed_at`)
+- [x] Lazy init cron cleanup при live status check
 - [ ] DO (TdsCounter) + AE (TDS_ANALYTICS) bindings в TDS worker deploy
-- [ ] Обновить wiki/Workers.md, wiki/Health_Check.md
+
+### Webhooks — три раздельных endpoint'а
+
+| # | Endpoint | Воркер | Auth | Статус |
+|---|----------|--------|------|--------|
+| 1 | `POST /deploy` | оба | API key (SHA-256) | Готов, DB confirmation |
+| 2 | `POST /health` | 301-health | API key (SHA-256) | Готов, протестирован |
+| 3 | `POST /tds` | 301-tds | API key (SHA-256) | Готов |
+
+Shared auth: `src/webhook/auth.ts` → `verifyApiKey()`
+
+- [ ] Убрать `KV_CREDENTIALS` из webhook wrangler.toml (больше не нужен)
 
 ---

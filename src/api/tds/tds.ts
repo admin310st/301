@@ -19,6 +19,7 @@ import {
   createFromPresetSchema,
 } from "./conditions";
 import { listTdsPresets, expandTdsPreset } from "./presets";
+import { ensureClientEnvironment } from "../client-env/middleware";
 
 // ============================================================
 // TYPES
@@ -222,6 +223,12 @@ export async function handleGetTdsRule(c: Context<{ Bindings: Env }>) {
 export async function handleCreateTdsRule(c: Context<{ Bindings: Env }>) {
   const auth = await requireEditor(c, c.env);
   if (!auth) return c.json({ ok: false, error: "forbidden" }, 403);
+
+  // Ensure client environment (non-blocking: continue even if setup fails)
+  const envCheck = await ensureClientEnvironment(c.env, auth.account_id);
+  if (!envCheck.ok && envCheck.error !== "cloudflare_integration_required") {
+    console.warn("[tds] Client env setup failed:", envCheck.error);
+  }
 
   const body = await c.req.json();
   const parsed = createRuleSchema.safeParse(body);
