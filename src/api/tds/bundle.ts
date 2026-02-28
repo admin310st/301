@@ -7,7 +7,7 @@
  * Core functionality: rule matching, redirects, D1 stats, self-check.
  *
  * Note: This is a simplified version without DO/AE.
- * Stats go directly to D1 (stats_hourly table).
+ * Stats split into two tables: stats_shield (compact) + stats_link (granular).
  */
 
 export function getTdsWorkerBundle(): string {
@@ -69,14 +69,14 @@ export default {
       return fetch(request);
     }
 
-    // Bot check
+    // Bot check (always shield)
     if (config && config.smartshield_enabled && rctx.is_bot) {
       if (config.bot_action === "block") {
-        ctx.waitUntil(recordStat(env, host, null, "blocks"));
+        ctx.waitUntil(recordShieldStat(env, host, null, "blocks"));
         return new Response("Access denied", { status: 403 });
       }
       if (config.bot_action === "redirect" && config.bot_redirect_url) {
-        ctx.waitUntil(recordStat(env, host, null, "redirects"));
+        ctx.waitUntil(recordShieldStat(env, host, null, "blocks"));
         return Response.redirect(config.bot_redirect_url, 302);
       }
     }
@@ -89,22 +89,22 @@ export default {
       }
     }
 
-    // Default action
+    // Default action (shield — no specific rule)
     if (config && config.default_action === "redirect" && config.default_url) {
-      ctx.waitUntil(recordStat(env, host, null, "redirects"));
+      ctx.waitUntil(recordShieldStat(env, host, null, "passes"));
       return Response.redirect(config.default_url, 302);
     }
     if (config && config.default_action === "block") {
-      ctx.waitUntil(recordStat(env, host, null, "blocks"));
+      ctx.waitUntil(recordShieldStat(env, host, null, "blocks"));
       return new Response("Blocked", { status: 403 });
     }
 
-    ctx.waitUntil(recordStat(env, host, null, "passes"));
+    ctx.waitUntil(recordShieldStat(env, host, null, "passes"));
     return fetch(request);
   },
 
   async scheduled(event, env, ctx) {
-    // Self-check on first cron
+    // Self-check on first cron (*/1 * * * *)
     const setupStatus = await env.DB.prepare(
       "SELECT value FROM sync_status WHERE key = 'setup_reported'"
     ).first();
@@ -114,8 +114,10 @@ export default {
       return;
     }
 
-    // Periodic sync
+    // Working cron (0 */6 * * *): sync + push stats + cleanup
     ctx.waitUntil(syncRules(env));
+    ctx.waitUntil(pushStats(env));
+    ctx.waitUntil(cleanupOldStats(env));
   },
 };
 
@@ -133,7 +135,7 @@ async function doSelfCheck(env, workerName) {
     checks.d1 = true;
     checks.tables = (tableCheck.results || []).map(r => r.name);
 
-    if (env.JWT_TOKEN) checks.secrets.push("JWT_TOKEN");
+    if (env.WORKER_API_KEY) checks.secrets.push("WORKER_API_KEY");
     if (env.ACCOUNT_ID) checks.secrets.push("ACCOUNT_ID");
     if (env.API_URL) checks.secrets.push("API_URL");
 
@@ -141,7 +143,7 @@ async function doSelfCheck(env, workerName) {
     const response = await fetch(webhookUrl, {
       method: "POST",
       headers: {
-        Authorization: "Bearer " + env.JWT_TOKEN,
+        Authorization: "Bearer " + env.WORKER_API_KEY,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -164,7 +166,7 @@ async function doSelfCheck(env, workerName) {
       await fetch(webhookUrl, {
         method: "POST",
         headers: {
-          Authorization: "Bearer " + env.JWT_TOKEN,
+          Authorization: "Bearer " + env.WORKER_API_KEY,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -296,19 +298,33 @@ function matchRule(rule, ctx) {
 // ============================================================
 
 function executeAction(rule, ctx, env, execCtx, host) {
+  const isLink = rule.tds_type === "smartlink";
+
   if (rule.action === "block") {
-    execCtx.waitUntil(recordStat(env, host, rule.id, "blocks"));
+    if (isLink) {
+      execCtx.waitUntil(recordLinkStat(env, host, rule.id, ctx.country, ctx.device));
+    } else {
+      execCtx.waitUntil(recordShieldStat(env, host, rule.id, "blocks"));
+    }
     return new Response("Blocked", { status: 403 });
   }
 
   if (rule.action === "pass") {
-    execCtx.waitUntil(recordStat(env, host, rule.id, "passes"));
+    if (isLink) {
+      execCtx.waitUntil(recordLinkStat(env, host, rule.id, ctx.country, ctx.device));
+    } else {
+      execCtx.waitUntil(recordShieldStat(env, host, rule.id, "passes"));
+    }
     return fetch(ctx.request || new Request("https://" + host + ctx.path));
   }
 
   if (rule.action === "redirect" && rule.action_url) {
     const url = interpolateUrl(rule.action_url, ctx);
-    execCtx.waitUntil(recordStat(env, host, rule.id, "redirects"));
+    if (isLink) {
+      execCtx.waitUntil(recordLinkStat(env, host, rule.id, ctx.country, ctx.device));
+    } else {
+      execCtx.waitUntil(recordShieldStat(env, host, rule.id, "passes"));
+    }
     return Response.redirect(url, rule.status_code || 302);
   }
 
@@ -318,7 +334,7 @@ function executeAction(rule, ctx, env, execCtx, host) {
       const chosen = selectVariant(variants, rule.algorithm || "thompson_sampling");
       const url = interpolateUrl(chosen.url, ctx);
       execCtx.waitUntil(recordMabImpression(env, rule.id, chosen.url));
-      execCtx.waitUntil(recordStat(env, host, rule.id, "redirects"));
+      execCtx.waitUntil(recordLinkStat(env, host, rule.id, ctx.country, ctx.device));
       return Response.redirect(url, rule.status_code || 302);
     }
   }
@@ -458,23 +474,35 @@ async function getDomainConfig(env, domain) {
 }
 
 // ============================================================
-// STATS (D1)
+// STATS (D1) — two tables: shield (compact) + link (granular)
 // ============================================================
 
-async function recordStat(env, domain, ruleId, type) {
+async function recordShieldStat(env, domain, ruleId, type) {
   const hour = new Date().toISOString().slice(0, 13);
-  const column = type; // hits, redirects, blocks, passes
-
+  const col = type; // blocks | passes
   try {
-    // Upsert stats_hourly
     await env.DB.prepare(\`
-      INSERT INTO stats_hourly (domain_name, rule_id, hour, hits, \${column})
+      INSERT INTO stats_shield (domain_name, rule_id, hour, hits, \${col})
       VALUES (?, ?, ?, 1, 1)
       ON CONFLICT(domain_name, rule_id, hour)
-      DO UPDATE SET hits = hits + 1, \${column} = \${column} + 1
+      DO UPDATE SET hits = hits + 1, \${col} = \${col} + 1
     \`).bind(domain, ruleId, hour).run();
   } catch (err) {
-    console.error("[301-tds] Stats error:", err);
+    console.error("[301-tds] Shield stats error:", err);
+  }
+}
+
+async function recordLinkStat(env, domain, ruleId, country, device) {
+  const hour = new Date().toISOString().slice(0, 13);
+  try {
+    await env.DB.prepare(\`
+      INSERT INTO stats_link (domain_name, rule_id, hour, country, device, hits, redirects)
+      VALUES (?, ?, ?, ?, ?, 1, 1)
+      ON CONFLICT(domain_name, rule_id, hour, country, device)
+      DO UPDATE SET hits = hits + 1, redirects = redirects + 1
+    \`).bind(domain, ruleId, hour, country || "XX", device || "desktop").run();
+  } catch (err) {
+    console.error("[301-tds] Link stats error:", err);
   }
 }
 
@@ -493,16 +521,101 @@ async function recordMabImpression(env, ruleId, variantUrl) {
 
 async function getStats(env) {
   try {
-    const result = await env.DB.prepare(\`
-      SELECT domain_name, SUM(hits) as total_hits, SUM(redirects) as total_redirects,
-             SUM(blocks) as total_blocks, SUM(passes) as total_passes
-      FROM stats_hourly
-      WHERE hour >= datetime('now', '-24 hours')
+    const shield = await env.DB.prepare(\`
+      SELECT domain_name, SUM(hits) as total_hits, SUM(blocks) as total_blocks, SUM(passes) as total_passes
+      FROM stats_shield WHERE hour >= datetime('now', '-24 hours')
       GROUP BY domain_name
     \`).all();
-    return result.results || [];
+    const link = await env.DB.prepare(\`
+      SELECT domain_name, rule_id, SUM(hits) as total_hits, SUM(redirects) as total_redirects
+      FROM stats_link WHERE hour >= datetime('now', '-24 hours')
+      GROUP BY domain_name, rule_id
+    \`).all();
+    return { shield: shield.results || [], link: link.results || [] };
   } catch {
-    return [];
+    return { shield: [], link: [] };
+  }
+}
+
+// ============================================================
+// PUSH STATS (Client D1 → Webhook)
+// ============================================================
+
+async function pushStats(env) {
+  try {
+    const currentHour = new Date().toISOString().slice(0, 13);
+
+    // Collect completed shield stats (hours before current — aggregate by domain)
+    const shield = await env.DB.prepare(
+      "SELECT domain_name, hour, SUM(hits) as hits, SUM(blocks) as blocks, SUM(passes) as passes FROM stats_shield WHERE hour < ? GROUP BY domain_name, hour"
+    ).bind(currentHour).all();
+
+    // Collect completed link stats (full granularity)
+    const links = await env.DB.prepare(
+      "SELECT domain_name, rule_id, hour, country, device, hits, redirects FROM stats_link WHERE hour < ?"
+    ).bind(currentHour).all();
+
+    // Collect mab impressions
+    const mab = await env.DB.prepare(
+      "SELECT rule_id, variant_url, impressions FROM mab_stats WHERE impressions > 0"
+    ).all();
+
+    const shieldRows = shield.results || [];
+    const linkRows = links.results || [];
+    const mabRows = mab.results || [];
+
+    // Nothing to push
+    if (shieldRows.length === 0 && linkRows.length === 0 && mabRows.length === 0) return;
+
+    const webhookUrl = env.TDS_WEBHOOK_URL || "https://webhook.301.st/tds";
+
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + env.WORKER_API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        account_id: parseInt(env.ACCOUNT_ID),
+        timestamp: new Date().toISOString(),
+        shield: shieldRows,
+        links: linkRows,
+        mab: mabRows,
+      }),
+    });
+
+    if (response.ok) {
+      // Delete pushed rows (completed hours only)
+      await env.DB.prepare("DELETE FROM stats_shield WHERE hour < ?").bind(currentHour).run();
+      await env.DB.prepare("DELETE FROM stats_link WHERE hour < ?").bind(currentHour).run();
+      // Reset mab impression counters (pushed to platform)
+      await env.DB.prepare("UPDATE mab_stats SET impressions = 0 WHERE impressions > 0").run();
+      // Track last push
+      await env.DB.prepare(
+        "INSERT OR REPLACE INTO sync_status (key, value, updated_at) VALUES ('last_stats_push', datetime('now'), datetime('now'))"
+      ).run();
+    } else {
+      console.error("[301-tds] Push stats failed:", response.status, await response.text().catch(() => ""));
+    }
+  } catch (err) {
+    console.error("[301-tds] Push stats error:", err);
+  }
+}
+
+// ============================================================
+// CLEANUP (TTL safety net)
+// ============================================================
+
+async function cleanupOldStats(env) {
+  try {
+    const now = Date.now();
+    const shield7d = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 13);
+    const link30d = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 13);
+
+    await env.DB.prepare("DELETE FROM stats_shield WHERE hour < ?").bind(shield7d).run();
+    await env.DB.prepare("DELETE FROM stats_link WHERE hour < ?").bind(link30d).run();
+  } catch (err) {
+    console.error("[301-tds] Cleanup error:", err);
   }
 }
 
@@ -518,7 +631,7 @@ async function syncRules(env) {
 
     const response = await fetch(env.API_URL + "/tds/sync", {
       headers: {
-        Authorization: "Bearer " + env.JWT_TOKEN,
+        Authorization: "Bearer " + env.WORKER_API_KEY,
         "X-Account-Id": env.ACCOUNT_ID,
       },
     });
@@ -533,10 +646,10 @@ async function syncRules(env) {
       await env.DB.prepare("DELETE FROM tds_rules").run();
       for (const rule of data.rules) {
         await env.DB.prepare(\`
-          INSERT INTO tds_rules (id, domain_name, priority, conditions, action, action_url, status_code, variants, algorithm, active, synced_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO tds_rules (id, domain_name, tds_type, priority, conditions, action, action_url, status_code, variants, algorithm, active, synced_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         \`).bind(
-          rule.id, rule.domain_name, rule.priority,
+          rule.id, rule.domain_name, rule.tds_type || "traffic_shield", rule.priority,
           JSON.stringify(rule.conditions), rule.action,
           rule.action_url || null, rule.status_code || 302,
           rule.variants ? JSON.stringify(rule.variants) : null,

@@ -782,7 +782,110 @@ curl -X POST "https://api.301.st/tds/postback" \
 
 ---
 
-## 15. Таблица endpoints
+## 15. TDS Статистика
+
+### Архитектура сбора
+
+```
+Edge request → Client D1 (stats_shield / stats_link / mab_stats)
+                  │  cron: 0 */6 * * *
+                  ↓
+              POST webhook.301.st/tds  ← API key auth (SHA-256)
+                  │
+                  ↓
+              DB301 (tds_stats_shield / tds_stats_link / tds_rules.logic_json)
+```
+
+Статистика разделена на два потока по `tds_type` правила:
+
+| | SmartShield (`traffic_shield`) | SmartLink (`smartlink`) |
+|---|---|---|
+| Таблица (client) | `stats_shield` | `stats_link` |
+| Таблица (DB301) | `tds_stats_shield` | `tds_stats_link` |
+| Гранулярность | Per-domain, per-hour | Per-rule, per-hour, per-country, per-device |
+| Поля | hits, blocks, passes | hits, redirects |
+| TTL (client) | 7 дней | 30 дней |
+
+### Webhook: POST webhook.301.st/tds
+
+Приём статистики от Client Worker. **Не API endpoint** — вызывается cron'ом воркера, не UI.
+
+**Auth:** `Authorization: Bearer <WORKER_API_KEY>` → SHA-256 hash lookup в `DB301.worker_api_keys`
+
+**Payload:**
+
+```json
+{
+  "account_id": 19,
+  "timestamp": "2026-02-26T12:00:00Z",
+  "shield": [
+    {
+      "domain_name": "example.com",
+      "hour": "2026-02-26T06",
+      "hits": 150,
+      "blocks": 30,
+      "passes": 120
+    }
+  ],
+  "links": [
+    {
+      "domain_name": "offer.com",
+      "rule_id": 42,
+      "hour": "2026-02-26T06",
+      "country": "US",
+      "device": "mobile",
+      "hits": 80,
+      "redirects": 80
+    }
+  ],
+  "mab": [
+    {
+      "rule_id": 42,
+      "variant_url": "https://v1.com",
+      "impressions": 50
+    }
+  ]
+}
+```
+
+**Ответ:**
+
+```json
+{
+  "ok": true,
+  "result": {
+    "shield_upserted": 1,
+    "links_upserted": 1,
+    "mab_updated": 1,
+    "errors": []
+  }
+}
+```
+
+**Обработка:**
+- `shield[]` → UPSERT `DB301.tds_stats_shield` (additive: `hits = hits + excluded.hits`)
+- `links[]` → UPSERT `DB301.tds_stats_link` (additive)
+- `mab[]` → UPDATE `tds_rules.logic_json.variants[].impressions`
+
+### DB301 таблицы
+
+**tds_stats_shield** — агрегат по домену:
+```sql
+UNIQUE(account_id, domain_name, hour)
+-- hits, blocks, passes, collected_at
+```
+
+**tds_stats_link** — полная гранулярность:
+```sql
+UNIQUE(account_id, domain_name, rule_id, hour, country, device)
+-- hits, redirects, collected_at
+```
+
+> **Для UI:** API endpoints для чтения статистики (GET /tds/stats/shield, GET /tds/stats/link) — TODO. Данные доступны в DB301 после push от Client Worker.
+
+---
+
+## 16. Таблица endpoints
 
 | Endpoint | Метод | Auth | Описание |
 |----------|-------|------|----------|
@@ -798,12 +901,13 @@ curl -X POST "https://api.301.st/tds/postback" \
 | `/tds/rules/:id/domains` | POST | editor | Привязать домены |
 | `/tds/rules/:id/domains` | GET | JWT | Список привязок |
 | `/tds/rules/:id/domains/:domainId` | DELETE | editor | Отвязать домен |
-| `/tds/sync` | GET | Service JWT | Sync для Client Worker |
+| `/tds/sync` | GET | API key | Sync для Client Worker |
 | `/tds/postback` | POST | public | MAB конверсии |
+| `webhook.301.st/tds` | POST | API key | Webhook: приём статистики от Client Worker |
 
 ---
 
-## 16. Rule Status
+## 17. Rule Status
 
 | Статус | Описание | UI Badge |
 |--------|----------|----------|
@@ -813,7 +917,7 @@ curl -X POST "https://api.301.st/tds/postback" \
 
 ---
 
-## 17. Типичный flow для UI
+## 18. Типичный flow для UI
 
 ### Создание правила из пресета
 

@@ -68,16 +68,22 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    // Self-check on first cron trigger
+    // Check if self-check already confirmed
     const setupStatus = await env.DB.prepare(
       "SELECT value FROM sync_status WHERE key = 'setup_reported'"
     ).first().catch(() => null);
 
-    if (!setupStatus || setupStatus.value === null) {
-      ctx.waitUntil(doSelfCheck(env));
+    const isInitCron = event.cron === "*/1 * * * *";
+
+    if (isInitCron) {
+      // Init cron: only self-check, nothing else
+      if (!setupStatus || setupStatus.value === null) {
+        ctx.waitUntil(doSelfCheck(env));
+      }
       return;
     }
 
+    // Working cron (0 */12): run full cycle
     console.log("[301-health] Cron triggered:", event.cron);
     ctx.waitUntil(runFullCycle(env));
   },
@@ -88,7 +94,7 @@ export default {
 // ============================================================
 
 async function doSelfCheck(env) {
-  const checks = { d1: false, tables: [], secrets: [] };
+  const checks = { d1: false, kv: false, tables: [], secrets: [] };
 
   try {
     // Check D1 access
@@ -98,8 +104,16 @@ async function doSelfCheck(env) {
     checks.d1 = true;
     checks.tables = (tableCheck.results || []).map(r => r.name);
 
+    // Check KV access
+    try {
+      await env.KV.put("_selfcheck", "1");
+      const val = await env.KV.get("_selfcheck");
+      if (val === "1") checks.kv = true;
+      await env.KV.delete("_selfcheck");
+    } catch {}
+
     // Check secrets
-    if (env.JWT_TOKEN) checks.secrets.push("JWT_TOKEN");
+    if (env.WORKER_API_KEY) checks.secrets.push("WORKER_API_KEY");
     if (env.ACCOUNT_ID) checks.secrets.push("ACCOUNT_ID");
 
     // Send deploy webhook
@@ -107,7 +121,7 @@ async function doSelfCheck(env) {
     const response = await fetch(webhookUrl, {
       method: "POST",
       headers: {
-        Authorization: "Bearer " + env.JWT_TOKEN,
+        Authorization: "Bearer " + env.WORKER_API_KEY,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -120,9 +134,13 @@ async function doSelfCheck(env) {
     });
 
     if (response.ok) {
-      await env.DB.prepare(
-        "INSERT OR REPLACE INTO sync_status (key, value, updated_at) VALUES ('setup_reported', 'ok', datetime('now'))"
-      ).run();
+      const result = await response.json().catch(() => ({}));
+      if (result.ok) {
+        await env.DB.prepare(
+          "INSERT OR REPLACE INTO sync_status (key, value, updated_at) VALUES ('setup_reported', 'ok', datetime('now'))"
+        ).run();
+        console.log("[301-health] Self-check confirmed by webhook");
+      }
     }
   } catch (err) {
     // Send error webhook
@@ -131,7 +149,7 @@ async function doSelfCheck(env) {
       await fetch(webhookUrl, {
         method: "POST",
         headers: {
-          Authorization: "Bearer " + env.JWT_TOKEN,
+          Authorization: "Bearer " + env.WORKER_API_KEY,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -399,7 +417,7 @@ async function sendHealthWebhook(env, data) {
     const response = await fetch(env.WEBHOOK_URL, {
       method: "POST",
       headers: {
-        Authorization: \`Bearer \${env.JWT_TOKEN}\`,
+        Authorization: \`Bearer \${env.WORKER_API_KEY}\`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({

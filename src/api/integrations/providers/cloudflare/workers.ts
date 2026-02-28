@@ -449,6 +449,47 @@ export async function setWorkerCrons(
 }
 
 /**
+ * Get cron triggers for worker
+ *
+ * GET /accounts/{account_id}/workers/scripts/{script_name}/schedules
+ */
+export async function getWorkerCrons(
+  cfAccountId: string,
+  scriptName: string,
+  token: string
+): Promise<{ ok: boolean; crons?: string[]; error?: string }> {
+  try {
+    const response = await fetch(
+      `${CF_API_BASE}/accounts/${cfAccountId}/workers/scripts/${scriptName}/schedules`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data = (await response.json()) as any;
+
+    if (!data.success) {
+      const errMsg = data.errors?.[0]?.message || "Failed to get cron triggers";
+      return { ok: false, error: errMsg };
+    }
+
+    // CF API may return { result: { schedules: [...] } } or { result: [...] }
+    const schedules = data.result?.schedules || data.result;
+    return {
+      ok: true,
+      crons: (Array.isArray(schedules) ? schedules : []).map((s: { cron: string }) => s.cron),
+      _raw: data.result,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Network error" };
+  }
+}
+
+/**
  * Delete worker script
  *
  * DELETE /accounts/{account_id}/workers/scripts/{script_name}
@@ -468,6 +509,10 @@ export async function deleteWorkerScript(
         },
       }
     );
+
+    if (response.status === 404) {
+      return { ok: true }; // Already deleted
+    }
 
     const data = (await response.json()) as CFApiResponse<null>;
 

@@ -3,7 +3,7 @@
 -- ============================================================
 -- Local cache for TDS rules and config.
 -- Synced from 301.st API (pull model).
--- Stats collected via DO flush + D1 fallback.
+-- Stats: shield (compact) + link (granular) — two tables.
 -- ============================================================
 
 -- TDS Rules Cache
@@ -11,6 +11,7 @@
 CREATE TABLE IF NOT EXISTS tds_rules (
     id INTEGER PRIMARY KEY,
     domain_name TEXT NOT NULL,
+    tds_type TEXT NOT NULL DEFAULT 'traffic_shield', -- traffic_shield | smartlink
 
     -- Rule definition
     priority INTEGER DEFAULT 0,
@@ -50,25 +51,36 @@ CREATE TABLE IF NOT EXISTS domain_config (
     synced_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
--- Stats Hourly (DO alarm flush target + D1 fallback)
--- Aggregated per domain + rule + hour
-CREATE TABLE IF NOT EXISTS stats_hourly (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+-- Shield Stats (SmartShield / traffic_shield)
+-- Compact: per-domain, per-rule, per-hour. TTL: 7 days.
+CREATE TABLE IF NOT EXISTS stats_shield (
     domain_name TEXT NOT NULL,
-    rule_id INTEGER,               -- NULL = no rule matched (default action)
-    hour TEXT NOT NULL,             -- '2026-02-22T14' (ISO hour)
+    rule_id INTEGER,
+    hour TEXT NOT NULL,
     hits INTEGER DEFAULT 0,
-    redirects INTEGER DEFAULT 0,
     blocks INTEGER DEFAULT 0,
     passes INTEGER DEFAULT 0,
-    by_country TEXT,                -- JSON: {"RU":150,"US":30}
-    by_device TEXT,                 -- JSON: {"mobile":120,"desktop":60}
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(domain_name, rule_id, hour)
 );
 
-CREATE INDEX IF NOT EXISTS idx_stats_hourly_domain_hour
-ON stats_hourly(domain_name, hour DESC);
+CREATE INDEX IF NOT EXISTS idx_stats_shield_hour
+ON stats_shield(hour, rule_id);
+
+-- Link Stats (SmartLink)
+-- Granular: per-domain, per-rule, per-hour, per-country, per-device. TTL: 30 days.
+CREATE TABLE IF NOT EXISTS stats_link (
+    domain_name TEXT NOT NULL,
+    rule_id INTEGER NOT NULL,
+    hour TEXT NOT NULL,
+    country TEXT NOT NULL DEFAULT 'XX',
+    device TEXT NOT NULL DEFAULT 'desktop',
+    hits INTEGER DEFAULT 0,
+    redirects INTEGER DEFAULT 0,
+    UNIQUE(domain_name, rule_id, hour, country, device)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stats_link_hour
+ON stats_link(hour, rule_id, country, device);
 
 -- MAB Stats (Multi-Armed Bandits)
 -- Impressions/conversions per rule variant

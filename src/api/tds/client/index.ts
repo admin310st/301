@@ -22,9 +22,11 @@
 
 export interface Env {
   DB: D1Database;
-  JWT_TOKEN: string;
+  WORKER_API_KEY: string;
   ACCOUNT_ID: string;
   API_URL: string;
+  DEPLOY_WEBHOOK_URL?: string;
+  TDS_WEBHOOK_URL?: string;
   RULES_CACHE_TTL?: string;    // Cache TTL in seconds (default: 300)
   DISABLE_TDS?: string;        // Kill switch: "true" to bypass all TDS
   TDS_COUNTER: DurableObjectNamespace;
@@ -45,6 +47,7 @@ interface MABVariant {
 interface TDSRule {
   id: number;
   domain_name: string;
+  tds_type: "traffic_shield" | "smartlink";
   priority: number;
   conditions: RuleConditions;
   action: "redirect" | "block" | "pass" | "mab_redirect";
@@ -97,6 +100,7 @@ interface RequestContext {
 interface TdsEvent {
   domain: string;
   rule_id: number | null;
+  tds_type: "traffic_shield" | "smartlink";
   action: string;
   country: string;
   device: string;
@@ -158,6 +162,23 @@ export default {
     // Process TDS rules
     return handleTDSRequest(request, env, ctx);
   },
+
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Self-check on first cron (*/1 * * * *)
+    const setupStatus = await env.DB.prepare(
+      "SELECT value FROM sync_status WHERE key = 'setup_reported'",
+    ).first<{ value: string | null }>();
+
+    if (!setupStatus || setupStatus.value === null) {
+      ctx.waitUntil(doSelfCheck(env));
+      return;
+    }
+
+    // Working cron (0 */6 * * *): sync + push stats + cleanup
+    ctx.waitUntil(autoSync(env));
+    ctx.waitUntil(pushStats(env));
+    ctx.waitUntil(cleanupOldStats(env));
+  },
 };
 
 // ============================================================
@@ -196,6 +217,7 @@ async function handleTDSRequest(
     const event: TdsEvent = {
       domain: context.hostname,
       rule_id: null,
+      tds_type: "traffic_shield",
       action: config.bot_action,
       country: context.country,
       device: context.device,
@@ -219,6 +241,7 @@ async function handleTDSRequest(
       const event: TdsEvent = {
         domain: context.hostname,
         rule_id: rule.id,
+        tds_type: rule.tds_type || "traffic_shield",
         action: rule.action,
         country: context.country,
         device: context.device,
@@ -239,10 +262,11 @@ async function handleTDSRequest(
     }
   }
 
-  // No rule matched — emit event for default action
+  // No rule matched — emit event for default action (shield)
   const event: TdsEvent = {
     domain: context.hostname,
     rule_id: null,
+    tds_type: "traffic_shield",
     action: config.default_action,
     country: context.country,
     device: context.device,
@@ -658,7 +682,7 @@ async function emitEvent(env: Env, ctx: ExecutionContext, event: TdsEvent): Prom
     if (!resp.ok) throw new Error(`DO returned ${resp.status}`);
   } catch {
     // 3. D1 fallback — when DO unavailable (limit exceeded)
-    ctx.waitUntil(upsertStatsHourly(env.DB, event));
+    ctx.waitUntil(upsertStatsFallback(env.DB, event));
   }
 }
 
@@ -667,26 +691,40 @@ function hourKey(): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}T${String(d.getUTCHours()).padStart(2, "0")}`;
 }
 
-async function upsertStatsHourly(db: D1Database, event: TdsEvent): Promise<void> {
+async function upsertStatsFallback(db: D1Database, event: TdsEvent): Promise<void> {
   try {
     const hour = hourKey();
-    const actionCol = event.action === "redirect" || event.action === "mab_redirect"
-      ? "redirects"
-      : event.action === "block" ? "blocks" : "passes";
 
-    await db.prepare(`
-      INSERT INTO stats_hourly (domain_name, rule_id, hour, hits, ${actionCol}, by_country, by_device)
-      VALUES (?, ?, ?, 1, 1, ?, ?)
-      ON CONFLICT(domain_name, rule_id, hour) DO UPDATE SET
-        hits = hits + 1,
-        ${actionCol} = ${actionCol} + 1
-    `).bind(
-      event.domain,
-      event.rule_id,
-      hour,
-      JSON.stringify(event.country ? { [event.country]: 1 } : {}),
-      JSON.stringify(event.device ? { [event.device]: 1 } : {}),
-    ).run();
+    if (event.tds_type === "smartlink") {
+      // Link: granular — per country/device
+      await db.prepare(`
+        INSERT INTO stats_link (domain_name, rule_id, hour, country, device, hits, redirects)
+        VALUES (?, ?, ?, ?, ?, 1, 1)
+        ON CONFLICT(domain_name, rule_id, hour, country, device) DO UPDATE SET
+          hits = hits + 1,
+          redirects = redirects + 1
+      `).bind(
+        event.domain,
+        event.rule_id,
+        hour,
+        event.country || "XX",
+        event.device || "desktop",
+      ).run();
+    } else {
+      // Shield: compact — blocks/passes counter
+      const col = event.action === "block" ? "blocks" : "passes";
+      await db.prepare(`
+        INSERT INTO stats_shield (domain_name, rule_id, hour, hits, ${col})
+        VALUES (?, ?, ?, 1, 1)
+        ON CONFLICT(domain_name, rule_id, hour) DO UPDATE SET
+          hits = hits + 1,
+          ${col} = ${col} + 1
+      `).bind(
+        event.domain,
+        event.rule_id,
+        hour,
+      ).run();
+    }
   } catch {
     // D1 fallback — best effort
   }
@@ -699,6 +737,7 @@ async function upsertStatsHourly(db: D1Database, event: TdsEvent): Promise<void>
 interface HourlyBucket {
   domain: string;
   rule_id: number | null;
+  tds_type: "traffic_shield" | "smartlink";
   hour: string;
   hits: number;
   redirects: number;
@@ -723,13 +762,14 @@ export class TdsCounter implements DurableObject {
     try {
       const event = await request.json<TdsEvent>();
       const hour = hourKey();
-      const key = `${event.domain}:${event.rule_id ?? "null"}:${hour}`;
+      const key = `${event.tds_type}:${event.domain}:${event.rule_id ?? "null"}:${hour}`;
 
       let bucket = this.counters.get(key);
       if (!bucket) {
         bucket = {
           domain: event.domain,
           rule_id: event.rule_id,
+          tds_type: event.tds_type,
           hour,
           hits: 0,
           redirects: 0,
@@ -773,27 +813,56 @@ export class TdsCounter implements DurableObject {
 
     const stmts: D1PreparedStatement[] = [];
     for (const bucket of this.counters.values()) {
-      stmts.push(
-        this.env.DB.prepare(`
-          INSERT INTO stats_hourly (domain_name, rule_id, hour, hits, redirects, blocks, passes, by_country, by_device)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(domain_name, rule_id, hour) DO UPDATE SET
-            hits = hits + excluded.hits,
-            redirects = redirects + excluded.redirects,
-            blocks = blocks + excluded.blocks,
-            passes = passes + excluded.passes
-        `).bind(
-          bucket.domain,
-          bucket.rule_id,
-          bucket.hour,
-          bucket.hits,
-          bucket.redirects,
-          bucket.blocks,
-          bucket.passes,
-          JSON.stringify(bucket.by_country),
-          JSON.stringify(bucket.by_device),
-        ),
-      );
+      if (bucket.tds_type === "smartlink") {
+        // Link: expand by_country × by_device into individual rows
+        for (const [country, countryHits] of Object.entries(bucket.by_country)) {
+          for (const [device, deviceHits] of Object.entries(bucket.by_device)) {
+            // Approximate split: proportional
+            const ratio = (countryHits * deviceHits) / (bucket.hits || 1);
+            const hits = Math.max(1, Math.round(bucket.hits * ratio));
+            const redirects = Math.max(0, Math.round(bucket.redirects * ratio));
+            stmts.push(
+              this.env.DB.prepare(`
+                INSERT INTO stats_link (domain_name, rule_id, hour, country, device, hits, redirects)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(domain_name, rule_id, hour, country, device) DO UPDATE SET
+                  hits = hits + excluded.hits,
+                  redirects = redirects + excluded.redirects
+              `).bind(
+                bucket.domain, bucket.rule_id, bucket.hour,
+                country, device, hits, redirects,
+              ),
+            );
+          }
+        }
+        // If no country/device recorded, write a single row
+        if (Object.keys(bucket.by_country).length === 0) {
+          stmts.push(
+            this.env.DB.prepare(`
+              INSERT INTO stats_link (domain_name, rule_id, hour, country, device, hits, redirects)
+              VALUES (?, ?, ?, 'XX', 'desktop', ?, ?)
+              ON CONFLICT(domain_name, rule_id, hour, country, device) DO UPDATE SET
+                hits = hits + excluded.hits,
+                redirects = redirects + excluded.redirects
+            `).bind(bucket.domain, bucket.rule_id, bucket.hour, bucket.hits, bucket.redirects),
+          );
+        }
+      } else {
+        // Shield: compact row
+        stmts.push(
+          this.env.DB.prepare(`
+            INSERT INTO stats_shield (domain_name, rule_id, hour, hits, blocks, passes)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(domain_name, rule_id, hour) DO UPDATE SET
+              hits = hits + excluded.hits,
+              blocks = blocks + excluded.blocks,
+              passes = passes + excluded.passes
+          `).bind(
+            bucket.domain, bucket.rule_id, bucket.hour,
+            bucket.hits, bucket.blocks, bucket.passes,
+          ),
+        );
+      }
     }
 
     try {
@@ -828,7 +897,7 @@ async function autoSync(env: Env): Promise<void> {
     const url = `${env.API_URL}/tds/sync?version=${encodeURIComponent(currentVersion)}`;
     const resp = await fetch(url, {
       headers: {
-        Authorization: `Bearer ${env.JWT_TOKEN}`,
+        Authorization: `Bearer ${env.WORKER_API_KEY}`,
         "X-Account-ID": env.ACCOUNT_ID,
       },
     });
@@ -913,7 +982,7 @@ async function handleManualSync(env: Env): Promise<Response> {
   try {
     const response = await fetch(`${env.API_URL}/tds/sync`, {
       headers: {
-        Authorization: `Bearer ${env.JWT_TOKEN}`,
+        Authorization: `Bearer ${env.WORKER_API_KEY}`,
         "X-Account-ID": env.ACCOUNT_ID,
       },
     });
@@ -1056,11 +1125,13 @@ async function getRulesForDomain(env: Env, hostname: string): Promise<TDSRule[]>
     variants: string | null;
     algorithm: string | null;
     active: number;
+    tds_type: string | null;
   }>();
 
   return rows.results.map((row) => ({
     id: row.id,
     domain_name: row.domain_name,
+    tds_type: (row.tds_type as "traffic_shield" | "smartlink") || "traffic_shield",
     priority: row.priority,
     conditions: JSON.parse(row.conditions),
     action: row.action as "redirect" | "block" | "pass" | "mab_redirect",
@@ -1070,4 +1141,168 @@ async function getRulesForDomain(env: Env, hostname: string): Promise<TDSRule[]>
     algorithm: (row.algorithm as MABAlgorithm) || "thompson_sampling",
     active: row.active === 1,
   }));
+}
+
+// ============================================================
+// SELF-CHECK (first cron run)
+// ============================================================
+
+async function doSelfCheck(env: Env): Promise<void> {
+  const checks: { d1: boolean; tables: string[]; secrets: string[] } = {
+    d1: false,
+    tables: [],
+    secrets: [],
+  };
+
+  try {
+    const tableCheck = await env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table'",
+    ).all<{ name: string }>();
+    checks.d1 = true;
+    checks.tables = (tableCheck.results || []).map((r) => r.name);
+
+    if (env.WORKER_API_KEY) checks.secrets.push("WORKER_API_KEY");
+    if (env.ACCOUNT_ID) checks.secrets.push("ACCOUNT_ID");
+    if (env.API_URL) checks.secrets.push("API_URL");
+
+    const webhookUrl = env.DEPLOY_WEBHOOK_URL || "https://webhook.301.st/deploy";
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.WORKER_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        type: "setup_ok",
+        worker_name: "301-tds",
+        account_id: parseInt(env.ACCOUNT_ID),
+        checks,
+        timestamp: new Date().toISOString(),
+      }),
+    });
+
+    if (response.ok) {
+      await env.DB.prepare(
+        "INSERT OR REPLACE INTO sync_status (key, value, updated_at) VALUES ('setup_reported', 'ok', CURRENT_TIMESTAMP)",
+      ).run();
+    }
+  } catch (err) {
+    try {
+      const webhookUrl = env.DEPLOY_WEBHOOK_URL || "https://webhook.301.st/deploy";
+      await fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.WORKER_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          type: "setup_error",
+          worker_name: "301-tds",
+          account_id: parseInt(env.ACCOUNT_ID),
+          error: err instanceof Error ? err.message : "unknown",
+          timestamp: new Date().toISOString(),
+        }),
+      });
+    } catch {
+      // Fire-and-forget
+    }
+  }
+}
+
+// ============================================================
+// PUSH STATS (Client D1 → Webhook)
+// ============================================================
+
+async function pushStats(env: Env): Promise<void> {
+  try {
+    const currentHour = new Date().toISOString().slice(0, 13);
+
+    // Collect completed shield stats (aggregate by domain — platform has no rule_id)
+    const shield = await env.DB.prepare(
+      "SELECT domain_name, hour, SUM(hits) as hits, SUM(blocks) as blocks, SUM(passes) as passes FROM stats_shield WHERE hour < ? GROUP BY domain_name, hour",
+    ).bind(currentHour).all<{
+      domain_name: string;
+      hour: string;
+      hits: number;
+      blocks: number;
+      passes: number;
+    }>();
+
+    // Collect completed link stats (full granularity)
+    const links = await env.DB.prepare(
+      "SELECT domain_name, rule_id, hour, country, device, hits, redirects FROM stats_link WHERE hour < ?",
+    ).bind(currentHour).all<{
+      domain_name: string;
+      rule_id: number;
+      hour: string;
+      country: string;
+      device: string;
+      hits: number;
+      redirects: number;
+    }>();
+
+    // Collect mab impressions
+    const mab = await env.DB.prepare(
+      "SELECT rule_id, variant_url, impressions FROM mab_stats WHERE impressions > 0",
+    ).all<{
+      rule_id: number;
+      variant_url: string;
+      impressions: number;
+    }>();
+
+    const shieldRows = shield.results || [];
+    const linkRows = links.results || [];
+    const mabRows = mab.results || [];
+
+    // Nothing to push
+    if (shieldRows.length === 0 && linkRows.length === 0 && mabRows.length === 0) return;
+
+    const webhookUrl = env.TDS_WEBHOOK_URL || "https://webhook.301.st/tds";
+
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.WORKER_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        account_id: parseInt(env.ACCOUNT_ID),
+        timestamp: new Date().toISOString(),
+        shield: shieldRows,
+        links: linkRows,
+        mab: mabRows,
+      }),
+    });
+
+    if (response.ok) {
+      // Delete pushed rows (completed hours only)
+      await env.DB.prepare("DELETE FROM stats_shield WHERE hour < ?").bind(currentHour).run();
+      await env.DB.prepare("DELETE FROM stats_link WHERE hour < ?").bind(currentHour).run();
+      // Reset mab impression counters (pushed to platform)
+      await env.DB.prepare("UPDATE mab_stats SET impressions = 0 WHERE impressions > 0").run();
+      // Track last push
+      await env.DB.prepare(
+        "INSERT OR REPLACE INTO sync_status (key, value, updated_at) VALUES ('last_stats_push', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      ).run();
+    }
+  } catch {
+    // Push failure is non-fatal — retry on next cron
+  }
+}
+
+// ============================================================
+// CLEANUP (TTL safety net)
+// ============================================================
+
+async function cleanupOldStats(env: Env): Promise<void> {
+  try {
+    const now = Date.now();
+    const shield7d = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 13);
+    const link30d = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 13);
+
+    await env.DB.prepare("DELETE FROM stats_shield WHERE hour < ?").bind(shield7d).run();
+    await env.DB.prepare("DELETE FROM stats_link WHERE hour < ?").bind(link30d).run();
+  } catch {
+    // Cleanup failure is non-fatal
+  }
 }

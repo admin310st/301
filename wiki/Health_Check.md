@@ -34,7 +34,7 @@ flowchart TB
         POLL -->|GraphQL redirects| DOM
         POLL -->|anomaly?| ZONES_CHECK[Check zones phishing]
         ZONES_CHECK --> DOM
-        WH -->|Verify JWT| PROCESS[Process data]
+        WH -->|Verify API key| PROCESS[Process data]
         PROCESS --> DOM
         PROCESS --> THR
     end
@@ -63,26 +63,28 @@ flowchart TB
     W -->|по триггеру| ZONES
 ```
 
-### Push Model — простая модель безопасности
+### Push Model — аутентификация через API key
 
 ```
 Client Worker                              301.st Webhook
      │                                           │
      │  POST /health                             │
-     │  Authorization: Bearer <JWT>              │
+     │  Authorization: Bearer <WORKER_API_KEY>   │
      │  Body: { zones, threats }    ───────────► │
-     │                                           │ Verify JWT
+     │                                           │ SHA-256(key) → DB301 lookup
+     │                                           │ → account_id
      │                                           │ Process data
      │  ◄─────────────────────────────────────── │
      │  { ok: true, result: {...} }              │
      │                                           │
 ```
 
-**Аудит безопасности:**
-- Клиент аутентифицируется JWT токеном
-- 301.st валидирует JWT и извлекает account_id
-- Данные из body привязываются к account_id из токена
-- Никаких дополнительных секретов не требуется
+**Безопасность:**
+- API key генерируется при setup (nanoid 32)
+- В DB301 хранится только SHA-256 хэш
+- Plain key — только в CF Secrets на клиентском аккаунте
+- API key бессрочный (не протухает как JWT)
+- Shared auth для всех webhook: `src/webhook/auth.ts`
 
 ---
 
@@ -109,6 +111,8 @@ Client Worker                              301.st Webhook
 | Файл | Назначение |
 |------|------------|
 | `schema/migrations/0009_health_check.sql` | Миграция: таблица `domain_threats` |
+| `schema/migrations/0015_worker_api_keys.sql` | Миграция: таблица `worker_api_keys` |
+| `schema/migrations/0016_hash_worker_api_keys.sql` | Миграция: `api_key` → `api_key_hash` |
 | `src/api/domains/health.ts` | GET /domains/:id/health |
 | `src/api/integrations/providers/cloudflare/zones.ts` | `checkZonePhishing()` |
 | `src/api/integrations/providers/cloudflare/d1.ts` | D1 API для клиента |
@@ -116,19 +120,11 @@ Client Worker                              301.st Webhook
 | `src/api/integrations/providers/virustotal/initkey.ts` | VT key init |
 | `src/api/health/setup.ts` | POST /health/client/setup |
 | `src/api/jobs/redirect-stats.ts` | Anomaly detection |
+| `src/api/client-env/setup.ts` | setupClientEnvironment() — полный setup |
+| `src/api/health/bundle.ts` | Bundled JS для 301-health worker |
+| `src/webhook/auth.ts` | Shared auth: API key → SHA-256 → DB301 |
 | `src/webhook/health.ts` | POST /health handler |
-
-### Файлы (Client Worker)
-
-| Файл | Назначение |
-|------|------------|
-| `src/api/health/client/index.ts` | Main worker: cron + HTTP |
-| `src/api/health/client/vt.ts` | VirusTotal API + queue |
-| `src/api/health/client/phishing.ts` | CF Phishing check |
-| `src/api/health/client/webhook.ts` | Push data → 301.st |
-| `src/api/health/client/domains.ts` | Get domains + anomaly |
-| `src/api/health/client/client.sql` | D1 schema |
-| `src/api/health/client/wrangler.template.toml` | Config |
+| `src/webhook/deploy.ts` | POST /deploy handler |
 
 ---
 
@@ -145,11 +141,13 @@ Client Worker                              301.st Webhook
 | POST | `/health/client/setup` | Setup Client Worker |
 | GET | `/health/client/status` | Статус настройки |
 
-### 301.st Webhook
+### 301.st Webhook (webhook.301.st)
 
-| Method | Path | Описание |
-|--------|------|----------|
-| POST | `/health` | Приём данных от Client Worker |
+| Method | Path | Auth | Описание |
+|--------|------|------|----------|
+| POST | `/deploy` | API key | Self-check после деплоя |
+| POST | `/health` | API key | Данные от Health Worker (VT + phishing) |
+| POST | `/tds` | API key | Статистика от TDS Worker (TODO) |
 
 ### Client Worker
 
@@ -168,7 +166,7 @@ Client Worker                              301.st Webhook
 **Request:**
 ```http
 POST /health
-Authorization: Bearer <JWT_TOKEN>
+Authorization: Bearer <WORKER_API_KEY>
 Content-Type: application/json
 
 {
@@ -211,14 +209,15 @@ Content-Type: application/json
 
 ```mermaid
 flowchart TB
-    A[POST /health] --> B[Verify JWT]
-    B --> C{Valid?}
-    C -->|No| D[401 Unauthorized]
-    C -->|Yes| E[Extract account_id from JWT]
-    E --> F[Validate account_id match]
-    F --> G[Process zones → UPDATE domains]
-    G --> H[Process threats → UPSERT domain_threats]
-    H --> I[Return result]
+    A[POST /health] --> B[SHA-256 hash API key]
+    B --> C[Lookup hash in DB301]
+    C --> D{Found?}
+    D -->|No| E[401 invalid_api_key]
+    D -->|Yes| F[account_id from DB]
+    F --> G[Validate account_id match]
+    G --> H[Process zones → UPDATE domains]
+    H --> I[Process threats → UPSERT domain_threats]
+    I --> J[Return result]
 ```
 
 ---
@@ -229,39 +228,35 @@ flowchart TB
 
 | Тип | Имя | Назначение |
 |-----|-----|------------|
-| Secret | `JWT_TOKEN` | Для webhook → 301.st |
+| Secret | `WORKER_API_KEY` | Auth для webhook → 301.st (nanoid 32, бессрочный) |
 | Env Var | `ACCOUNT_ID` | ID аккаунта в 301.st |
 | Env Var | `WEBHOOK_URL` | `https://webhook.301.st/health` |
-| D1 | `DB` | Client D1 database |
-| KV | `KV` | Integration keys (VT_API_KEY, etc.) |
+| Env Var | `DEPLOY_WEBHOOK_URL` | `https://webhook.301.st/deploy` |
+| D1 | `DB` | Client D1 database (301-client) |
+| KV | `KV` | Integration keys (VT_API_KEY, etc.) (301-keys) |
 
 ### Setup Flow (Автоматический)
 
-При добавлении CF ключа (`POST /integrations/cloudflare/init`) **автоматически** создаётся:
+При добавлении CF ключа (`POST /integrations/cloudflare/init`) или вручную (`POST /client-env/setup`) создаётся:
 
 ```
 Client CF Account:
 ├── D1: 301-client              # Shared database
 ├── KV: 301-keys                # Integration keys (VT, etc.)
-└── Worker: 301-health          # Health monitoring
-    ├── Bindings: D1, KV
-    ├── Cron: "0 */12 * * *"
-    └── Secrets: JWT_TOKEN
+├── Worker: 301-health          # Health monitoring
+│   ├── Bindings: D1, KV
+│   ├── Crons: "*/1 * * * *", "0 */12 * * *"
+│   └── Secrets: WORKER_API_KEY
+└── Worker: 301-tds             # Traffic Distribution
+    ├── Bindings: D1
+    └── Secrets: WORKER_API_KEY
 ```
 
-**Response POST /integrations/cloudflare/init:**
-```json
-{
-  "ok": true,
-  "key_id": 123,
-  "sync": { "zones": 5, "domains": 12 },
-  "client_env": {
-    "d1": { "database_id": "xxx-xxx", "created": true },
-    "kv": { "namespace_id": "yyy-yyy", "created": true },
-    "workers": { "health": { "deployed": true } }
-  }
-}
-```
+Self-check flow:
+1. `*/1` cron → health worker проверяет D1 + KV + secrets
+2. Отправляет `POST webhook.301.st/deploy` с результатом
+3. При подтверждении записывает `setup_reported = 'ok'` в client D1
+4. На следующих `*/1` — видит `'ok'`, пропускает
 
 **Initial Sync:** Домены автоматически синхронизируются в client D1 при создании окружения.
 
@@ -445,7 +440,7 @@ CREATE TABLE threat_check_queue (
 | Файл | Функции |
 |------|---------|
 | `cloudflare/d1-sync.ts` | `syncDomainToClient()`, `deleteDomainFromClient()`, `syncAllDomainsToClient()` |
-| `cloudflare/client-env.ts` | Initial sync в `setupClientEnvironment()` |
+| `client-env/setup.ts` | Initial sync в `setupClientEnvironment()` |
 | `domains/domains.ts` | Вызов sync в handlers |
 
 ### Client D1 Schema (domain_list)

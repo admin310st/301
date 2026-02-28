@@ -2,13 +2,13 @@
  * Health Webhook Handler (Push Model)
  *
  * POST /health
- * Принимает данные напрямую от Client Worker.
- * Валидирует JWT и обрабатывает данные.
+ * Receives health data from 301-health client worker.
+ * Verifies worker identity via API key (SHA-256 hash in DB301).
  */
 
 import type { Context } from "hono";
 import type { Env } from "./index";
-import { verifyJWT, getAccountIdFromPayload } from "./jwt";
+import { verifyApiKey } from "./auth";
 
 // ============================================================
 // TYPES
@@ -46,7 +46,7 @@ interface WebhookResult {
 /**
  * POST /health
  *
- * 1. Verify JWT
+ * 1. Verify API key (SHA-256 hash lookup)
  * 2. Parse payload
  * 3. Process zones → UPDATE domains
  * 4. Process threats → UPSERT domain_threats
@@ -55,30 +55,13 @@ interface WebhookResult {
 export async function handleHealthWebhook(c: Context<{ Bindings: Env }>): Promise<Response> {
   const env = c.env;
 
-  // 1. Get Authorization header
-  const authHeader = c.req.header("Authorization");
+  // 1. Verify API key
+  const auth = await verifyApiKey(c);
+  if (auth instanceof Response) return auth;
 
-  if (!authHeader) {
-    return c.json({ ok: false, error: "missing_authorization" }, 401);
-  }
+  const accountId = auth.account_id;
 
-  const token = authHeader.replace("Bearer ", "");
-
-  // 2. Verify JWT
-  const jwtPayload = await verifyJWT(token, env);
-
-  if (!jwtPayload) {
-    return c.json({ ok: false, error: "invalid_token" }, 401);
-  }
-
-  // 3. Extract account_id from JWT
-  const accountId = getAccountIdFromPayload(jwtPayload);
-
-  if (!accountId) {
-    return c.json({ ok: false, error: "missing_account_id_in_token" }, 401);
-  }
-
-  // 4. Parse payload
+  // 2. Parse payload
   let payload: WebhookPayload;
   try {
     payload = await c.req.json();
@@ -86,12 +69,12 @@ export async function handleHealthWebhook(c: Context<{ Bindings: Env }>): Promis
     return c.json({ ok: false, error: "invalid_json" }, 400);
   }
 
-  // 5. Validate payload account_id matches JWT
+  // 3. Validate payload account_id matches API key
   if (payload.account_id && String(payload.account_id) !== String(accountId)) {
     return c.json({ ok: false, error: "account_id_mismatch" }, 403);
   }
 
-  // 6. Process data
+  // 4. Process data
   const result = await processHealthData(env, accountId, payload);
 
   return c.json({

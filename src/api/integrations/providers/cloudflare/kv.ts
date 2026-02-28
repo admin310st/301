@@ -144,6 +144,10 @@ export async function deleteKVNamespace(
       }
     );
 
+    if (response.status === 404) {
+      return { ok: true }; // Already deleted
+    }
+
     const data = (await response.json()) as CFApiResponse<null>;
 
     if (!data.success) {

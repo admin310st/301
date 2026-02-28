@@ -630,3 +630,309 @@ flowchart LR
 | Business | 50 |
 
 При превышении квоты создание нового проекта возвращает `quota_exceeded`.
+
+---
+
+## Client Environment API
+
+Управление клиентским окружением на CF аккаунте. Подробная архитектура: [API_ClientEnvironment.md](API_ClientEnvironment.md)
+
+### 14 POST /client-env/setup
+
+Создать клиентское окружение (D1, KV, Health Worker, TDS Worker).
+
+**Требует:** `Authorization: Bearer <access_token>`
+
+**Предусловие:** Активная CF интеграция (`POST /integrations/cloudflare/init`)
+
+```bash
+curl -X POST "https://api.301.st/client-env/setup" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Успешный ответ:**
+
+```json
+{
+  "ok": true,
+  "client_env": {
+    "d1_id": "f38f6b00-5c7c-4f3e-ad25-fe5511066881",
+    "kv_id": "6f51af9550ea4dc7bbeb68119a75917c",
+    "health_worker": true,
+    "tds_worker": true,
+    "ready": true
+  },
+  "initial_sync": {
+    "domains_synced": 16
+  }
+}
+```
+
+**Если уже создано:**
+
+```json
+{
+  "ok": true,
+  "status": "already_ready",
+  "client_env": { ... }
+}
+```
+
+**Ошибки:**
+
+```json
+// Нет CF интеграции
+{
+  "ok": false,
+  "error": "cloudflare_integration_required",
+  "message": "Add Cloudflare integration first via POST /integrations/cloudflare/init"
+}
+```
+
+---
+
+### 15 GET /client-env/status
+
+Статус клиентского окружения.
+
+**Требует:** `Authorization: Bearer <access_token>`
+
+**Query параметры:**
+
+| Параметр | Тип | Описание |
+|----------|-----|----------|
+| `live` | boolean | `true` — проверить ресурсы на CF (~2-5 сек). Default: `false` (~1 мс) |
+
+```bash
+# Быстрая проверка (из DB)
+curl -X GET "https://api.301.st/client-env/status" \
+  -H "Authorization: Bearer <access_token>"
+
+# Live-проверка (из CF API)
+curl -X GET "https://api.301.st/client-env/status?live=true" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Успешный ответ (fast):**
+
+```json
+{
+  "ok": true,
+  "status": "ready",
+  "client_env": {
+    "d1_id": "...",
+    "kv_id": "...",
+    "health_worker": true,
+    "tds_worker": true,
+    "ready": true
+  }
+}
+```
+
+**Успешный ответ (live=true):**
+
+```json
+{
+  "ok": true,
+  "status": "ready",
+  "client_env": { ... },
+  "live_check": {
+    "d1": true,
+    "kv": true,
+    "health_worker": true,
+    "tds_worker": true,
+    "health_crons": ["*/1 * * * *", "0 */12 * * *"]
+  }
+}
+```
+
+**Статусы:**
+
+| status | Описание |
+|--------|----------|
+| `ready` | Всё создано и работает |
+| `not_configured` | Окружение не создано |
+| `partial` | Создано частично (ошибка при setup) |
+| `no_integration` | Нет активной CF интеграции |
+
+---
+
+### 16 DELETE /client-env
+
+Удалить клиентское окружение. Удаляет все ресурсы на CF аккаунте клиента.
+
+**Требует:** `Authorization: Bearer <access_token>` (только owner)
+
+```bash
+curl -X DELETE "https://api.301.st/client-env" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Успешный ответ:**
+
+```json
+{
+  "ok": true,
+  "deleted": {
+    "health_worker": true,
+    "tds_worker": true,
+    "kv": true,
+    "d1": true
+  }
+}
+```
+
+---
+
+## Health API
+
+Мониторинг здоровья доменов: VT threats, phishing, traffic anomalies.
+
+### 17 GET /domains/:id/health
+
+Детальная информация о здоровье домена.
+
+**Требует:** `Authorization: Bearer <access_token>`
+
+```bash
+curl -X GET "https://api.301.st/domains/42/health" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Успешный ответ:**
+
+```json
+{
+  "status": "warning",
+  "blocked": false,
+  "blocked_reason": null,
+  "threats": {
+    "score": 3,
+    "categories": ["gambling"],
+    "source": "virustotal",
+    "checked_at": "2026-02-26T09:55:00Z"
+  },
+  "traffic": {
+    "yesterday": 150,
+    "today": 45,
+    "change_percent": -70,
+    "anomaly": true
+  }
+}
+```
+
+**Светофор для UI:**
+
+| Цвет | Условие |
+|------|---------|
+| Red | `blocked = 1` |
+| Yellow | `threat_score > 0` OR traffic anomaly |
+| Green | Всё OK |
+| Gray | Нет данных |
+
+> Health данные доступны только если `client_env.health_worker = true`.
+> Без client_env — только поле `blocked` (из DB301).
+
+---
+
+### 18 POST /integrations/virustotal/init
+
+Сохранить VirusTotal API key.
+
+**Требует:** `Authorization: Bearer <access_token>`
+
+```bash
+curl -X POST "https://api.301.st/integrations/virustotal/init" \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "api_key": "your_vt_api_key_here" }'
+```
+
+**Успешный ответ:**
+
+```json
+{
+  "ok": true,
+  "key_id": 25
+}
+```
+
+---
+
+### 19 GET /integrations/virustotal/quota
+
+Текущее использование VT квоты.
+
+**Требует:** `Authorization: Bearer <access_token>`
+
+```json
+{
+  "ok": true,
+  "quota": {
+    "daily_limit": 500,
+    "used_today": 42,
+    "remaining": 458
+  }
+}
+```
+
+---
+
+## UI: Зависимости от client_env
+
+**Health Check работает ТОЛЬКО если клиентское окружение настроено.**
+
+### Проверка готовности
+
+```
+UI загружает ключи (GET /integrations/keys)
+  │
+  ├─ CF ключ есть?
+  │   └─ Нет → "Добавьте CF ключ"
+  │
+  ├─ client_env заполнен?
+  │   └─ Нет → "Окружение не настроено" + кнопка "Создать"
+  │
+  ├─ health_worker = true?
+  │   └─ Нет → "Health Worker не задеплоен"
+  │
+  └─ Да → "Health Check активен"
+```
+
+### Что показывать
+
+| client_env | UI |
+|------------|-----|
+| `null` | "Клиентское окружение не создано. Health Check недоступен" |
+| `health_worker: false` | "Health Worker не задеплоен" |
+| `health_worker: true` | "Health Check активен. Данные обновляются каждые 12 часов" |
+
+### Зависимости функций
+
+| Функция | Требует client_env | Без client_env |
+|---------|-------------------|----------------|
+| GET /domains | Нет | Работает |
+| GET /domains/:id/health | Да | Частичные данные (только blocked) |
+| VT проверки | Да | Не работают |
+| Traffic anomaly | Да | Не работает |
+
+---
+
+### 20 Полная таблица endpoints
+
+| Endpoint | Метод | Auth | Описание |
+|----------|-------|------|----------|
+| `/projects` | GET | JWT | Список проектов |
+| `/projects/:id` | GET | JWT | Детали проекта |
+| `/projects` | POST | editor | Создать проект (+site) |
+| `/projects/:id` | PATCH | editor | Обновить проект |
+| `/projects/:id` | DELETE | owner | Удалить проект |
+| `/projects/:id/integrations` | GET | JWT | Интеграции проекта |
+| `/projects/:id/integrations` | POST | editor | Привязать ключ |
+| `/projects/:id/integrations/:keyId` | DELETE | editor | Отвязать ключ |
+| `/client-env/setup` | POST | JWT | Создать окружение |
+| `/client-env/status` | GET | JWT | Статус окружения |
+| `/client-env` | DELETE | owner | Удалить окружение |
+| `/domains/:id/health` | GET | JWT | Здоровье домена |
+| `/integrations/virustotal/init` | POST | JWT | Сохранить VT key |
+| `/integrations/virustotal/quota` | GET | JWT | VT квота |

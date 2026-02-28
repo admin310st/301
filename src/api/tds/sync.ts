@@ -89,6 +89,7 @@ export async function handleTdsSync(c: Context<{ Bindings: Env }>) {
     return {
       id: r.id,
       domain_name: r.domain_name,
+      tds_type: r.tds_type,
       priority: r.priority,
       conditions: logic.conditions || {},
       action: logic.action || "pass",

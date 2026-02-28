@@ -16,8 +16,7 @@ import { verifyAccountKeys as verifyCFKeys } from "../integrations/providers/clo
 // Redirect stats
 import { updateRedirectStats } from "./redirect-stats";
 
-// TDS stats
-import { updateTdsStats } from "./tds-stats";
+// TDS stats — removed: pull model replaced by webhook push (POST /tds)
 
 // TODO: Namecheap providers
 // import { checkDomainExpiration } from "../api/integrations/providers/namecheap/domains";
@@ -103,15 +102,6 @@ async function taskUpdateRedirectStats(env: Env): Promise<void> {
   await runTask("updateRedirectStats", () => updateRedirectStats(env));
 }
 
-/**
- * Задача: Сбор TDS-статистики с клиентских D1
- * Интервал: каждый час в :30 UTC
- * Источник: Client D1 stats_hourly → DB301.tds_stats
- */
-async function taskUpdateTdsStats(env: Env): Promise<void> {
-  await runTask("updateTdsStats", () => updateTdsStats(env));
-}
-
 // ============================================================
 // MAIN HANDLER
 // ============================================================
@@ -153,13 +143,6 @@ export default {
     // ========================================
     if (hour === 2 && minute === 0) {
       ctx.waitUntil(taskUpdateRedirectStats(env));
-    }
-
-    // ========================================
-    // Каждый час в :30 — сбор TDS-статистики
-    // ========================================
-    if (minute === 30) {
-      ctx.waitUntil(taskUpdateTdsStats(env));
     }
 
     // ========================================
@@ -209,10 +192,6 @@ export async function handleRunCronTask(c: Context<{ Bindings: Env }>) {
     case "updateRedirectStats":
       const statsResult = await updateRedirectStats(env);
       return c.json({ ok: true, result: statsResult });
-
-    case "updateTdsStats":
-      const tdsResult = await updateTdsStats(env);
-      return c.json({ ok: true, result: tdsResult });
 
     default:
       return c.json({ ok: false, error: "unknown_task" }, 400);

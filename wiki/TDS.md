@@ -358,43 +358,75 @@ interface Env {
 
 ---
 
-## 10. Статистика (три канала)
+## 10. Статистика
 
-### Два контура платформы
+### Принцип: две таблицы по типу правил
+
+SmartShield (защита) и SmartLink (маршрутизация) — разная ценность, разный объём, разный TTL.
+
+| | SmartShield | SmartLink |
+|---|-------------|-----------|
+| Ценность | Информационная (блоки/пропуски) | Денежная (каждый переход) |
+| Гранулярность | Per-domain, per-hour | Per-rule, per-hour, per-country, per-device |
+| Объём (20 доменов) | ~20 строк/день | до ~24k строк/день |
+| TTL (client D1) | 7 дней | 30 дней |
+| TTL (DB301) | По решению | По решению |
+
+### Два контура (client → platform)
 
 | | Redirects | TDS |
 |---|-----------|-----|
-| Источник | CF GraphQL Analytics | DO + AE + D1 (три канала) |
-| Гранулярность | Per-host | Per-rule, per-domain, per-hour |
-| Допустима потеря | Да | Нет (каждый переход важен) |
-| Расход лимитов клиента | 0 | ~56% Worker/DO |
+| Источник | CF GraphQL Analytics | DO + AE + D1 → Webhook push |
+| Гранулярность | Per-host | Per-rule (shield/link) |
+| Допустима потеря | Да | Нет (SmartLink — каждый переход) |
+| Доставка на платформу | System Worker cron pull | Client Worker cron push (POST /tds) |
 
-### Три канала TDS
+### Три канала записи (на клиенте)
 
 ```
 Worker request
   │
-  ├─── 1. AE: writeDataPoint()        ← fire-and-forget, всегда
+  ├─── 1. AE: writeDataPoint()        ← fire-and-forget, 3-мес retention
   │
   ├─── 2. DO: emit event → TdsCounter ← primary, агрегация в памяти
   │     │
-  │     └── alarm (15 мин) → flush → Client D1 stats_hourly
+  │     └── alarm (15 мин) → flush → Client D1 (stats_shield / stats_link)
   │
-  └─── 3. D1 fallback (при ошибке DO) ← UPSERT в stats_hourly
+  └─── 3. D1 fallback (при ошибке DO) ← UPSERT напрямую
 ```
 
-**Логика:**
-- **AE** — всегда пишет, fire-and-forget, страховка с 3-мес retention
-- **DO** — основной путь, агрегация в памяти, batch flush каждые 15 мин
-- **D1** — fallback при ошибке DO (лимит 100k/день), UPSERT в `stats_hourly`
-- Формат D1 одинаковый (DO flush и fallback) → System Worker забирает без разницы
+**Запись разделяется по `tds_type` правила:**
+- `traffic_shield` → `recordShieldStat(env, domain, ruleId, "blocks"|"passes")`
+- `smartlink` → `recordLinkStat(env, domain, ruleId, country, device)`
+- Bot check (shield) всегда пишет в `stats_shield`
+
+### Push-модель: Client → Webhook
+
+```
+Client D1 (stats_shield + stats_link + mab_stats)
+  │  cron: 0 */6 * * *
+  │
+  └── pushStats(env)
+        │
+        ├── SELECT completed hours (hour < current)
+        ├── POST webhook.301.st/tds  { shield[], links[], mab[] }
+        ├── DELETE pushed rows from client D1
+        └── RESET mab impressions counter
+              │
+              ↓
+DB301 (tds_stats_shield + tds_stats_link + tds_rules.logic_json)
+```
+
+**Защита от дублирования:** push отправляет только завершённые часы (`hour < текущий`), после успешной отправки строки удаляются. Текущий час остаётся в client D1 для агрегации.
 
 ### Durable Object: TdsCounter
 
 - Один DO instance (`idFromName("global")`) на worker
-- In-memory `Map<string, HourlyBucket>` — ключ: `domain:rule_id:hour`
+- In-memory `Map<string, HourlyBucket>` — ключ: `{tds_type}:{domain}:{rule_id}:{hour}`
 - Инкремент счётчиков без I/O на каждый запрос
-- Alarm каждые 15 минут → batch INSERT в `stats_hourly`
+- Alarm каждые 15 минут → batch flush:
+  - Shield buckets → `stats_shield` (компактная запись)
+  - Link buckets → `stats_link` (раскрытие by_country × by_device в отдельные строки)
 - При ошибке flush → retry через 1 минуту
 
 **Почему 15 минут:**
@@ -420,22 +452,82 @@ env.TDS_ANALYTICS.writeDataPoint({
 - 3-месяц retention
 - SQL API для гибких запросов
 
-### Client D1: stats_hourly
+### Client D1: две таблицы
 
+**stats_shield** — компактная (SmartShield):
 ```sql
-CREATE TABLE stats_hourly (
+CREATE TABLE stats_shield (
     domain_name TEXT NOT NULL,
     rule_id INTEGER,
-    hour TEXT NOT NULL,          -- '2026-02-22T14'
+    hour TEXT NOT NULL,          -- '2026-02-26T14'
     hits INTEGER DEFAULT 0,
-    redirects INTEGER DEFAULT 0,
     blocks INTEGER DEFAULT 0,
     passes INTEGER DEFAULT 0,
-    by_country TEXT,             -- JSON: {"RU":150,"US":30}
-    by_device TEXT,              -- JSON: {"mobile":120,"desktop":60}
     UNIQUE(domain_name, rule_id, hour)
 );
 ```
+
+**stats_link** — гранулярная (SmartLink):
+```sql
+CREATE TABLE stats_link (
+    domain_name TEXT NOT NULL,
+    rule_id INTEGER NOT NULL,
+    hour TEXT NOT NULL,
+    country TEXT NOT NULL DEFAULT 'XX',
+    device TEXT NOT NULL DEFAULT 'desktop',
+    hits INTEGER DEFAULT 0,
+    redirects INTEGER DEFAULT 0,
+    UNIQUE(domain_name, rule_id, hour, country, device)
+);
+```
+
+**Ключевое:** country/device — колонки в UNIQUE constraint, не JSON blob. Это даёт нативный SQL GROUP BY без парсинга.
+
+### DB301: зеркальные таблицы
+
+**tds_stats_shield** — агрегат по домену (без rule_id):
+```sql
+UNIQUE(account_id, domain_name, hour)
+-- Поля: hits, blocks, passes, collected_at
+```
+
+**tds_stats_link** — полная гранулярность:
+```sql
+UNIQUE(account_id, domain_name, rule_id, hour, country, device)
+-- Поля: hits, redirects, collected_at
+```
+
+### Webhook POST /tds
+
+Auth: API key (SHA-256 hash) → `src/webhook/auth.ts`
+
+**Payload:**
+```json
+{
+  "account_id": 19,
+  "timestamp": "2026-02-26T12:00:00Z",
+  "shield": [
+    { "domain_name": "example.com", "hour": "2026-02-26T06", "hits": 150, "blocks": 30, "passes": 120 }
+  ],
+  "links": [
+    { "domain_name": "offer.com", "rule_id": 42, "hour": "2026-02-26T06", "country": "US", "device": "mobile", "hits": 80, "redirects": 80 }
+  ],
+  "mab": [
+    { "rule_id": 42, "variant_url": "https://v1.com", "impressions": 50 }
+  ]
+}
+```
+
+**Обработка:**
+- shield → UPSERT `DB301.tds_stats_shield` (additive: `hits = hits + excluded.hits`)
+- links → UPSERT `DB301.tds_stats_link` (additive)
+- mab → UPDATE `tds_rules.logic_json.variants[].impressions`
+
+### TTL cleanup (safety net)
+
+Cron `cleanupOldStats(env)` — удаляет записи старше TTL на клиенте:
+- `stats_shield` → DELETE WHERE hour < now - 7d
+- `stats_link` → DELETE WHERE hour < now - 30d
 
 ---
 
@@ -508,20 +600,31 @@ Postback идёт на **301.st API** (не на клиентский Worker):
 ALTER TABLE tds_rules ADD COLUMN status TEXT DEFAULT 'draft';
 ALTER TABLE tds_rules ADD COLUMN preset_id TEXT;
 
--- 0014_tds_stats.sql
-CREATE TABLE tds_stats (
+-- 0017_tds_stats_split.sql (заменяет старую 0014_tds_stats)
+DROP TABLE IF EXISTS tds_stats;
+
+CREATE TABLE tds_stats_shield (
     account_id INTEGER NOT NULL,
     domain_name TEXT NOT NULL,
-    rule_id INTEGER,
     hour TEXT NOT NULL,
     hits INTEGER DEFAULT 0,
-    redirects INTEGER DEFAULT 0,
     blocks INTEGER DEFAULT 0,
     passes INTEGER DEFAULT 0,
-    by_country TEXT,
-    by_device TEXT,
     collected_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(account_id, domain_name, rule_id, hour)
+    UNIQUE(account_id, domain_name, hour)
+);
+
+CREATE TABLE tds_stats_link (
+    account_id INTEGER NOT NULL,
+    domain_name TEXT NOT NULL,
+    rule_id INTEGER NOT NULL,
+    hour TEXT NOT NULL,
+    country TEXT NOT NULL DEFAULT 'XX',
+    device TEXT NOT NULL DEFAULT 'desktop',
+    hits INTEGER DEFAULT 0,
+    redirects INTEGER DEFAULT 0,
+    collected_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(account_id, domain_name, rule_id, hour, country, device)
 );
 ```
 
@@ -529,11 +632,12 @@ CREATE TABLE tds_stats (
 
 | Таблица | Назначение |
 |---------|------------|
-| `tds_rules` | Кеш правил (sync с API) |
+| `tds_rules` | Кеш правил (sync с API), включает `tds_type` |
 | `domain_config` | Настройки домена (tds_enabled, bot_action) |
-| `stats_hourly` | Почасовые агрегаты (DO flush + D1 fallback) |
+| `stats_shield` | SmartShield агрегаты: hits, blocks, passes (DO flush + D1 fallback) |
+| `stats_link` | SmartLink гранулярная: hits, redirects × country × device |
 | `mab_stats` | Impressions/conversions по вариантам MAB |
-| `sync_status` | Version hash + last sync timestamp |
+| `sync_status` | Version hash, last sync, last push, setup_reported |
 
 ---
 
@@ -542,6 +646,6 @@ CREATE TABLE tds_stats (
 - **Redirects** — нативные CF Redirect Rules (push-модель). TDS дополняет: сложная логика (geo/device/UTM) через Worker (pull-модель)
 - **Domains** — правила привязываются к доменам через `rule_domain_map`
 - **Sites** — группировка доменов в UI
-- **Workers/Config** — генерация `wrangler.toml`, setup D1/Worker/Secrets
-- **Integrations** — CF-токен клиента для деплоя Worker и сбора статистики
-- **System Worker** — cron: pull stats из Client D1 + AE SQL API → DB301.tds_stats
+- **Client Environment** — setup D1/KV/Workers/Secrets на CF аккаунте клиента (`src/api/client-env/`)
+- **Integrations** — CF-токен клиента для деплоя Worker
+- **Webhook Worker** — приём статистики: `POST /tds` (shield + link + mab) → DB301

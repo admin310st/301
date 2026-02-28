@@ -23,7 +23,7 @@ import {
   deleteWorkerScript,
   WorkerBindings,
 } from "../integrations/providers/cloudflare/workers";
-import { signJWT } from "../lib/jwt";
+import { nanoid } from "nanoid";
 import { getHealthWorkerBundle } from "../health/bundle";
 import { getTdsWorkerBundle } from "../tds/bundle";
 import { syncDomainList, type DomainListItem } from "../integrations/providers/cloudflare/d1-sync";
@@ -39,12 +39,25 @@ export const TDS_WORKER_NAME = "301-tds";
 
 export const HEALTH_CRON_WORKING = "0 */12 * * *";
 export const HEALTH_CRON_INIT = "*/1 * * * *";
+export const TDS_CRON_WORKING = "0 */6 * * *";
+export const TDS_CRON_INIT = "*/1 * * * *";
 
 export const DEPLOY_WEBHOOK_URL = "https://webhook.301.st/deploy";
 export const HEALTH_WEBHOOK_URL = "https://webhook.301.st/health";
+export const TDS_WEBHOOK_URL = "https://webhook.301.st/tds";
 export const TDS_API_URL = "https://api.301.st";
 
-export const JWT_TTL = "365d";
+export const WORKER_API_KEY_LENGTH = 32;
+
+// ============================================================
+// CRYPTO
+// ============================================================
+
+async function hashApiKey(key: string): Promise<string> {
+  const data = new TextEncoder().encode(key);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
 
 // ============================================================
 // UNIFIED D1 SCHEMA
@@ -106,6 +119,7 @@ ON threat_check_queue(status, priority DESC, added_at);
 CREATE TABLE IF NOT EXISTS tds_rules (
     id INTEGER PRIMARY KEY,
     domain_name TEXT NOT NULL,
+    tds_type TEXT NOT NULL DEFAULT 'traffic_shield',
     priority INTEGER DEFAULT 0,
     conditions TEXT NOT NULL,
     action TEXT NOT NULL,
@@ -131,23 +145,32 @@ CREATE TABLE IF NOT EXISTS domain_config (
     synced_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS stats_hourly (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE IF NOT EXISTS stats_shield (
     domain_name TEXT NOT NULL,
     rule_id INTEGER,
     hour TEXT NOT NULL,
     hits INTEGER DEFAULT 0,
-    redirects INTEGER DEFAULT 0,
     blocks INTEGER DEFAULT 0,
     passes INTEGER DEFAULT 0,
-    by_country TEXT,
-    by_device TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(domain_name, rule_id, hour)
 );
 
-CREATE INDEX IF NOT EXISTS idx_stats_hourly_domain_hour
-ON stats_hourly(domain_name, hour DESC);
+CREATE INDEX IF NOT EXISTS idx_stats_shield_hour
+ON stats_shield(hour, rule_id);
+
+CREATE TABLE IF NOT EXISTS stats_link (
+    domain_name TEXT NOT NULL,
+    rule_id INTEGER NOT NULL,
+    hour TEXT NOT NULL,
+    country TEXT NOT NULL DEFAULT 'XX',
+    device TEXT NOT NULL DEFAULT 'desktop',
+    hits INTEGER DEFAULT 0,
+    redirects INTEGER DEFAULT 0,
+    UNIQUE(domain_name, rule_id, hour, country, device)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stats_link_hour
+ON stats_link(hour, rule_id, country, device);
 
 CREATE TABLE IF NOT EXISTS mab_stats (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -295,18 +318,17 @@ export async function setupClientEnvironment(
   }
 
   // ──────────────────────────────────────────────────────────
-  // 3. Generate JWT for workers (365d)
+  // 3. Generate API key for workers (no expiration)
   // ──────────────────────────────────────────────────────────
 
-  const jwtToken = await signJWT(
-    {
-      type: "client_worker",
-      acc: accountId,
-      cf_account_id: cfAccountId,
-    },
-    env,
-    JWT_TTL
-  );
+  const workerApiKey = nanoid(WORKER_API_KEY_LENGTH);
+
+  // Store SHA-256 hash in DB301 (never store plain key)
+  const keyHash = await hashApiKey(workerApiKey);
+  await env.DB301.prepare(`
+    INSERT OR REPLACE INTO worker_api_keys (account_id, api_key_hash, cf_account_id, created_at)
+    VALUES (?, ?, ?, datetime('now'))
+  `).bind(accountId, keyHash, cfAccountId).run();
 
   // ──────────────────────────────────────────────────────────
   // 4. Deploy Health Worker
@@ -340,7 +362,7 @@ export async function setupClientEnvironment(
   rb.healthDeployed = true;
 
   // Set secrets
-  await setWorkerSecrets(cfAccountId, HEALTH_WORKER_NAME, { JWT_TOKEN: jwtToken }, cfToken);
+  await setWorkerSecrets(cfAccountId, HEALTH_WORKER_NAME, { WORKER_API_KEY: workerApiKey }, cfToken);
 
   // Set crons: init (*/1) + working (0 */12)
   await setWorkerCrons(
@@ -361,6 +383,7 @@ export async function setupClientEnvironment(
     vars: {
       API_URL: TDS_API_URL,
       DEPLOY_WEBHOOK_URL: DEPLOY_WEBHOOK_URL,
+      TDS_WEBHOOK_URL: TDS_WEBHOOK_URL,
       ACCOUNT_ID: String(accountId),
     },
   };
@@ -381,7 +404,15 @@ export async function setupClientEnvironment(
   rb.tdsDeployed = true;
 
   // Set secrets
-  await setWorkerSecrets(cfAccountId, TDS_WORKER_NAME, { JWT_TOKEN: jwtToken }, cfToken);
+  await setWorkerSecrets(cfAccountId, TDS_WORKER_NAME, { WORKER_API_KEY: workerApiKey }, cfToken);
+
+  // Set crons: init (*/1) + working (0 */6)
+  await setWorkerCrons(
+    cfAccountId,
+    TDS_WORKER_NAME,
+    [TDS_CRON_INIT, TDS_CRON_WORKING],
+    cfToken
+  );
 
   // ──────────────────────────────────────────────────────────
   // 6. Initial domain sync
