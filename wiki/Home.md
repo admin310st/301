@@ -14,40 +14,31 @@ Serverless-архитектура, multi-tenant изоляция, интегра
 3. [Безопасность](Security) — auth, JWT, шифрование, CORS, rate limiting
 4. [Воркеры](Workers) — Core и Client воркеры, шаблоны, деплой
 
-### Четыре направления платформы
-
-Каждое направление — концепция + API:
-
-5. **Redirects** — нативные CF Redirect Rules (Single Redirects API)
-   - [Redirects](Redirects) — концепция, шаблоны T1-T7, CF expressions
-   - [API: Redirects](API_Redirects) — CRUD endpoints, sync, analytics
-6. **TDS** — Traffic Distribution System (pull-модель, Client Worker)
-   - [TDS](TDS) — концепция, условия, A/B тесты, MAB
-   - [API: TDS](API_TDS) — правила, привязки, пресеты, постбэки, статистика
-7. **Health Check** — мониторинг доменов (VT, phishing, anomalies)
-   - [Health Check](Health_Check) — концепция, архитектура, источники данных
-   - [API: Health](API_Health) — endpoints, webhook, client worker API
-8. **Client Environment** — развёртывание инфраструктуры на CF аккаунте клиента
-   - [API: Client Environment](API_ClientEnvironment) — setup, teardown, middleware
-
 ### API
 
-9. [API: Авторизация](API_Auth) — register, login, OAuth, refresh, sessions
-10. [API: Основные сущности](API_Integrations) — проекты, сайты, зоны, домены
-11. [API: Интеграции](API_IntegrationsKeys) — Cloudflare, Namecheap, HostTracker
-12. [API: Domains](API_Domains) — CRUD доменов
-13. [API: Projects](API_Projects) — CRUD проектов
-14. [API: Sites](API_Sites) — CRUD сайтов
+5. [API: Авторизация](API_Auth) — register, login, OAuth, refresh, sessions
+6. [API: Основные сущности](API_Integrations) — проекты, сайты, зоны, домены
+7. [API: Интеграции](API_IntegrationsKeys) — Cloudflare, Namecheap, HostTracker
+8. [API: Domains](API_Domains) — CRUD доменов
+9. [API: Projects](API_Projects) — CRUD проектов
+10. [API: Sites](API_Sites) — CRUD сайтов
+11. [API: Redirects](API_Redirects) — CRUD редиректов, sync, analytics
+12. [API: TDS](API_TDS) — правила, привязки, пресеты, постбэки, статистика
+13. [API: Health](API_Health) — endpoints, webhook, client worker API
+14. [API: Client Environment](API_ClientEnvironment) — setup, teardown, middleware
 
 ### Дополнительно
 
-15. [Аналитика](Analytics) — метрики, логи, отчёты
-16. [Уведомления](Notifications) — email, Telegram, webhooks
-17. [Backup и DevOps](Backup_DevOps) — CI/CD, бэкапы, мониторинг
-18. [Тарифы и биллинг](Pricing) — планы подписки
-19. [Глоссарий](Glossary) — термины и сокращения
-20. [Приложения](Appendix) — схемы, примеры, troubleshooting
-21. [Инструкция для вебмастеров](Appendix_instruction) — практический гайд
+15. [Redirects](Redirects) — концепция, шаблоны T1-T7, CF expressions
+16. [TDS](TDS) — концепция, условия, A/B тесты, MAB
+17. [Health Check](Health_Check) — концепция, архитектура, источники данных
+18. [Аналитика](Analytics) — метрики, логи, отчёты
+19. [Уведомления](Notifications) — email, Telegram, webhooks
+20. [Backup и DevOps](Backup_DevOps) — CI/CD, бэкапы, мониторинг
+21. [Тарифы и биллинг](Pricing) — планы подписки
+22. [Глоссарий](Glossary) — термины и сокращения
+23. [Приложения](Appendix) — схемы, примеры, troubleshooting
+24. [Инструкция для вебмастеров](Appendix_instruction) — практический гайд
 
 ### Справочные
 
