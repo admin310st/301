@@ -15,31 +15,32 @@
 
 ## Коррекции
 
+Все пункты открыты.
+
 ### 1. Удалить `traffic_stats` из client D1 schema
 
-| Файл | Строки | Действие |
-|------|--------|----------|
-| `src/api/client-env/setup.ts` | 80-87 | Удалить CREATE TABLE traffic_stats |
-| `src/api/health/setup.ts` | 79-80 | Удалить CREATE TABLE traffic_stats |
-| `src/api/health/client/client.sql` | 56-61 | Удалить CREATE TABLE traffic_stats |
+| Файл | Действие |
+|------|----------|
+| `src/api/client-env/setup.ts` | Удалить CREATE TABLE traffic_stats |
+| `src/api/health/setup.ts` | Удалить CREATE TABLE traffic_stats |
+| `src/api/health/client/client.sql` | Удалить CREATE TABLE traffic_stats |
 
 ### 2. Убрать broken code из health worker
 
+Client worker НЕ имеет CF token → `detectTrafficAnomalies()` и `checkZonePhishing()` не работают.
+
 | Файл | Что удалить |
 |------|-------------|
-| `src/api/health/bundle.ts` | `detectTrafficAnomalies()` (строки 250-266) |
-| `src/api/health/bundle.ts` | `checkZonePhishing()` (строки 384-409) |
-| `src/api/health/bundle.ts` | Блок anomalies+phishing в `runFullCycle` (строки 188-209) |
-| `src/api/health/bundle.ts` | `zones` из webhook payload (только `threats`) |
-| `src/api/health/client/domains.ts` | `detectTrafficAnomalies()` (строки 164-181) |
+| `src/api/health/bundle.ts` | `detectTrafficAnomalies()`, `checkZonePhishing()`, блок anomalies+phishing в `runFullCycle`, `zones` из webhook payload |
+| `src/api/health/client/domains.ts` | `detectTrafficAnomalies()` |
+| `src/api/health/client/phishing.ts` | `checkZonePhishing()` + весь файл если больше ничего нет |
+| `src/api/health/client/index.ts` | Импорты и вызовы `detectTrafficAnomalies`, `checkZonePhishing` |
 
 ### 3. Убрать zones processing из webhook handler
 
 | Файл | Что удалить |
 |------|-------------|
-| `src/webhook/health.ts` | `zones` из WebhookPayload interface |
-| `src/webhook/health.ts` | `processZonePhishing()` (строки 136-172) |
-| `src/webhook/health.ts` | zones processing в `processHealthData()` (строки 106-116) |
+| `src/webhook/health.ts` | `zones` из payload, `processZonePhishing()`, zones processing в `processHealthData()` |
 
 ### 4. Dead code cleanup
 
@@ -49,11 +50,13 @@
 
 ### 5. Документация
 
-| Файл | Что |
-|------|-----|
-| `wiki/API_ClientEnvironment.md` | health = VT only; убрать traffic_stats, phishing, zones из payload |
-| `wiki/Health_Check.md` | Проверить актуальность |
-| `wiki/TODO.md` | Обновить чеклист |
+| Файл | Что | Статус |
+|------|-----|--------|
+| `wiki/Health_Check.md` | Убрать упоминание traffic_stats, zones из client worker | Открыто |
+| `wiki/API_Health.md` | Убрать zones из webhook payload example | Открыто |
+| `wiki/API_ClientEnvironment.md` | Убрать traffic_stats из client D1 описания | Открыто |
+
+> wiki/Home.md, wiki/Workers.md — уже актуальны после реструктуризации.
 
 ---
 
@@ -63,3 +66,5 @@
 2. `npm run typecheck`
 3. Grep `traffic_stats` — не должно остаться в client-контексте
 4. Grep `CF_API_TOKEN` — не должно остаться в health worker контексте
+5. Grep `detectTrafficAnomalies` — 0 результатов в client/bundle
+6. Grep `processZonePhishing` — 0 результатов в webhook/health.ts

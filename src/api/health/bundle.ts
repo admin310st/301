@@ -172,7 +172,6 @@ async function runFullCycle(env) {
   console.log("[301-health] Starting full cycle...");
   const startTime = Date.now();
 
-  const zones = [];
   const threats = [];
 
   try {
@@ -185,33 +184,10 @@ async function runFullCycle(env) {
       return;
     }
 
-    // 2. Check traffic anomalies → phishing (if CF_API_TOKEN available)
-    const cfToken = await getKVValue(env, "CF_API_TOKEN");
-    if (cfToken) {
-      const anomalies = await detectTrafficAnomalies(env);
-
-      for (const anomaly of anomalies) {
-        if (anomaly.type === "drop_90" || anomaly.type === "zero_traffic") {
-          try {
-            const result = await checkZonePhishing(anomaly.zone_id, cfToken);
-            if (result.ok) {
-              zones.push({
-                zone_id: anomaly.zone_id,
-                phishing_detected: result.phishing_detected,
-                checked_at: new Date().toISOString(),
-              });
-            }
-          } catch (err) {
-            console.error("[301-health] Phishing check failed:", err);
-          }
-        }
-      }
-    }
-
-    // 3. Add to VT queue
+    // 2. Add to VT queue
     await addDomainsToQueue(env, domains);
 
-    // 4. Process VT queue
+    // 3. Process VT queue
     const vtApiKey = await getKVValue(env, "VT_API_KEY");
     if (vtApiKey) {
       const vtResults = await processVTQueue(env, vtApiKey);
@@ -219,12 +195,12 @@ async function runFullCycle(env) {
       threats.push(...vtResults.threats);
     }
 
-    // 5. Send webhook
-    if (zones.length > 0 || threats.length > 0) {
-      const result = await sendHealthWebhook(env, { zones, threats });
+    // 4. Send webhook
+    if (threats.length > 0) {
+      const result = await sendHealthWebhook(env, { threats });
       if (result.ok) {
         await markThreatsSynced(env, threats.map(t => t.domain_name));
-        console.log("[301-health] Webhook sent:", zones.length, "zones,", threats.length, "threats");
+        console.log("[301-health] Webhook sent:", threats.length, "threats");
       } else {
         console.error("[301-health] Webhook failed:", result.error);
       }
@@ -245,24 +221,6 @@ async function getActiveDomains(env) {
     "SELECT domain_name, zone_id FROM domain_list WHERE active = 1"
   ).all();
   return result.results || [];
-}
-
-async function detectTrafficAnomalies(env) {
-  const result = await env.DB.prepare(\`
-    SELECT domain_name, zone_id, clicks_yesterday, clicks_today
-    FROM traffic_stats
-    WHERE clicks_yesterday >= 20
-  \`).all();
-
-  const anomalies = [];
-  for (const row of result.results || []) {
-    if (row.clicks_today === 0) {
-      anomalies.push({ ...row, type: "zero_traffic" });
-    } else if (row.clicks_today < row.clicks_yesterday * 0.1) {
-      anomalies.push({ ...row, type: "drop_90" });
-    }
-  }
-  return anomalies;
 }
 
 // ============================================================
@@ -378,37 +336,6 @@ async function checkVirusTotal(domain, apiKey) {
 }
 
 // ============================================================
-// PHISHING CHECK
-// ============================================================
-
-async function checkZonePhishing(zoneId, cfToken) {
-  try {
-    const response = await fetch(
-      \`https://api.cloudflare.com/client/v4/zones/\${zoneId}\`,
-      {
-        headers: {
-          Authorization: \`Bearer \${cfToken}\`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    const data = await response.json();
-
-    if (!data.success) {
-      return { ok: false, error: data.errors?.[0]?.message };
-    }
-
-    return {
-      ok: true,
-      phishing_detected: data.result?.meta?.phishing_detected || false,
-    };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-}
-
-// ============================================================
 // WEBHOOK
 // ============================================================
 
@@ -423,7 +350,6 @@ async function sendHealthWebhook(env, data) {
       body: JSON.stringify({
         account_id: env.ACCOUNT_ID,
         timestamp: new Date().toISOString(),
-        zones: data.zones,
         threats: data.threats,
       }),
     });

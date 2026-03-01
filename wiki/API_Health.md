@@ -111,7 +111,7 @@ API для системы мониторинга здоровья доменов
 
 ### POST /health
 
-Данные мониторинга: VT threats + phishing zones.
+Данные мониторинга: VT threats.
 
 **Auth:** `Authorization: Bearer <WORKER_API_KEY>`
 
@@ -121,13 +121,6 @@ API для системы мониторинга здоровья доменов
 {
   "account_id": "19",
   "timestamp": "2025-01-15T10:00:00Z",
-  "zones": [
-    {
-      "zone_id": "abc123",
-      "phishing_detected": true,
-      "checked_at": "2025-01-15T10:00:00Z"
-    }
-  ],
   "threats": [
     {
       "domain_name": "example.com",
@@ -147,8 +140,6 @@ API для системы мониторинга здоровья доменов
 {
   "ok": true,
   "result": {
-    "zones_processed": 1,
-    "domains_blocked": 5,
     "threats_upserted": 10,
     "errors": []
   }
@@ -165,8 +156,7 @@ flowchart TB
     D -->|No| E[401 invalid_api_key]
     D -->|Yes| F[account_id from DB]
     F --> G[Validate account_id match]
-    G --> H[Process zones → UPDATE domains]
-    H --> I[Process threats → UPSERT domain_threats]
+    G --> H[Process threats → UPSERT domain_threats]
     I --> J[Return result]
 ```
 

@@ -17,11 +17,6 @@ import { verifyApiKey } from "./auth";
 interface WebhookPayload {
   account_id: string;
   timestamp: string;
-  zones: Array<{
-    zone_id: string;
-    phishing_detected: boolean;
-    checked_at: string;
-  }>;
   threats: Array<{
     domain_name: string;
     threat_score: number;
@@ -33,8 +28,6 @@ interface WebhookPayload {
 }
 
 interface WebhookResult {
-  zones_processed: number;
-  domains_blocked: number;
   threats_upserted: number;
   errors: string[];
 }
@@ -48,9 +41,8 @@ interface WebhookResult {
  *
  * 1. Verify API key (SHA-256 hash lookup)
  * 2. Parse payload
- * 3. Process zones → UPDATE domains
- * 4. Process threats → UPSERT domain_threats
- * 5. Return result
+ * 3. Process threats → UPSERT domain_threats
+ * 4. Return result
  */
 export async function handleHealthWebhook(c: Context<{ Bindings: Env }>): Promise<Response> {
   const env = c.env;
@@ -96,24 +88,9 @@ async function processHealthData(
   data: WebhookPayload
 ): Promise<WebhookResult> {
   const result: WebhookResult = {
-    zones_processed: 0,
-    domains_blocked: 0,
     threats_upserted: 0,
     errors: [],
   };
-
-  // Process zones (phishing)
-  if (data.zones && data.zones.length > 0) {
-    for (const zone of data.zones) {
-      try {
-        const zoneResult = await processZonePhishing(env, accountId, zone);
-        result.zones_processed++;
-        result.domains_blocked += zoneResult.blocked;
-      } catch (err) {
-        result.errors.push(`zone ${zone.zone_id}: ${err instanceof Error ? err.message : "error"}`);
-      }
-    }
-  }
 
   // Process threats (VT/Intel)
   if (data.threats && data.threats.length > 0) {
@@ -128,47 +105,6 @@ async function processHealthData(
   }
 
   return result;
-}
-
-/**
- * Process zone phishing status
- */
-async function processZonePhishing(
-  env: Env,
-  accountId: number,
-  zone: { zone_id: string; phishing_detected: boolean; checked_at: string }
-): Promise<{ blocked: number }> {
-  // Find zone in our DB by cf_zone_id
-  const dbZone = await env.DB301.prepare(`
-    SELECT id FROM zones
-    WHERE cf_zone_id = ? AND account_id = ?
-  `).bind(zone.zone_id, accountId).first<{ id: number }>();
-
-  if (!dbZone) {
-    throw new Error("zone_not_found");
-  }
-
-  let blocked = 0;
-
-  if (zone.phishing_detected) {
-    // Block all domains in zone
-    const res = await env.DB301.prepare(`
-      UPDATE domains
-      SET blocked = 1, blocked_reason = 'phishing', updated_at = CURRENT_TIMESTAMP
-      WHERE zone_id = ? AND account_id = ?
-    `).bind(dbZone.id, accountId).run();
-
-    blocked = res.meta.changes;
-  } else {
-    // Unblock domains that were blocked for phishing
-    await env.DB301.prepare(`
-      UPDATE domains
-      SET blocked = 0, blocked_reason = NULL, updated_at = CURRENT_TIMESTAMP
-      WHERE zone_id = ? AND account_id = ? AND blocked_reason = 'phishing'
-    `).bind(dbZone.id, accountId).run();
-  }
-
-  return { blocked };
 }
 
 /**

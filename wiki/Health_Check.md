@@ -291,7 +291,6 @@ CREATE TABLE domain_list (
 | `schema/migrations/0015_worker_api_keys.sql` | Миграция: таблица `worker_api_keys` |
 | `schema/migrations/0016_hash_worker_api_keys.sql` | Миграция: `api_key` → `api_key_hash` |
 | `src/api/domains/health.ts` | GET /domains/:id/health |
-| `src/api/integrations/providers/cloudflare/zones.ts` | `checkZonePhishing()` |
 | `src/api/integrations/providers/cloudflare/d1.ts` | D1 API для клиента |
 | `src/api/integrations/providers/cloudflare/d1-sync.ts` | Domain sync to client |
 | `src/api/integrations/providers/virustotal/initkey.ts` | VT key init |

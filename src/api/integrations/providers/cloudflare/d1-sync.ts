@@ -97,13 +97,6 @@ export interface DomainListItem {
   active: boolean;
 }
 
-export interface TrafficStats {
-  domain_name: string;
-  zone_id?: string;
-  clicks_yesterday: number;
-  clicks_today: number;
-}
-
 export interface TDSRule {
   id: number;
   domain_name: string;
@@ -159,37 +152,6 @@ export async function syncDomainList(
   }
 
   return { ok: true, synced: domains.length };
-}
-
-/**
- * Sync traffic stats to client D1
- */
-export async function syncTrafficStats(
-  cfAccountId: string,
-  databaseId: string,
-  token: string,
-  stats: TrafficStats[]
-): Promise<{ ok: boolean; synced: number; error?: string }> {
-  if (stats.length === 0) {
-    return { ok: true, synced: 0 };
-  }
-
-  const values = stats.map(s =>
-    `('${escapeSql(s.domain_name)}', '${escapeSql(s.zone_id || "")}', ${s.clicks_yesterday}, ${s.clicks_today}, datetime('now'))`
-  ).join(",\n");
-
-  const sql = `
-    INSERT OR REPLACE INTO traffic_stats (domain_name, zone_id, clicks_yesterday, clicks_today, updated_at)
-    VALUES ${values};
-  `;
-
-  const result = await executeD1Query(cfAccountId, databaseId, sql, token);
-
-  if (!result.ok) {
-    return { ok: false, synced: 0, error: result.error };
-  }
-
-  return { ok: true, synced: stats.length };
 }
 
 /**
@@ -285,92 +247,6 @@ export async function updateSyncStatus(
   const result = await executeD1Query(cfAccountId, databaseId, sql, token);
 
   return { ok: result.ok, error: result.error };
-}
-
-// ============================================================
-// BATCH SYNC
-// ============================================================
-
-export interface BatchSyncData {
-  domains?: DomainListItem[];
-  traffic?: TrafficStats[];
-  rules?: TDSRule[];
-  configs?: DomainConfig[];
-}
-
-export interface BatchSyncResult {
-  ok: boolean;
-  domains_synced: number;
-  traffic_synced: number;
-  rules_synced: number;
-  configs_synced: number;
-  errors: string[];
-}
-
-/**
- * Batch sync all data to client D1
- */
-export async function batchSyncToClient(
-  cfAccountId: string,
-  databaseId: string,
-  token: string,
-  data: BatchSyncData
-): Promise<BatchSyncResult> {
-  const result: BatchSyncResult = {
-    ok: true,
-    domains_synced: 0,
-    traffic_synced: 0,
-    rules_synced: 0,
-    configs_synced: 0,
-    errors: [],
-  };
-
-  // Sync domains
-  if (data.domains && data.domains.length > 0) {
-    const domainsResult = await syncDomainList(cfAccountId, databaseId, token, data.domains);
-    if (domainsResult.ok) {
-      result.domains_synced = domainsResult.synced;
-    } else {
-      result.errors.push(`domains: ${domainsResult.error}`);
-    }
-  }
-
-  // Sync traffic
-  if (data.traffic && data.traffic.length > 0) {
-    const trafficResult = await syncTrafficStats(cfAccountId, databaseId, token, data.traffic);
-    if (trafficResult.ok) {
-      result.traffic_synced = trafficResult.synced;
-    } else {
-      result.errors.push(`traffic: ${trafficResult.error}`);
-    }
-  }
-
-  // Sync rules
-  if (data.rules && data.rules.length > 0) {
-    const rulesResult = await syncTDSRules(cfAccountId, databaseId, token, data.rules);
-    if (rulesResult.ok) {
-      result.rules_synced = rulesResult.synced;
-    } else {
-      result.errors.push(`rules: ${rulesResult.error}`);
-    }
-  }
-
-  // Sync configs
-  if (data.configs && data.configs.length > 0) {
-    const configsResult = await syncDomainConfig(cfAccountId, databaseId, token, data.configs);
-    if (configsResult.ok) {
-      result.configs_synced = configsResult.synced;
-    } else {
-      result.errors.push(`configs: ${configsResult.error}`);
-    }
-  }
-
-  // Update sync status
-  await updateSyncStatus(cfAccountId, databaseId, token);
-
-  result.ok = result.errors.length === 0;
-
-  return result;
 }
 
 // ============================================================

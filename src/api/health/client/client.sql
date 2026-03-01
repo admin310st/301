@@ -52,16 +52,3 @@ CREATE TABLE IF NOT EXISTS domain_list (
     synced_at TEXT
 );
 
--- ============================================================
--- traffic_stats (optional)
--- Статистика трафика для детекции аномалий
--- Заполняется отдельным процессом (CF GraphQL)
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS traffic_stats (
-    domain_name TEXT PRIMARY KEY,
-    zone_id TEXT,
-    clicks_yesterday INTEGER DEFAULT 0,
-    clicks_today INTEGER DEFAULT 0,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-);

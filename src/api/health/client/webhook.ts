@@ -5,7 +5,7 @@
  * 301.st валидирует JWT и обрабатывает данные
  */
 
-import type { Env, DomainThreat, ZonePhishing } from "./index";
+import type { Env, DomainThreat } from "./index";
 
 // ============================================================
 // TYPES
@@ -14,7 +14,6 @@ import type { Env, DomainThreat, ZonePhishing } from "./index";
 interface WebhookPayload {
   account_id: string;
   timestamp: string;
-  zones: ZonePhishing[];
   threats: DomainThreat[];
 }
 
@@ -22,8 +21,6 @@ interface WebhookResponse {
   ok: boolean;
   error?: string;
   result?: {
-    zones_processed: number;
-    domains_blocked: number;
     threats_upserted: number;
   };
 }
@@ -41,22 +38,19 @@ interface WebhookResponse {
 export async function sendHealthWebhook(
   env: Env,
   data: {
-    zones?: ZonePhishing[];
     threats?: DomainThreat[];
   }
 ): Promise<{ ok: boolean; error?: string; result?: WebhookResponse["result"] }> {
-  const zones = data.zones || [];
   const threats = data.threats || [];
 
   // Skip if nothing to report
-  if (zones.length === 0 && threats.length === 0) {
+  if (threats.length === 0) {
     return { ok: true };
   }
 
   const payload: WebhookPayload = {
     account_id: env.ACCOUNT_ID,
     timestamp: new Date().toISOString(),
-    zones,
     threats,
   };
 

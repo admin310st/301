@@ -12,9 +12,9 @@
 
 | # | Ресурс | Имя | Назначение |
 |---|--------|-----|------------|
-| 1 | D1 | `301-client` | Shared DB: domain_list, traffic_stats, threats, TDS rules, stats |
+| 1 | D1 | `301-client` | Shared DB: domain_list, domain_threats, TDS rules, stats |
 | 2 | KV | `301-keys` | Ключи интеграций (VT_API_KEY и т.д.) |
-| 3 | Worker | `301-health` | Мониторинг доменов: VT + phishing + статистика редиректов |
+| 3 | Worker | `301-health` | Мониторинг доменов: VT checks |
 | 4 | Worker | `301-tds` | TDS: маршрутизация по geo/device/utm/bot, MAB |
 
 **НЕ является окружением** (создаётся отдельно):
@@ -30,7 +30,7 @@
 
 ```
 D1 (301-client) ──shared──┬── 301-health (cron: 0 */12 * * *)
-                           │     └─ VT checks, traffic anomalies, phishing
+                           │     └─ VT checks
 KV (301-keys)  ──shared───┤          └─ POST webhook.301.st/health
                            │
                            └── 301-tds (request-triggered + cron)
@@ -38,7 +38,7 @@ KV (301-keys)  ──shared───┤          └─ POST webhook.301.st/heal
                                       └─ POST webhook.301.st/tds
 ```
 
-- D1 общая — одна schema, shared таблицы (domain_list, traffic_stats)
+- D1 общая — одна schema, shared таблицы (domain_list, domain_threats)
 - KV общая — ключи интеграций
 - Воркеры раздельные — разные шаблоны, разная полезная нагрузка
 
@@ -188,7 +188,7 @@ Webhook:
   "checks": {
     "d1": true,
     "kv": true,
-    "tables": ["domain_list", "traffic_stats", "domain_threats", "tds_rules"],
+    "tables": ["domain_list", "domain_threats", "tds_rules"],
     "secrets": ["WORKER_API_KEY", "ACCOUNT_ID"]
   },
   "timestamp": "2026-02-26T12:00:00Z"
@@ -205,9 +205,6 @@ Webhook:
 {
   "account_id": "19",
   "timestamp": "2026-02-26T12:00:00Z",
-  "zones": [
-    { "zone_id": "abc123", "phishing_detected": true, "checked_at": "..." }
-  ],
   "threats": [
     {
       "domain_name": "example.com",
@@ -224,8 +221,6 @@ Webhook:
 {
   "ok": true,
   "result": {
-    "zones_processed": 1,
-    "domains_blocked": 5,
     "threats_upserted": 10,
     "errors": []
   }

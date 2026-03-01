@@ -5,7 +5,6 @@
  *
  * Функции:
  * - VT Check: проверка репутации доменов через VirusTotal
- * - CF Phishing: проверка meta.phishing_detected
  * - Webhook: отправка результатов в 301.st (push model)
  *
  * Rate Limits (VT Free Tier):
@@ -14,9 +13,8 @@
  */
 
 import { processVTQueue, addDomainsToQueue } from "./vt";
-import { checkZonePhishing } from "./phishing";
 import { sendHealthWebhook, markThreatsSynced } from "./webhook";
-import { getActiveDomains, detectTrafficAnomalies } from "./domains";
+import { getActiveDomains } from "./domains";
 
 // ============================================================
 // TYPES
@@ -30,8 +28,6 @@ export interface Env {
   VT_API_KEY: string;
   JWT_TOKEN: string;        // JWT для webhook → 301.st
   ACCOUNT_ID: string;
-  CF_API_TOKEN?: string;    // для phishing check (опционально)
-
   // Variables
   WEBHOOK_URL: string;
 }
@@ -42,12 +38,6 @@ export interface DomainThreat {
   categories: string[];
   reputation: number;
   source: string;
-  checked_at: string;
-}
-
-export interface ZonePhishing {
-  zone_id: string;
-  phishing_detected: boolean;
   checked_at: string;
 }
 
@@ -104,16 +94,14 @@ export default {
    * Full Cycle (cron или manual /run)
    *
    * 1. Получить список активных доменов
-   * 2. Проверить traffic anomalies → phishing check
-   * 3. Добавить в очередь VT
-   * 4. Обработать очередь VT
-   * 5. Отправить webhook в 301.st
+   * 2. Добавить в очередь VT
+   * 3. Обработать очередь VT
+   * 4. Отправить webhook в 301.st
    */
   async runFullCycle(env: Env): Promise<void> {
     console.log("[301-client] Starting full cycle...");
     const startTime = Date.now();
 
-    const zones: ZonePhishing[] = [];
     const threats: DomainThreat[] = [];
 
     try {
@@ -126,45 +114,23 @@ export default {
         return;
       }
 
-      // 2. Check traffic anomalies → phishing
-      if (env.CF_API_TOKEN) {
-        const anomalies = await detectTrafficAnomalies(env);
-
-        for (const anomaly of anomalies) {
-          if (anomaly.type === "drop_90" || anomaly.type === "zero_traffic") {
-            try {
-              const result = await checkZonePhishing(anomaly.zone_id, env.CF_API_TOKEN);
-              if (result.ok) {
-                zones.push({
-                  zone_id: anomaly.zone_id,
-                  phishing_detected: result.phishing_detected,
-                  checked_at: new Date().toISOString(),
-                });
-              }
-            } catch (err) {
-              console.error(`[301-client] Phishing check failed for zone ${anomaly.zone_id}:`, err);
-            }
-          }
-        }
-      }
-
-      // 3. Add to VT queue
+      // 2. Add to VT queue
       await addDomainsToQueue(env, domains, 0, "virustotal");
 
-      // 4. Process VT queue
+      // 3. Process VT queue
       const vtResults = await processVTQueue(env);
       console.log(`[301-client] VT processed: ${vtResults.processed}, errors: ${vtResults.errors}`);
       threats.push(...vtResults.threats);
 
-      // 5. Send webhook with all results
-      if (zones.length > 0 || threats.length > 0) {
-        const webhookResult = await sendHealthWebhook(env, { zones, threats });
+      // 4. Send webhook with all results
+      if (threats.length > 0) {
+        const webhookResult = await sendHealthWebhook(env, { threats });
 
         if (webhookResult.ok) {
           // Mark threats as synced
           const syncedDomains = threats.map((t) => t.domain_name);
           await markThreatsSynced(env, syncedDomains);
-          console.log(`[301-client] Webhook sent: ${zones.length} zones, ${threats.length} threats`);
+          console.log(`[301-client] Webhook sent: ${threats.length} threats`);
         } else {
           console.error(`[301-client] Webhook failed: ${webhookResult.error}`);
         }
