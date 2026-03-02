@@ -1,5 +1,32 @@
 # TODO — Открытые вопросы и задачи
 
+## Интеграционные тесты — Фаза 2 (2026-03-02)
+
+### Результаты
+
+| Блок | Тесты | Результат |
+|------|-------|-----------|
+| CE1–CE8 Client Environment | 8/8 | **ALL PASS** |
+| R1–R7 Redirects | 7/7 | **ALL PASS** (clicks=0 — CF Analytics delay) |
+| T1–T10 TDS | 10/10 | **ALL PASS** |
+| H1–H8 Health | — | **BLOCKED** (нет VT API key) |
+
+### Блокеры найденные при тестировании
+
+- [x] `rule_domain_map` таблица отсутствовала в DB301 — миграция 0018 создана и применена
+- [x] `POST /system/cron/run` не был подключён к роутеру — route добавлен, задеплоен
+- [x] **TDS apply/push endpoint** — `POST /tds/apply` реализован, задеплоен
+- [ ] **Health тесты (H1–H8)** — требуют VT API key от пользователя
+
+### Изменения в коде (при тестировании)
+
+1. `schema/migrations/0018_rule_domain_map.sql` — новая миграция
+2. `src/api/index.ts` — добавлен import `handleRunCronTask`, route `POST /system/cron/run`
+3. `api-301` worker — redeployed
+4. `src/api/tds/tds.ts` — добавлен `handleApplyTdsRules`, push TDS правил в client D1
+
+---
+
 ## Redirects
 
 ### Статистика редиректов
