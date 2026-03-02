@@ -129,11 +129,12 @@ import {
   handleBindDomains,
   handleUnbindDomain,
   handleListRuleDomains,
+  handleApplyTdsRules,
 } from "./tds/tds";
 import { handleTdsSync, handleTdsPostback } from "./tds/sync";
 
 // Cron
-import cronHandler from "./jobs/cron";
+import cronHandler, { handleRunCronTask } from "./jobs/cron";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -210,6 +211,9 @@ app.post("/client-env/setup", handleSetupClientEnv);
 app.delete("/client-env", handleDeleteClientEnv);
 app.get("/client-env/status", handleGetClientEnvStatus);
 
+// --- System / Cron ---
+app.post("/system/cron/run", handleRunCronTask);
+
 // --- Worker Configs ---
 app.post("/workers/config", handleGenerateConfig);
 app.get("/workers/config", handleGetConfigs);
@@ -273,6 +277,9 @@ app.delete("/tds/rules/:id", handleDeleteTdsRule);
 app.post("/tds/rules/:id/domains", handleBindDomains);
 app.get("/tds/rules/:id/domains", handleListRuleDomains);
 app.delete("/tds/rules/:id/domains/:domainId", handleUnbindDomain);
+
+// TDS Apply (push to client D1)
+app.post("/tds/apply", handleApplyTdsRules);
 
 export default {
   fetch: app.fetch,

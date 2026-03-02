@@ -20,6 +20,14 @@ import {
 } from "./conditions";
 import { listTdsPresets, expandTdsPreset } from "./presets";
 import { ensureClientEnvironment } from "../client-env/middleware";
+import { listKeys } from "../integrations/keys/storage";
+import {
+  getClientSyncInfo,
+  syncTDSRules,
+  syncDomainConfig,
+  type TDSRule,
+  type DomainConfig,
+} from "../integrations/providers/cloudflare/d1-sync";
 
 // ============================================================
 // TYPES
@@ -651,5 +659,111 @@ export async function handleListRuleDomains(c: Context<{ Bindings: Env }>) {
       created_at: b.created_at,
     })),
     total: bindings.results.length,
+  });
+}
+
+// ============================================================
+// HANDLERS: APPLY (push to client D1)
+// ============================================================
+
+/**
+ * POST /tds/apply
+ * Push active TDS rules + domain configs to client D1.
+ */
+export async function handleApplyTdsRules(c: Context<{ Bindings: Env }>) {
+  // 1. Auth
+  const auth = await requireEditor(c, c.env);
+  if (!auth) return c.json({ ok: false, error: "forbidden" }, 403);
+
+  // 2. Find active CF key
+  const keys = await listKeys(c.env, auth.account_id, "cloudflare");
+  const activeCfKey = keys.find(k => k.status === "active");
+  if (!activeCfKey) {
+    return c.json({ ok: false, error: "cloudflare_integration_required" }, 400);
+  }
+
+  // 3. Get client sync info
+  const syncInfo = await getClientSyncInfo(c.env, activeCfKey.id);
+  if (!syncInfo.ok) {
+    return c.json({ ok: false, error: syncInfo.error }, 400);
+  }
+  const { cfAccountId, cfToken, clientD1Id } = syncInfo.info;
+
+  // 4. SELECT active rules + bound domains
+  const rows = await c.env.DB301.prepare(`
+    SELECT tr.id, tr.tds_type, tr.logic_json, tr.priority,
+           d.domain_name, rdm.id as binding_id
+    FROM tds_rules tr
+    JOIN rule_domain_map rdm ON rdm.tds_rule_id = tr.id
+    JOIN domains d ON rdm.domain_id = d.id
+    WHERE tr.account_id = ? AND tr.status = 'active'
+      AND rdm.binding_status != 'removed' AND rdm.enabled = 1
+  `).bind(auth.account_id).all<{
+    id: number;
+    tds_type: string;
+    logic_json: string;
+    priority: number;
+    domain_name: string;
+    binding_id: number;
+  }>();
+
+  if (!rows.results || rows.results.length === 0) {
+    return c.json({ ok: true, rules_synced: 0, domains_synced: 0, message: "no_active_bindings" });
+  }
+
+  // 5. Transform → TDSRule[] (parse logic_json)
+  const tdsRules: TDSRule[] = rows.results.map(r => {
+    const logic = JSON.parse(r.logic_json) as {
+      conditions: Record<string, unknown>;
+      action: string;
+      action_url?: string;
+      status_code?: number;
+    };
+    return {
+      id: r.binding_id,
+      domain_name: r.domain_name,
+      priority: r.priority,
+      conditions: logic.conditions,
+      action: (logic.action === "mab_redirect" ? "redirect" : logic.action) as "redirect" | "block" | "pass",
+      action_url: logic.action_url ?? undefined,
+      status_code: logic.status_code ?? 302,
+      active: true,
+    };
+  });
+
+  // 6. Sync TDS rules to client D1
+  const rulesResult = await syncTDSRules(cfAccountId, clientD1Id, cfToken, tdsRules);
+  if (!rulesResult.ok) {
+    return c.json({ ok: false, error: "sync_rules_failed", details: rulesResult.error }, 500);
+  }
+
+  // 7. Generate DomainConfig[] and sync
+  const uniqueDomains = [...new Set(tdsRules.map(r => r.domain_name))];
+  const domainConfigs: DomainConfig[] = uniqueDomains.map(domain => ({
+    domain_name: domain,
+    tds_enabled: true,
+    default_action: "pass" as const,
+    smartshield_enabled: false,
+    bot_action: "pass" as const,
+  }));
+
+  const configResult = await syncDomainConfig(cfAccountId, clientD1Id, cfToken, domainConfigs);
+
+  // 8. UPDATE rule_domain_map → binding_status='applied'
+  const bindingIds = rows.results.map(r => r.binding_id);
+  if (bindingIds.length > 0) {
+    const stmts = bindingIds.map(id =>
+      c.env.DB301.prepare(
+        `UPDATE rule_domain_map SET binding_status = 'applied', last_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).bind(id)
+    );
+    await c.env.DB301.batch(stmts);
+  }
+
+  // 9. Return result
+  return c.json({
+    ok: true,
+    rules_synced: rulesResult.synced,
+    domains_synced: configResult.ok ? configResult.synced : 0,
   });
 }
