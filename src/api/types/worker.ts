@@ -32,9 +32,17 @@ export interface Env {
     }): Promise<void>;
   };
 
-  // ===== MailerSend (ИСХОДЯЩИЕ: registration, reset, notifications) =====
-  MAILERSEND_API_TOKEN: string;
-  MAILERSEND_API_URL: string;
+  // ===== Email Provider =====
+  EMAIL_PROVIDER: string;        // "postal" | "mailersend"
+
+  // ===== Postal (ИСХОДЯЩИЕ: registration, reset, notifications) =====
+  POSTAL_API_URL?: string;       // "https://postal.301.st"
+  POSTAL_API_KEY?: string;       // Secret: X-Server-API-Key
+
+  // ===== MailerSend (fallback) =====
+  MAILERSEND_API_TOKEN?: string; // optional — fallback provider
+  MAILERSEND_API_URL?: string;   // optional — fallback provider
+
   EMAIL_FROM: string;
   EMAIL_FROM_NAME?: string;
 
