@@ -11,6 +11,7 @@
  */
 
 import type { LogicJson, RuleConditions } from "./conditions";
+import type { Lang } from "../lib/messaging/i18n";
 
 // ============================================================
 // TYPES
@@ -18,19 +19,24 @@ import type { LogicJson, RuleConditions } from "./conditions";
 
 export type TdsPresetId = "S1" | "S2" | "S3" | "S4" | "S5" | "L1" | "L2" | "L3";
 
+interface I18nString {
+  en: string;
+  ru: string;
+}
+
 export interface TdsPresetParam {
   key: string;
-  label: string;
+  label: I18nString;
   type: "string" | "string[]" | "url" | "select";
   required: boolean;
   options?: string[];   // For select type
-  placeholder?: string;
+  placeholder?: I18nString;
 }
 
 export interface TdsPreset {
   id: TdsPresetId;
   name: string;
-  description: string;
+  description: I18nString;
   category: "smartshield" | "smartlink";
   tds_type: "traffic_shield" | "smartlink";
   params: TdsPresetParam[];
@@ -55,12 +61,12 @@ export interface ExpandedTdsPreset {
 const S1: TdsPreset = {
   id: "S1",
   name: "Bot Shield",
-  description: "Блокировка или редирект ботов",
+  description: { en: "Block or redirect bots", ru: "Блокировка или редирект ботов" },
   category: "smartshield",
   tds_type: "traffic_shield",
   params: [
-    { key: "action", label: "Действие", type: "select", required: true, options: ["redirect", "block"] },
-    { key: "action_url", label: "URL редиректа", type: "url", required: false, placeholder: "https://safe-page.com" },
+    { key: "action", label: { en: "Action", ru: "Действие" }, type: "select", required: true, options: ["redirect", "block"] },
+    { key: "action_url", label: { en: "Redirect URL", ru: "URL редиректа" }, type: "url", required: false, placeholder: { en: "https://safe-page.com", ru: "https://safe-page.com" } },
   ],
   fixedConditions: { bot: true },
   defaultAction: "block",
@@ -71,12 +77,12 @@ const S1: TdsPreset = {
 const S2: TdsPreset = {
   id: "S2",
   name: "Geo Filter",
-  description: "Редирект по гео-таргетингу",
+  description: { en: "Redirect by geo-targeting", ru: "Редирект по гео-таргетингу" },
   category: "smartshield",
   tds_type: "traffic_shield",
   params: [
-    { key: "geo", label: "Страны", type: "string[]", required: true, placeholder: "RU, KZ, UA" },
-    { key: "action_url", label: "URL редиректа", type: "url", required: true, placeholder: "https://offer.com/{country}" },
+    { key: "geo", label: { en: "Countries", ru: "Страны" }, type: "string[]", required: true, placeholder: { en: "US, DE, FR", ru: "US, DE, FR" } },
+    { key: "action_url", label: { en: "Redirect URL", ru: "URL редиректа" }, type: "url", required: true, placeholder: { en: "https://geo-page.com", ru: "https://geo-page.com" } },
   ],
   fixedConditions: {},
   defaultAction: "redirect",
@@ -87,11 +93,11 @@ const S2: TdsPreset = {
 const S3: TdsPreset = {
   id: "S3",
   name: "Mobile Redirect",
-  description: "Редирект мобильного трафика",
+  description: { en: "Redirect mobile traffic", ru: "Редирект мобильного трафика" },
   category: "smartshield",
   tds_type: "traffic_shield",
   params: [
-    { key: "action_url", label: "URL редиректа", type: "url", required: true, placeholder: "https://m.example.com" },
+    { key: "action_url", label: { en: "Mobile redirect URL", ru: "URL редиректа для мобильных" }, type: "url", required: true, placeholder: { en: "https://m.example.com", ru: "https://m.example.com" } },
   ],
   fixedConditions: { device: "mobile" },
   defaultAction: "redirect",
@@ -102,11 +108,11 @@ const S3: TdsPreset = {
 const S4: TdsPreset = {
   id: "S4",
   name: "Desktop Redirect",
-  description: "Редирект десктопного трафика",
+  description: { en: "Redirect desktop traffic", ru: "Редирект десктопного трафика" },
   category: "smartshield",
   tds_type: "traffic_shield",
   params: [
-    { key: "action_url", label: "URL редиректа", type: "url", required: true, placeholder: "https://desktop.example.com" },
+    { key: "action_url", label: { en: "Desktop redirect URL", ru: "URL редиректа для десктопа" }, type: "url", required: true, placeholder: { en: "https://desktop.example.com", ru: "https://desktop.example.com" } },
   ],
   fixedConditions: { device: "desktop" },
   defaultAction: "redirect",
@@ -117,12 +123,12 @@ const S4: TdsPreset = {
 const S5: TdsPreset = {
   id: "S5",
   name: "Geo + Mobile",
-  description: "Редирект мобильного трафика из указанных стран",
+  description: { en: "Redirect mobile traffic from specified countries", ru: "Редирект мобильного трафика из указанных стран" },
   category: "smartshield",
   tds_type: "traffic_shield",
   params: [
-    { key: "geo", label: "Страны", type: "string[]", required: true, placeholder: "RU, KZ, UA" },
-    { key: "action_url", label: "URL редиректа", type: "url", required: true, placeholder: "https://m.offer.com/cis" },
+    { key: "geo", label: { en: "Countries", ru: "Страны" }, type: "string[]", required: true, placeholder: { en: "US, DE, FR", ru: "US, DE, FR" } },
+    { key: "action_url", label: { en: "Mobile redirect URL", ru: "URL редиректа для мобильных" }, type: "url", required: true, placeholder: { en: "https://m.example.com", ru: "https://m.example.com" } },
   ],
   fixedConditions: { device: "mobile" },
   defaultAction: "redirect",
@@ -137,12 +143,12 @@ const S5: TdsPreset = {
 const L1: TdsPreset = {
   id: "L1",
   name: "UTM Split",
-  description: "Разделение трафика по utm_source",
+  description: { en: "Split traffic by utm_source", ru: "Разделение трафика по utm_source" },
   category: "smartlink",
   tds_type: "smartlink",
   params: [
-    { key: "utm_source", label: "UTM Sources", type: "string[]", required: true, placeholder: "facebook, google, tiktok" },
-    { key: "action_url", label: "URL редиректа", type: "url", required: true, placeholder: "https://offer.com?src={country}" },
+    { key: "utm_source", label: { en: "utm_source value", ru: "Значение utm_source" }, type: "string[]", required: true, placeholder: { en: "facebook", ru: "facebook" } },
+    { key: "action_url", label: { en: "Redirect URL", ru: "URL редиректа" }, type: "url", required: true, placeholder: { en: "https://landing.com", ru: "https://landing.com" } },
   ],
   fixedConditions: {},
   defaultAction: "redirect",
@@ -153,11 +159,11 @@ const L1: TdsPreset = {
 const L2: TdsPreset = {
   id: "L2",
   name: "Facebook Traffic",
-  description: "Трафик из Facebook/Meta (utm_source ИЛИ fbclid)",
+  description: { en: "Facebook/Meta traffic (utm_source OR fbclid)", ru: "Трафик из Facebook/Meta (utm_source ИЛИ fbclid)" },
   category: "smartlink",
   tds_type: "smartlink",
   params: [
-    { key: "action_url", label: "URL редиректа", type: "url", required: true, placeholder: "https://offer.com/fb" },
+    { key: "action_url", label: { en: "Redirect URL", ru: "URL редиректа" }, type: "url", required: true, placeholder: { en: "https://fb-landing.com", ru: "https://fb-landing.com" } },
   ],
   fixedConditions: {
     utm_source: ["facebook", "fb", "fb_ads", "meta"],
@@ -171,11 +177,11 @@ const L2: TdsPreset = {
 const L3: TdsPreset = {
   id: "L3",
   name: "Google Traffic",
-  description: "Трафик из Google Ads (utm_source ИЛИ gclid)",
+  description: { en: "Google Ads traffic (utm_source OR gclid)", ru: "Трафик из Google Ads (utm_source ИЛИ gclid)" },
   category: "smartlink",
   tds_type: "smartlink",
   params: [
-    { key: "action_url", label: "URL редиректа", type: "url", required: true, placeholder: "https://offer.com/gads" },
+    { key: "action_url", label: { en: "Redirect URL", ru: "URL редиректа" }, type: "url", required: true, placeholder: { en: "https://google-landing.com", ru: "https://google-landing.com" } },
   ],
   fixedConditions: {
     utm_source: ["google", "google_ads"],
@@ -199,12 +205,13 @@ export function getTdsPreset(id: string): TdsPreset | undefined {
 }
 
 /**
- * List all presets for UI.
+ * List all presets (raw, with I18nString fields).
+ * Used internally by expandTdsPreset / validatePresetParams.
  */
 export function listTdsPresets(): Array<{
   id: TdsPresetId;
   name: string;
-  description: string;
+  description: I18nString;
   category: string;
   tds_type: string;
   params: TdsPresetParam[];
@@ -218,6 +225,28 @@ export function listTdsPresets(): Array<{
     tds_type: p.tds_type,
     params: p.params,
     defaultPriority: p.defaultPriority,
+  }));
+}
+
+/**
+ * Resolve I18nString to a plain string for the given language.
+ */
+function resolveI18n(s: I18nString, lang: Lang): string {
+  return s[lang] || s.en;
+}
+
+/**
+ * List all presets with localized strings for API response.
+ */
+export function listTdsPresetsLocalized(lang: Lang = "en") {
+  return listTdsPresets().map((p) => ({
+    ...p,
+    description: resolveI18n(p.description, lang),
+    params: p.params.map((param) => ({
+      ...param,
+      label: resolveI18n(param.label, lang),
+      placeholder: param.placeholder ? resolveI18n(param.placeholder, lang) : undefined,
+    })),
   }));
 }
 

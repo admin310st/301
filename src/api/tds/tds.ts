@@ -18,7 +18,8 @@ import {
   reorderSchema,
   createFromPresetSchema,
 } from "./conditions";
-import { listTdsPresets, expandTdsPreset } from "./presets";
+import { listTdsPresetsLocalized, expandTdsPreset } from "./presets";
+import { detectLang } from "../lib/messaging/i18n";
 import { ensureClientEnvironment } from "../client-env/middleware";
 import { listKeys } from "../integrations/keys/storage";
 import {
@@ -106,7 +107,8 @@ export async function handleListTdsPresets(c: Context<{ Bindings: Env }>) {
   const auth = await requireAuth(c, c.env);
   if (!auth) return c.json({ ok: false, error: "unauthorized" }, 401);
 
-  return c.json({ ok: true, presets: listTdsPresets() });
+  const lang = detectLang(c.req.header("Accept-Language"));
+  return c.json({ ok: true, presets: listTdsPresetsLocalized(lang) });
 }
 
 /**
