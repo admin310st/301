@@ -25,18 +25,60 @@ API для системы мониторинга здоровья доменов
 
 ### GET /domains
 
-Список доменов с `health.status` в ответе.
+Список доменов с `health` объектом в ответе.
 
 **Auth:** `Authorization: Bearer <access_token>`
 
-Поле `health` в каждом домене содержит светофор:
+**Структура ответа:**
+
+```json
+{
+  "ok": true,
+  "total": 16,
+  "groups": [
+    {
+      "root": "example.com",
+      "zone_id": 86,
+      "domains": [
+        {
+          "id": 34,
+          "domain_name": "example.com",
+          "role": "donor",
+          "ssl_status": "active",
+          "blocked": 0,
+          "blocked_reason": null,
+          "health": {
+            "status": "healthy",
+            "threat_score": 0,
+            "categories": [],
+            "checked_at": "2026-03-03T12:02:28Z"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+> `ssl_status`, `blocked`, `blocked_reason` — поля домена (верхний уровень, вне `health`).
+
+**Поле `health.status` — светофор:**
 
 | Значение | Условие |
 |----------|---------|
-| `danger` | `blocked = 1` |
-| `warning` | `threat_score > 0` OR traffic anomaly |
-| `ok` | Всё в порядке |
-| `unknown` | Нет данных |
+| `blocked` | `blocked = 1` |
+| `warning` | `threat_score > 0` OR traffic anomaly (drop_90, zero_traffic) |
+| `healthy` | threat_score проверен и = 0 |
+| `unknown` | Нет данных (VT проверка не была) |
+
+**Поля `health` (список):**
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `status` | `blocked\|warning\|healthy\|unknown` | Светофор |
+| `threat_score` | `number\|null` | Оценка угрозы из VT |
+| `categories` | `string[]\|null` | Категории угроз |
+| `checked_at` | `string\|null` | Время последней VT проверки (ISO 8601) |
 
 ---
 
@@ -50,26 +92,29 @@ API для системы мониторинга здоровья доменов
 
 ```json
 {
-  "status": "warning",
-  "blocked": false,
-  "blocked_reason": null,
-  "ssl_status": "active",
-  "threats": {
-    "score": 3,
-    "categories": ["gambling"],
-    "reputation": -15,
-    "source": "virustotal",
-    "checked_at": "2025-01-15T09:55:00Z"
-  },
-  "traffic": {
-    "yesterday": 150,
-    "today": 45,
-    "change_percent": -70,
-    "anomaly": true,
-    "anomaly_type": "drop_90"
-  },
-  "phishing_status": "clean",
-  "phishing_checked_at": "2025-01-15T02:00:00Z"
+  "ok": true,
+  "health": {
+    "status": "warning",
+    "blocked": false,
+    "blocked_reason": null,
+    "ssl_status": "active",
+    "threats": {
+      "score": 5,
+      "categories": ["gambling", "malicious web sites", "Malware Sites"],
+      "reputation": 0,
+      "source": "virustotal",
+      "checked_at": "2026-03-03T12:03:18Z"
+    },
+    "traffic": {
+      "yesterday": 0,
+      "today": 587,
+      "change_percent": 0,
+      "anomaly": false,
+      "anomaly_type": null
+    },
+    "phishing_status": null,
+    "phishing_checked_at": null
+  }
 }
 ```
 
@@ -79,7 +124,7 @@ API для системы мониторинга здоровья доменов
 |------|-----|----------|
 | `status` | `blocked\|warning\|healthy\|unknown` | Общий статус здоровья |
 | `blocked` | `boolean` | Домен заблокирован |
-| `blocked_reason` | `string\|null` | Причина блокировки (`phishing`, etc.) |
+| `blocked_reason` | `string\|null` | Причина блокировки: `unavailable`, `ad_network`, `hosting_registrar`, `government`, `manual` |
 | `ssl_status` | `string\|null` | Статус SSL сертификата из CF |
 | `threats` | `object\|null` | Данные об угрозах (VT/CF Intel), `null` если нет VT key |
 | `traffic.yesterday` | `number` | Клики за вчера (сумма по redirect_rules домена) |
@@ -97,7 +142,6 @@ API для системы мониторинга здоровья доменов
 **Phishing-проверка:**
 
 Запускается автоматически кроном при обнаружении серьёзной аномалии трафика (`drop_90` или `zero_traffic`). Вызывает CF API `meta.phishing_detected` для зоны. Результат записывается в `domains.phishing_status` и `domains.phishing_checked_at`.
-```
 
 ---
 
@@ -122,17 +166,76 @@ API для системы мониторинга здоровья доменов
 
 ### POST /integrations/virustotal/init
 
-Сохранить VT API key в клиентском KV.
+Добавить VirusTotal API key. Ключ шифруется и сохраняется через `createKey()` (KV_CREDENTIALS + D1). Если клиентское окружение готово (`client_env.ready && health_worker`), ключ автоматически деплоится как worker secret `VT_API_KEY` в `301-health`.
 
 **Auth:** `Authorization: Bearer <access_token>` (editor/owner)
+
+**Request:**
+
+```json
+{
+  "api_key": "c3be2bfc5e872046795f9cf6cc539f2d...",
+  "key_alias": "my-vt-key"
+}
+```
+
+| Поле | Тип | Обязательно | Описание |
+|------|-----|-------------|----------|
+| `api_key` | `string` | Да | VT API key (64 hex символа) |
+| `key_alias` | `string` | Нет | Имя ключа (по умолчанию `"virustotal"`) |
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "key_id": 26,
+  "deployed_to_client": true,
+  "message": "VirusTotal integration configured and deployed to client",
+  "tier": "free",
+  "quota": {
+    "daily_limit": 500,
+    "daily_used": 0
+  }
+}
+```
+
+**Ошибки:**
+
+| Код | error | Описание |
+|-----|-------|----------|
+| 400 | `invalid_api_key_format` | Не 64 hex символа |
+| 400 | `invalid_api_key` | VT API вернул 401 |
+| 409 | `virustotal_key_already_exists` | Один VT ключ на аккаунт |
 
 ---
 
 ### GET /integrations/virustotal/quota
 
-Проверить текущее использование VT квоты.
+Текущее использование VT квоты.
 
 **Auth:** `Authorization: Bearer <access_token>`
+
+**Response (200):**
+
+```json
+{
+  "ok": true,
+  "tier": "free",
+  "quota": {
+    "daily_limit": 500,
+    "daily_used": 42,
+    "daily_remaining": 458
+  }
+}
+```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `tier` | `"free"\|"premium"` | Тариф VT (>500 daily = premium) |
+| `quota.daily_limit` | `number` | Дневной лимит запросов |
+| `quota.daily_used` | `number` | Использовано сегодня |
+| `quota.daily_remaining` | `number` | Осталось сегодня |
 
 ---
 
@@ -224,11 +327,12 @@ Manual trigger проверок (VT + phishing).
 | Тип | Имя | Назначение |
 |-----|-----|------------|
 | Secret | `WORKER_API_KEY` | Auth для webhook → 301.st (nanoid 32, бессрочный) |
+| Secret | `VT_API_KEY` | VirusTotal API key (опционально, деплоится через VT init) |
 | Env Var | `ACCOUNT_ID` | ID аккаунта в 301.st |
 | Env Var | `WEBHOOK_URL` | `https://webhook.301.st/health` |
 | Env Var | `DEPLOY_WEBHOOK_URL` | `https://webhook.301.st/deploy` |
 | D1 | `DB` | Client D1 database (301-client) |
-| KV | `KV` | Integration keys (VT_API_KEY, etc.) (301-keys) |
+| KV | `KV` | Конфигурация и кэш (301-keys) |
 
 ---
 
@@ -268,7 +372,7 @@ flowchart TB
 | GET /domains | Нет | Работает |
 | GET /domains/:id/health | Да | Частичные данные (только blocked) |
 | Webhook /health | Да | 401/403 |
-| VT проверки | Да (kv_id для VT key) | Не работают |
+| VT проверки | Да (VT_API_KEY secret в воркере) | Не работают |
 | Traffic anomaly detection | Да | Не работает |
 
 ---
