@@ -7,23 +7,13 @@
 | Блок | Тесты | Результат |
 |------|-------|-----------|
 | CE1–CE8 Client Environment | 8/8 | **ALL PASS** |
-| R1–R7 Redirects | 7/7 | **ALL PASS** (clicks=0 — CF Analytics delay) |
+| R1–R7 Redirects | 7/7 | **ALL PASS** (pipeline починен, clicks собираются) |
 | T1–T10 TDS | 10/10 | **ALL PASS** |
 | H1–H8 Health | — | **BLOCKED** (нет VT API key) |
 
-### Блокеры найденные при тестировании
+### Оставшиеся блокеры
 
-- [x] `rule_domain_map` таблица отсутствовала в DB301 — миграция 0018 создана и применена
-- [x] `POST /system/cron/run` не был подключён к роутеру — route добавлен, задеплоен
-- [x] **TDS apply/push endpoint** — `POST /tds/apply` реализован, задеплоен
 - [ ] **Health тесты (H1–H8)** — требуют VT API key от пользователя
-
-### Изменения в коде (при тестировании)
-
-1. `schema/migrations/0018_rule_domain_map.sql` — новая миграция
-2. `src/api/index.ts` — добавлен import `handleRunCronTask`, route `POST /system/cron/run`
-3. `api-301` worker — redeployed
-4. `src/api/tds/tds.ts` — добавлен `handleApplyTdsRules`, push TDS правил в client D1
 
 ---
 
@@ -47,6 +37,60 @@
 | Firewall Events | Использовать `firewallEventsAdaptiveGroups` с rule_id | Per-rule |
 
 **Решение:** _Требует обсуждения_
+
+### Фильтрация ботов в статистике
+
+**Проблема:** текущий запрос считает все 3xx ответы включая ботов (поисковые краулеры, мониторинг и т.п.)
+
+**Варианты:**
+
+| Вариант | Условие | Точность | План |
+|---------|---------|----------|------|
+| Bot Management (платный) | `botScore_geq: 30` в фильтре GraphQL | Высокая | Paid plan only |
+| User-Agent фильтр (бесплатный) | `clientRequestUserAgent_notlike` по паттернам bot/crawler | Средняя | Free plan fallback |
+| ASN blacklist | `clientASN_ne` для известных датацентров поисковиков | Средняя | Дополнительно к UA |
+
+**Реализация:**
+
+- [ ] Добавить опцию `bot_filter` в настройки cron (`settings:cron` в KV)
+- [ ] Если `bot_filter = "bot_management"` — добавить `botScore_geq: 30` в GraphQL фильтр
+- [ ] Если `bot_filter = "ua_pattern"` — добавить `clientRequestUserAgent_notlike` паттерны
+- [ ] По умолчанию `bot_filter = "none"` (текущее поведение, Free plan)
+
+**GraphQL пример (Bot Management):**
+```graphql
+httpRequestsAdaptiveGroups(
+  filter: {
+    datetime_geq: $datetimeStart
+    datetime_lt: $datetimeEnd
+    edgeResponseStatus_in: [301, 302, 307, 308]
+    botScore_geq: 30
+  }
+)
+```
+
+### Частотный сбор статистики (Paid plan)
+
+**Текущее:** один крон в 02:00 UTC — суточный сбор за вчера.
+
+**Задача:** для платных тарифов 301 добавить дополнительные сборы каждые 12 и 6 часов.
+
+**Расписание (без пересечения с суточным):**
+
+| Интервал | Время UTC | Описание |
+|----------|-----------|----------|
+| 24ч (общий) | 02:00 | Суточный сбор за вчера (все пользователи) |
+| 12ч (paid) | 08:00, 20:00 | Промежуточный сбор текущего дня |
+| 6ч (paid) | 05:00, 11:00, 17:00, 23:00 | Частый сбор текущего дня |
+
+**Реализация:**
+
+- [ ] Добавить `stats_interval` в настройки аккаунта или плана (`24h` / `12h` / `6h`)
+- [ ] В `cron.ts` добавить задачи `taskUpdateRedirectStats12h` и `taskUpdateRedirectStats6h`
+- [ ] Промежуточные сборы запрашивают данные за текущий день (partial day) — `datetime_geq` = начало дня, `datetime_lt` = now
+- [ ] Промежуточные сборы обновляют только `clicks_today`, НЕ ротируют `clicks_yesterday`
+- [ ] Суточный крон (02:00) остаётся единственным, кто ротирует счётчики
+- [ ] Фильтровать аккаунты по плану: промежуточные кроны только для paid
 
 ---
 
@@ -81,6 +125,12 @@
 ---
 
 ## Integrations
+
+### Cloudflare: handleVerifyKey сломан
+
+- [ ] `handleVerifyKey` использует `getDecryptedToken()` (ENCRYPTION_KEY) вместо рабочего `getDecryptedKey()` (MASTER_SECRET) — всегда возвращает `key_decrypt_failed`
+- [ ] Эндпоинт намеренно отключён от роутера до исправления
+- [ ] Фикс: переписать на `getDecryptedKey()`, добавить route обратно
 
 ### Namecheap
 

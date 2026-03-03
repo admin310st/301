@@ -99,9 +99,68 @@ Client Worker                              301.st Webhook
 | # | Источник | Тип | Где выполняется |
 |---|----------|-----|-----------------|
 | 1 | CF Phishing | ФАКТ | 301.st + Client |
-| 2 | Traffic Anomaly | СИГНАЛ | 301.st + Client |
+| 2 | Traffic Anomaly | СИГНАЛ | 301.st (cron `updateRedirectStats`) |
 | 3 | VirusTotal | ОЦЕНКА | Client |
 | 4 | HostTracker | ДОСТУПНОСТЬ | Future |
+
+---
+
+## Redirect Stats Pipeline → Health
+
+Данные для оценки здоровья доменов по трафику поступают из pipeline сбора статистики редиректов.
+
+### Расписание
+
+Крон `updateRedirectStats` запускается ежедневно в **02:00 UTC** (`src/api/jobs/redirect-stats.ts`).
+
+### Как работает pipeline
+
+1. Получает все зоны с активными редиректами (JOIN `zones` + `redirect_rules`)
+2. Для каждой зоны расшифровывает CF token через `getDecryptedKey(env, key_id)`
+3. Вызывает CF GraphQL API `httpRequestsAdaptiveGroups` за вчерашний день (полные сутки 00:00–23:59 UTC)
+4. Фильтр: `edgeResponseStatus_in: [301, 302, 307, 308]`, группировка по `clientRequestHTTPHost`
+5. Маппит host → domain_id через таблицу `domains`
+6. Обновляет `redirect_rules`: `clicks_total += count`, `clicks_yesterday = clicks_today`, `clicks_today = count`
+7. Для доменов без данных — ротация: `clicks_yesterday = clicks_today`, `clicks_today = 0`
+8. Проверяет аномалии: `detectAnomaly(clicks_today_old, new_count)` — сравнивает N-2 vs N-1
+9. При серьёзной аномалии (`drop_90`, `zero_traffic`) — проверка phishing через CF Zone API
+
+### Семантика полей в redirect_rules
+
+| Поле | Описание |
+|------|----------|
+| `clicks_total` | Накопительный счётчик (всегда растёт) |
+| `clicks_today` | Данные за **последний обработанный день** (N-1), НЕ за текущий день |
+| `clicks_yesterday` | Данные за **позавчера** (N-2), для сравнения с clicks_today |
+| `last_counted_date` | Дата последнего обновления (idempotency guard) |
+
+### Как health использует эти данные
+
+`GET /domains/:id/health` (`src/api/domains/health.ts`) читает `clicks_yesterday` и `clicks_today` из `redirect_rules` и вызывает `detectAnomaly(yesterday, today)`:
+
+| Аномалия | Условие | Действие |
+|----------|---------|----------|
+| `zero_traffic` | today = 0, yesterday >= 20 | Health status = warning, phishing check |
+| `drop_90` | today < yesterday * 0.1 | Health status = warning, phishing check |
+| `drop_50` | today < yesterday * 0.5 | Health status = warning (без phishing check) |
+
+`shouldCheckPhishing(anomaly)` возвращает `true` для `zero_traffic` и `drop_90` — при этих аномалиях pipeline автоматически вызывает `checkZonePhishing()` через CF Zone API. Если phishing подтверждён — все домены зоны блокируются (`blocked = 1, blocked_reason = 'phishing'`).
+
+### Светофор: computeDomainHealthStatus
+
+Функция `computeDomainHealthStatus()` определяет цвет индикатора в списке доменов:
+
+| Приоритет | Условие | Результат |
+|-----------|---------|-----------|
+| 1 | `blocked = 1` | `blocked` (красный) |
+| 2 | `threat_score > 0` | `warning` (жёлтый) |
+| 3 | `drop_90` или `zero_traffic` | `warning` (жёлтый) |
+| 4 | `threat_score !== null` | `healthy` (зелёный) |
+| 5 | нет данных | `unknown` (серый) |
+
+### GraphQL: требуемые permissions
+
+Для запроса статистики необходимо permission **Analytics Read** (zone scope, id: `9c88f9c5bce24ce7af9a958ba9c504db`). Без этого permission GraphQL вернёт ошибку авторизации. Permission входит в обязательный набор (34 шт.) рабочего токена.
 
 ---
 

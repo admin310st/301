@@ -4,9 +4,9 @@
 
 **Размещение на клиенте:** Нативные CF Redirect Rules. Правила деплоятся через Rulesets API в фазу `http_request_dynamic_redirect` напрямую в зону клиента. Без Workers — правила исполняются на CF edge до любого кода. Лимит 10 правил/зону (Free).
 
-**Сбор статистики:** CF GraphQL Analytics API, dataset `httpRequestsAdaptiveGroups`, фильтр по `edgeResponseStatus` 301/302. Группировка по `clientRequestHTTPHost` — получаем count per domain (не per rule). Data retention на Free — 3 дня.
+**Сбор статистики:** CF GraphQL Analytics API, dataset `httpRequestsAdaptiveGroups`, фильтр `edgeResponseStatus_in: [301, 302, 307, 308]` (тип переменных `DateTime!`, не `Date!`). Группировка по `clientRequestHTTPHost` — получаем count per domain (не per rule). Data retention на Free — 3 дня. Требует permission `Analytics Read` (zone scope).
 
-**Обработка:** Batch job (cron 1x/день) забирает вчерашние данные из GraphQL, добавляет в накопительные счётчики в D1 (`clicks_total`, `clicks_yesterday`, `clicks_today`). Так данные не теряются после 3-дневного retention.
+**Обработка:** Крон `updateRedirectStats` (02:00 UTC ежедневно) забирает вчерашние данные из GraphQL, обновляет счётчики в D1: `clicks_total += count`, `clicks_yesterday = clicks_today`, `clicks_today = count`. Для доменов без данных — ротация: `clicks_yesterday = clicks_today`, `clicks_today = 0`. Поле `last_counted_date` — idempotency guard. Так данные не теряются после 3-дневного retention. При аномалиях (`drop_90`, `zero_traffic`) запускается проверка phishing через CF Zone API.
 
 **UI:** Таблица правил per site. Колонки: домен, target, тип (T1-T7), код (301/302), clicks, trend (up/down/neutral), sync status (synced/pending/error). Zone limits показываются в header.
 

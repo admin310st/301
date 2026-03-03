@@ -252,6 +252,7 @@ flowchart TB
 | **Transform** | Zone Transform Rules | Read + Write | Transform Rules на уровне зоны |
 | **Firewall** | Zone WAF | Read + Write | Web Application Firewall правила |
 | **Firewall** | Firewall Services | Read + Write | Блокировка по IP/geo/UA, rate limiting |
+| **Аналитика** | Analytics | Read | Статистика редиректов через CF GraphQL API |
 
 ---
 

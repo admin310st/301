@@ -38,21 +38,20 @@
 Статистика срабатываний получается через **CF GraphQL Analytics API**:
 
 ```graphql
-{
+query RedirectStats($zoneTag: String!, $datetimeStart: DateTime!, $datetimeEnd: DateTime!) {
   viewer {
-    zones(filter: { zoneTag: "<zone_id>" }) {
+    zones(filter: { zoneTag: $zoneTag }) {
       httpRequestsAdaptiveGroups(
         filter: {
-          date_geq: "2026-02-27"
-          date_leq: "2026-02-28"
-          edgeResponseStatus_in: [301, 302]
+          datetime_geq: $datetimeStart
+          datetime_lt: $datetimeEnd
+          edgeResponseStatus_in: [301, 302, 307, 308]
         }
         limit: 1000
-        orderBy: [date_ASC]
+        orderBy: [count_DESC]
       ) {
         dimensions {
           clientRequestHTTPHost
-          date
         }
         count
       }
@@ -62,9 +61,11 @@
 ```
 
 - Dataset: `httpRequestsAdaptiveGroups`
-- Фильтр: `edgeResponseStatus` 301/302
+- Тип переменных: `DateTime!` (формат `YYYY-MM-DDT00:00:00Z`), **не** `Date!`
+- Фильтр: `edgeResponseStatus_in: [301, 302, 307, 308]` — все HTTP redirect-коды
 - Group by: `clientRequestHTTPHost` — привязка к домену-источнику
 - Data retention (Free): **3 дня** — поэтому batch job собирает данные ежедневно в накопительные счётчики (см. секцию Analytics ниже)
+- **Требует permission:** `Analytics Read` (zone scope, id: `9c88f9c5bce24ce7af9a958ba9c504db`)
 
 ---
 
@@ -753,10 +754,12 @@ CREATE UNIQUE INDEX idx_redirect_rules_unique ON redirect_rules(domain_id, templ
 
 ### 6.1 Источник данных
 
-- CF GraphQL Analytics API
+- CF GraphQL Analytics API (`https://api.cloudflare.com/client/v4/graphql`)
 - Dataset: `httpRequestsAdaptiveGroups`
-- Filter: `edgeResponseStatus` 300-399
+- Filter: `edgeResponseStatus_in: [301, 302, 307, 308]` — только HTTP redirect-коды (не весь диапазон 300-399)
+- Тип переменных: `DateTime!` (формат ISO 8601 с временем), **не** `Date!`
 - Group by: `clientRequestHTTPHost`
+- **Требует permission:** `Analytics Read` (zone scope)
 
 ### 6.2 Лимиты Free Plan
 
@@ -765,27 +768,55 @@ CREATE UNIQUE INDEX idx_redirect_rules_unique ON redirect_rules(domain_id, templ
 | Data retention | **3 дня** | 30 дней | 90 дней |
 | API calls/day | ~1000 | ~10000 | ~100000 |
 
-### 6.3 Накопительный счётчик
+### 6.3 Pipeline сбора статистики (`updateRedirectStats`)
 
 Чтобы не терять данные после 3-дневного retention:
 
-**Batch job (1 раз в день):**
-1. Query CF GraphQL API за вчерашний день
-2. Для каждого правила:
-   - `clicks_total += clicks_from_cf`
-   - `clicks_yesterday = clicks_today`
-   - `clicks_today = 0`
-   - `last_counted_date = today`
+**Крон:** `0 2 * * *` — запускается ежедневно в **02:00 UTC** (`src/api/jobs/redirect-stats.ts`)
 
-**Поля в redirect_rules:**
+**Алгоритм:**
+1. Получить все зоны с активными редиректами (JOIN `zones` + `redirect_rules`)
+2. Для каждой зоны расшифровать CF token через `getDecryptedKey(env, key_id)`
+3. Запросить CF GraphQL API `httpRequestsAdaptiveGroups` за **вчерашний день** (полные сутки 00:00–23:59 UTC)
+4. Фильтр: `edgeResponseStatus_in: [301, 302, 307, 308]`, группировка по `clientRequestHTTPHost`
+5. Маппинг host → domain_id через таблицу `domains` (WHERE `zone_id = ?`)
+6. Для каждого домена с данными:
+   - `clicks_total += count`
+   - `clicks_yesterday = clicks_today` (ротация)
+   - `clicks_today = count` (новые данные)
+   - `last_counted_date = today` (idempotency guard — не обновлять дважды за день)
+7. Для доменов **без данных** — ротация: `clicks_yesterday = clicks_today`, `clicks_today = 0`
+8. Проверка аномалий: `detectAnomaly(clicks_today_old, new_count)` — сравнивает N-2 vs N-1
+9. При серьёзной аномалии (`drop_90`, `zero_traffic`) — проверка phishing через CF Zone API
+
+**Семантика полей в `redirect_rules`:**
+
 | Поле | Описание |
 |------|----------|
-| clicks_total | Накопительный счётчик (всё время жизни) |
-| clicks_yesterday | Клики за вчера (для trend) |
-| clicks_today | Клики за сегодня |
-| last_counted_date | Дата последнего подсчёта |
+| `clicks_total` | Накопительный счётчик (всегда растёт) |
+| `clicks_today` | Данные за **последний обработанный день** (N-1), НЕ за текущий день |
+| `clicks_yesterday` | Данные за **позавчера** (N-2), для сравнения с `clicks_today` |
+| `last_counted_date` | Дата последнего обновления (idempotency — предотвращает двойной подсчёт) |
 
-### 6.4 Trend calculation
+> **Важно:** Несмотря на название, `clicks_today` содержит данные за вчера (N-1), а `clicks_yesterday` — за позавчера (N-2). Имена полей отражают их роль в UI (показываем «сегодня» и «вчера»), а не абсолютные даты.
+
+### 6.4 Anomaly Detection
+
+При обновлении счётчиков pipeline проверяет аномалии трафика:
+
+```
+detectAnomaly(N-2_value, N-1_value) → AnomalyType | null
+```
+
+| Аномалия | Условие | Действие |
+|----------|---------|----------|
+| `zero_traffic` | N-1 = 0, N-2 >= 20 | Проверка phishing через CF API |
+| `drop_90` | N-1 < N-2 * 0.1 (падение >90%) | Проверка phishing через CF API |
+| `drop_50` | N-1 < N-2 * 0.5 (падение >50%) | Только пометка, без phishing check |
+
+При `zero_traffic` или `drop_90` — вызывается `checkZonePhishing()` через CF Zone API. Если phishing подтверждён, все домены зоны блокируются (`blocked = 1, blocked_reason = 'phishing'`).
+
+### 6.5 Trend calculation (UI)
 
 ```javascript
 const trend = clicks_today > clicks_yesterday * 1.1 ? 'up'

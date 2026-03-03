@@ -375,6 +375,7 @@ Bootstrap token должен иметь право создавать токен
 | Workers Routes Write | Account | Создание маршрутов |
 | Rules Read | Zone | Чтение Redirect Rules |
 | Rules Write | Zone | Создание Redirect Rules |
+| Analytics Read | Zone | Статистика редиректов через CF GraphQL API |
 
 ---
 ### 2.3 Сценарии инициализации
