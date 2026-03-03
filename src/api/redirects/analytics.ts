@@ -4,7 +4,10 @@
  * CF GraphQL Analytics API client
  *
  * Получение статистики 3xx редиректов из Cloudflare Analytics.
- * Free Plan: 3 дня retention — cron должен работать ежедневно.
+ * Использует httpRequestsAdaptiveGroups (near real-time, адаптивное семплирование).
+ *
+ * Фильтрация: datetime_geq/datetime_lt + edgeResponseStatus 301/302/307/308.
+ * Группировка: по clientRequestHTTPHost → count per domain.
  */
 
 // ============================================================
@@ -43,14 +46,14 @@ const CF_GRAPHQL_ENDPOINT = "https://api.cloudflare.com/client/v4/graphql";
 // ============================================================
 
 const REDIRECT_STATS_QUERY = `
-  query RedirectStats($zoneTag: String!, $date: Date!) {
+  query RedirectStats($zoneTag: String!, $datetimeStart: DateTime!, $datetimeEnd: DateTime!) {
     viewer {
       zones(filter: { zoneTag: $zoneTag }) {
         httpRequestsAdaptiveGroups(
           filter: {
-            date: $date
-            edgeResponseStatus_geq: 300
-            edgeResponseStatus_lt: 400
+            datetime_geq: $datetimeStart
+            datetime_lt: $datetimeEnd
+            edgeResponseStatus_in: [301, 302, 307, 308]
           }
           limit: 1000
           orderBy: [count_DESC]
@@ -70,11 +73,11 @@ const REDIRECT_STATS_QUERY = `
 // ============================================================
 
 /**
- * Получить статистику 3xx редиректов за указанную дату
+ * Получить статистику редиректов за указанную дату
  *
  * @param cfZoneId - ID зоны в Cloudflare
  * @param token - API токен клиента
- * @param date - Дата в формате YYYY-MM-DD
+ * @param date - Дата в формате YYYY-MM-DD (запрашивает полные сутки 00:00–24:00 UTC)
  * @returns Массив {host, count} или пустой массив при ошибке
  */
 export async function fetchRedirectStats(
@@ -82,6 +85,9 @@ export async function fetchRedirectStats(
   token: string,
   date: string
 ): Promise<RedirectStats[]> {
+  const datetimeStart = `${date}T00:00:00Z`;
+  const datetimeEnd = `${date}T23:59:59Z`;
+
   try {
     const response = await fetch(CF_GRAPHQL_ENDPOINT, {
       method: "POST",
@@ -93,27 +99,31 @@ export async function fetchRedirectStats(
         query: REDIRECT_STATS_QUERY,
         variables: {
           zoneTag: cfZoneId,
-          date,
+          datetimeStart,
+          datetimeEnd,
         },
       }),
     });
 
     if (!response.ok) {
-      console.error(`CF GraphQL HTTP error: ${response.status}`);
+      console.error(`[STATS] CF GraphQL HTTP ${response.status} for zone ${cfZoneId}`);
       return [];
     }
 
     const data = (await response.json()) as CFGraphQLResponse;
 
     if (data.errors && data.errors.length > 0) {
-      console.error("CF GraphQL errors:", data.errors.map((e) => e.message).join(", "));
+      console.error(`[STATS] CF GraphQL errors for zone ${cfZoneId}:`, data.errors.map((e) => e.message).join(", "));
       return [];
     }
 
     const groups = data.data?.viewer?.zones?.[0]?.httpRequestsAdaptiveGroups;
     if (!groups || groups.length === 0) {
+      console.log(`[STATS] CF GraphQL empty for zone ${cfZoneId}, date ${date}`);
       return [];
     }
+
+    console.log(`[STATS] CF GraphQL zone ${cfZoneId}: ${groups.length} hosts, total ${groups.reduce((s, g) => s + g.count, 0)} hits`);
 
     return groups.map((g) => ({
       host: g.dimensions.clientRequestHTTPHost,

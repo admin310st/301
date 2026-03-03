@@ -16,7 +16,7 @@ export interface CFPermission {
 }
 
 /**
- * Полный список обязательных разрешений (33 шт. — могут меняться)
+ * Полный список обязательных разрешений (34 шт. — могут меняться)
  */
 export const CF_REQUIRED_PERMISSIONS: readonly CFPermission[] = [
   // ===== ACCOUNT SCOPE (12) =====
@@ -55,6 +55,7 @@ export const CF_REQUIRED_PERMISSIONS: readonly CFPermission[] = [
   { id: "fb6778dc191143babbfaa57993f1d275", name: "Zone WAF Write", scope: "zone" },
   { id: "2072033d694d415a936eaeb94e6405b8", name: "Workers Routes Read", scope: "zone" },
   { id: "28f4b596e7d643029c524985477ae49a", name: "Workers Routes Write", scope: "zone" },
+  { id: "9c88f9c5bce24ce7af9a958ba9c504db", name: "Analytics Read", scope: "zone" },
 ] as const;
 
 /**

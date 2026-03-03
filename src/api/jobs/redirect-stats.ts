@@ -128,15 +128,19 @@ async function processZoneStats(
     return result;
   }
 
+  console.log(`[STATS] Zone ${zone.id}: ${stats.length} stats entries, hosts: ${stats.map(s => s.host).join(", ")}`);
+
   // 3. Получить домены зоны для маппинга host → domain_id
   const domains = await env.DB301.prepare(`
     SELECT id, domain_name FROM domains WHERE zone_id = ?
-  `).all<{ id: number; domain_name: string }>();
+  `).bind(zone.id).all<{ id: number; domain_name: string }>();
 
   const domainMap = new Map<string, number>();
   for (const d of domains.results || []) {
     domainMap.set(d.domain_name.toLowerCase(), d.id);
   }
+
+  console.log(`[STATS] Zone ${zone.id}: ${domains.results?.length || 0} domains in DB: ${(domains.results || []).map(d => d.domain_name).join(", ")}`);
 
   // 4. Обновить счётчики и отслеживать аномалии
   let hasAnomalyTrigger = false;
@@ -158,19 +162,19 @@ async function processZoneStats(
       SET
         clicks_total = clicks_total + ?,
         clicks_yesterday = clicks_today,
-        clicks_today = 0,
+        clicks_today = ?,
         last_counted_date = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE domain_id = ? AND zone_id = ? AND enabled = 1
         AND (last_counted_date IS NULL OR last_counted_date != ?)
-    `).bind(stat.count, today, domainId, zone.id, today).run();
+    `).bind(stat.count, stat.count, today, domainId, zone.id, today).run();
 
     result.rules_updated += updateResult.meta?.changes || 0;
 
-    // Проверить аномалию: вчерашние клики (после ротации будут в yesterday)
-    // и сегодняшние (stat.count — новые данные, которые станут yesterday завтра)
+    // Проверить аномалию: сравниваем предыдущий clicks_today (N-2, до ротации)
+    // с новыми данными stat.count (N-1) — динамика между двумя последними днями
     if (currentStats) {
-      const anomaly = detectAnomaly(currentStats.yesterday, stat.count);
+      const anomaly = detectAnomaly(currentStats.today_val, stat.count);
       if (anomaly) {
         result.anomalies++;
         if (shouldCheckPhishing(anomaly)) {
