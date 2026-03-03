@@ -106,11 +106,29 @@
 
 ---
 
+## Phase 2d: Health Tests (H1–H8) — 2026-03-03
+
+**Prerequisites resolved:** VT API key added, client worker cron ran, threats data in DB301.
+
+| # | Test | Domain | Expected | Actual | Status |
+|---|------|--------|----------|--------|--------|
+| H1 | All 8 fields in health response | pin-up.sbs (46) | 8 fields | 8/8 present | **PASS** |
+| H2 | Status=warning when threat_score>0 | pin-up.sbs (46) | warning | status=warning, score=5 | **PASS** |
+| H3 | Status=healthy when threat_score=0 | donator.site (36) | healthy | status=healthy, score=0 | **PASS** |
+| H4 | Threats object with VT data | pin-up.sbs (46) | source=virustotal, categories | 4 categories, checked_at present | **PASS** |
+| H5 | Traffic stats populated | donator.site (36) | today/yesterday/anomaly | today=587, anomaly=false | **PASS** |
+| H6 | VT quota endpoint | /integrations/virustotal/quota | tier, daily_limit | tier=free, limit=500 | **PASS** |
+| H7 | Domain list health.status | GET /domains | warning + healthy | 4 warning, 12 healthy (16 total) | **PASS** |
+| H8 | Blocked domain status=blocked | pinupcasino.quest (44) | blocked=true | status=blocked, reason=manual (DB test, reverted) | **PASS** |
+
+**Warning domains (threat_score > 0):** pin-up.beauty (2), pinupcasino.cfd (2), pinupgirl.ru (2), pin-up.sbs (5)
+
+---
+
 ## BLOCKED Tests
 
-### Phase 1a: Health Worker — BLOCKED
-**Reason:** No client workers deployed (client_worker_configs table empty).
-Tests H1-H4 cannot be executed.
+### Phase 1a: Health Worker — RESOLVED (2026-03-03)
+Health worker deployed, VT checks running, all H1-H8 tests pass.
 
 ### Phase 1b: TDS Sync + Edge — BLOCKED
 **Reason:** No TDS rules exist, no client workers deployed.
@@ -142,15 +160,16 @@ curl cannot work (IP/UA mismatch). Need browser context via MCP Playwright.
 |-------|-------|--------|--------|---------|
 | 1e: Redirect Edge | 11 | **11** | 0 | 0 |
 | 1: Public API | 7 | **7** | 0 | 0 |
-| 1a: Health Worker | 4 | — | — | **4** (no workers) |
+| 2: CE (Client Env) | 8 | **8** | 0 | 0 |
+| 2: R (Redirects) | 7 | **7** | 0 | 0 |
+| 2: T (TDS) | 10 | **10** | 0 | 0 |
+| 2d: H (Health) | 8 | **8** | 0 | 0 |
 | 1b: TDS Edge | 5 | — | — | **5** (no workers/rules) |
 | 1c: Postback (real) | 2 | — | — | **2** (no TDS rules) |
 | 1d: D1 Verify | 4 | — | — | **4** (no client D1) |
-| 2a: Redirect CRUD | 11 | — | — | **11** (need Playwright) |
-| 2b: TDS CRUD | 8 | — | — | **8** (need Playwright) |
 | 2c: MAB | 6 | — | — | **6** (need Playwright) |
 | 2d: Cleanup | 4 | — | — | **4** (need Playwright) |
-| **Total** | **62** | **18** | **0** | **44** |
+| **Total** | **72** | **51** | **0** | **21** |
 
 ---
 
