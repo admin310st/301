@@ -2,8 +2,9 @@
 
 import { Context } from "hono";
 import { Env } from "../../../types/worker";
-import { encrypt } from "../../../lib/crypto";
 import { requireOwner } from "../../../lib/auth";
+import { createKey, getDecryptedKey } from "../../keys/storage";
+import { setWorkerSecrets } from "../cloudflare/workers";
 
 // ============================================================
 // TYPES
@@ -218,34 +219,57 @@ export async function handleInitKeyVirusTotal(c: Context<{ Bindings: Env }>): Pr
     }, 409);
   }
 
-  // 5. Encrypt & store
+  // 5. Store via createKey (encrypt → KV_CREDENTIALS, metadata → D1)
   const tokenName = key_alias?.trim() || "virustotal";
 
-  const secrets = {
-    apiKey: trimmedKey,
-  };
+  const storeResult = await createKey(env, {
+    account_id: accountId,
+    provider: "virustotal",
+    key_alias: tokenName,
+    secrets: { apiKey: trimmedKey },
+  });
 
-  const encrypted = await encrypt(secrets, env.MASTER_SECRET);
+  if (!storeResult.ok) {
+    return c.json({ ok: false, error: storeResult.error }, 500);
+  }
 
-  const result = await env.DB301.prepare(
-    `INSERT INTO account_keys
-      (account_id, provider, name, key_encrypted, status, created_at, updated_at)
-     VALUES (?, 'virustotal', ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-  )
-    .bind(
-      accountId,
-      tokenName,
-      JSON.stringify(encrypted)
-    )
-    .run();
+  const keyId = storeResult.key_id;
 
-  const keyId = result.meta?.last_row_id;
+  // 6. Deploy VT_API_KEY as worker secret if client_env is ready
+  let deployed = false;
+  try {
+    const cfKey = await env.DB301.prepare(
+      `SELECT id, client_env, external_account_id FROM account_keys
+       WHERE account_id = ? AND provider = 'cloudflare' AND status = 'active' AND client_env IS NOT NULL`
+    ).bind(accountId).first<{ id: number; client_env: string; external_account_id: string }>();
 
-  // 6. Success
+    if (cfKey) {
+      const clientEnv = JSON.parse(cfKey.client_env) as { health_worker?: boolean; ready?: boolean };
+      if (clientEnv.ready && clientEnv.health_worker) {
+        const cfDecrypted = await getDecryptedKey(env, cfKey.id);
+        if (cfDecrypted) {
+          const secretResult = await setWorkerSecrets(
+            cfKey.external_account_id,
+            "301-health",
+            { VT_API_KEY: trimmedKey },
+            cfDecrypted.secrets.token
+          );
+          deployed = secretResult.ok;
+        }
+      }
+    }
+  } catch (e) {
+    console.error("[VT init] Failed to deploy secret to client worker:", e);
+  }
+
+  // 7. Success
   return c.json({
     ok: true,
     key_id: keyId,
-    message: "VirusTotal integration configured successfully",
+    deployed_to_client: deployed,
+    message: deployed
+      ? "VirusTotal integration configured and deployed to client"
+      : "VirusTotal integration configured successfully",
     tier: verification.tier,
     quota: {
       daily_limit: verification.daily_quota,
@@ -270,22 +294,25 @@ export async function handleGetVirusTotalQuota(c: Context<{ Bindings: Env }>): P
 
   const { account_id: accountId } = auth;
 
-  // Get key
+  // Get key via storage
+  const { getDecryptedKey } = await import("../../keys/storage");
+
   const keyRow = await env.DB301.prepare(
-    `SELECT key_encrypted FROM account_keys
+    `SELECT id FROM account_keys
      WHERE account_id = ? AND provider = 'virustotal' AND status = 'active'`
   )
     .bind(accountId)
-    .first<{ key_encrypted: string }>();
+    .first<{ id: number }>();
 
   if (!keyRow) {
     return c.json({ ok: false, error: "virustotal_not_configured" }, 404);
   }
 
-  // Decrypt
-  const { decrypt } = await import("../../../lib/crypto");
-  const decrypted = await decrypt(JSON.parse(keyRow.key_encrypted), env.MASTER_SECRET);
-  const apiKey = (decrypted as { apiKey: string }).apiKey;
+  const decrypted = await getDecryptedKey(env, keyRow.id);
+  if (!decrypted) {
+    return c.json({ ok: false, error: "key_decrypt_failed" }, 500);
+  }
+  const apiKey = decrypted.secrets.apiKey;
 
   // Get quota
   const quotaInfo = await getQuotaInfo(apiKey);
