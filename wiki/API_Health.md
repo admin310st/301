@@ -53,9 +53,11 @@ API для системы мониторинга здоровья доменов
   "status": "warning",
   "blocked": false,
   "blocked_reason": null,
+  "ssl_status": "active",
   "threats": {
     "score": 3,
     "categories": ["gambling"],
+    "reputation": -15,
     "source": "virustotal",
     "checked_at": "2025-01-15T09:55:00Z"
   },
@@ -63,9 +65,38 @@ API для системы мониторинга здоровья доменов
     "yesterday": 150,
     "today": 45,
     "change_percent": -70,
-    "anomaly": true
-  }
+    "anomaly": true,
+    "anomaly_type": "drop_90"
+  },
+  "phishing_status": "clean",
+  "phishing_checked_at": "2025-01-15T02:00:00Z"
 }
+```
+
+**Поля:**
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `status` | `blocked\|warning\|healthy\|unknown` | Общий статус здоровья |
+| `blocked` | `boolean` | Домен заблокирован |
+| `blocked_reason` | `string\|null` | Причина блокировки (`phishing`, etc.) |
+| `ssl_status` | `string\|null` | Статус SSL сертификата из CF |
+| `threats` | `object\|null` | Данные об угрозах (VT/CF Intel), `null` если нет VT key |
+| `traffic.yesterday` | `number` | Клики за вчера (сумма по redirect_rules домена) |
+| `traffic.today` | `number` | Клики за сегодня |
+| `traffic.change_percent` | `number` | Изменение в % (today vs yesterday) |
+| `traffic.anomaly` | `boolean` | Обнаружена аномалия трафика |
+| `traffic.anomaly_type` | `drop_50\|drop_90\|zero_traffic\|null` | Тип аномалии |
+| `phishing_status` | `clean\|detected\|null` | Результат phishing-проверки (`null` = never checked) |
+| `phishing_checked_at` | `string\|null` | Время последней phishing-проверки (ISO 8601) |
+
+**Источники данных трафика:**
+
+Статистика собирается кроном из CF GraphQL Analytics API (`httpRequestsAdaptiveGroups`, фильтр `edgeResponseStatus_in: [301,302,307,308]`, группировка по `clientRequestHTTPHost`). Данные записываются в `redirect_rules.clicks_yesterday/clicks_today`, суммируются по домену в health endpoint.
+
+**Phishing-проверка:**
+
+Запускается автоматически кроном при обнаружении серьёзной аномалии трафика (`drop_90` или `zero_traffic`). Вызывает CF API `meta.phishing_detected` для зоны. Результат записывается в `domains.phishing_status` и `domains.phishing_checked_at`.
 ```
 
 ---

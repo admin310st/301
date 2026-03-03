@@ -194,6 +194,10 @@ async function processZoneStats(
     if (phishingResult.ok && phishingResult.phishing_detected) {
       result.phishing_detected = true;
       await updateDomainsPhishingStatus(env, zone.id, true);
+      await updatePhishingTracking(env, zone.id, "detected");
+    } else if (phishingResult.ok) {
+      await updateDomainsPhishingStatus(env, zone.id, false);
+      await updatePhishingTracking(env, zone.id, "clean");
     }
   }
 
@@ -204,6 +208,21 @@ async function processZoneStats(
  * Ротация счётчиков: yesterday = today, today = 0
  * Для правил которые не получили данных из CF (0 переходов)
  */
+/**
+ * Записать результат phishing-проверки в domains
+ */
+async function updatePhishingTracking(
+  env: Env,
+  zoneId: number,
+  status: "clean" | "detected"
+): Promise<void> {
+  await env.DB301.prepare(`
+    UPDATE domains
+    SET phishing_status = ?, phishing_checked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE zone_id = ?
+  `).bind(status, zoneId).run();
+}
+
 async function rotateCounters(env: Env, zoneId: number, today: string): Promise<void> {
   await env.DB301.prepare(`
     UPDATE redirect_rules

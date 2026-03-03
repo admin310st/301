@@ -23,6 +23,7 @@ export interface DomainHealthStatus {
   status: "blocked" | "warning" | "healthy" | "unknown";
   blocked: boolean;
   blocked_reason: string | null;
+  ssl_status: string | null;
   threats: {
     score: number | null;
     categories: string[] | null;
@@ -35,7 +36,10 @@ export interface DomainHealthStatus {
     today: number;
     change_percent: number;
     anomaly: boolean;
+    anomaly_type: AnomalyType;
   } | null;
+  phishing_status: "clean" | "detected" | null;
+  phishing_checked_at: string | null;
 }
 
 // ============================================================
@@ -192,7 +196,8 @@ export async function handleGetDomainHealth(c: Context<{ Bindings: Env }>) {
 
   // Получаем домен с данными об угрозах
   const domain = await env.DB301.prepare(
-    `SELECT d.id, d.domain_name, d.blocked, d.blocked_reason, d.zone_id,
+    `SELECT d.id, d.domain_name, d.blocked, d.blocked_reason, d.ssl_status,
+            d.phishing_status, d.phishing_checked_at, d.zone_id,
             t.threat_score, t.categories, t.reputation, t.source, t.checked_at
      FROM domains d
      LEFT JOIN domain_threats t ON d.id = t.domain_id
@@ -204,6 +209,9 @@ export async function handleGetDomainHealth(c: Context<{ Bindings: Env }>) {
       domain_name: string;
       blocked: number;
       blocked_reason: string | null;
+      ssl_status: string | null;
+      phishing_status: string | null;
+      phishing_checked_at: string | null;
       zone_id: number | null;
       threat_score: number | null;
       categories: string | null;
@@ -258,6 +266,7 @@ export async function handleGetDomainHealth(c: Context<{ Bindings: Env }>) {
     status,
     blocked: domain.blocked === 1,
     blocked_reason: domain.blocked_reason,
+    ssl_status: domain.ssl_status,
     threats:
       domain.threat_score !== null
         ? {
@@ -273,7 +282,10 @@ export async function handleGetDomainHealth(c: Context<{ Bindings: Env }>) {
       today,
       change_percent: changePercent,
       anomaly: anomaly !== null,
+      anomaly_type: anomaly,
     },
+    phishing_status: domain.phishing_status as DomainHealthStatus["phishing_status"],
+    phishing_checked_at: domain.phishing_checked_at,
   };
 
   return c.json({ ok: true, health });
