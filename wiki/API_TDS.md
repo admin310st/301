@@ -13,9 +13,9 @@ https://api.301.st
 Управление Traffic Distribution System (TDS) — правила перенаправления трафика на edge (Cloudflare Workers).
 
 **Ключевые концепции:**
-- **Rule** — правило TDS с условиями и действием
+- **Rule** — правило TDS с условиями и действием, привязанное к сайту (`site_id`)
 - **Preset** — шаблон для быстрого создания правил (S1-S5, L1-L3)
-- **Domain Binding** — привязка правила к домену (через `rule_domain_map`)
+- **Site Binding** — правило привязано к сайту через `site_id` FK; целевой домен определяется неявно: `sites → domains(role='acceptor')`. См. [ADR-001](decisions/ADR-001-tds-site-scoped-rules.md)
 - **Sync** — Client Worker тянет правила через `/tds/sync` (pull model)
 - **MAB** — Multi-Armed Bandits: A/B-тест с автоматической оптимизацией
 
@@ -142,10 +142,16 @@ curl -X GET "https://api.301.st/tds/params" \
 
 **Требует:** `Authorization: Bearer <access_token>`
 
+**Query-параметры (опциональные):**
+
+| Параметр | Тип | Описание |
+|----------|-----|----------|
+| `site_id` | number | Фильтр по сайту |
+
 **Пример запроса:**
 
 ```bash
-curl -X GET "https://api.301.st/tds/rules" \
+curl -X GET "https://api.301.st/tds/rules?site_id=5" \
   -H "Authorization: Bearer <access_token>"
 ```
 
@@ -170,9 +176,12 @@ curl -X GET "https://api.301.st/tds/rules" \
       "priority": 10,
       "status": "active",
       "preset_id": "S1",
+      "site_id": 5,
+      "site_name": "My Offer Site",
+      "acceptor_domain": "example.com",
+      "sync_status": "applied",
       "created_at": "2026-01-15T10:30:00Z",
-      "updated_at": "2026-01-15T10:30:00Z",
-      "domain_count": 3
+      "updated_at": "2026-01-15T10:30:00Z"
     }
   ],
   "total": 5
@@ -180,13 +189,15 @@ curl -X GET "https://api.301.st/tds/rules" \
 ```
 
 > **Сортировка:** `priority DESC`, затем `id ASC`.
-> **domain_count** — количество активных привязок (binding_status ≠ 'removed').
+> **site_name** — название сайта, к которому привязано правило.
+> **acceptor_domain** — домен-акцептор сайта (`domains.role='acceptor'`).
+> **sync_status** — статус синхронизации правила: `pending`, `applying`, `applied`, `failed`.
 
 ---
 
 ## 4. GET /tds/rules/:id
 
-Детали правила с привязанными доменами.
+Детали правила.
 
 **Требует:** `Authorization: Bearer <access_token>`
 
@@ -217,23 +228,20 @@ curl -X GET "https://api.301.st/tds/rules/1" \
     "priority": 10,
     "status": "active",
     "preset_id": "S1",
+    "site_id": 5,
+    "site_name": "My Offer Site",
+    "acceptor_domain": "example.com",
+    "sync_status": "applied",
+    "last_synced_at": "2026-01-15T11:00:00Z",
+    "last_error": null,
     "created_at": "2026-01-15T10:30:00Z",
     "updated_at": "2026-01-15T10:30:00Z"
-  },
-  "domains": [
-    {
-      "binding_id": 42,
-      "domain_id": 7,
-      "domain_name": "example.com",
-      "enabled": true,
-      "binding_status": "applied",
-      "last_synced_at": "2026-01-15T11:00:00Z",
-      "last_error": null,
-      "created_at": "2026-01-15T10:30:00Z"
-    }
-  ]
+  }
 }
 ```
+
+> **site_name** и **acceptor_domain** получаются через JOIN: `sites → domains(role='acceptor')`.
+> **sync_status** / **last_synced_at** / **last_error** — поля синхронизации, хранятся непосредственно в `tds_rules`.
 
 **Ошибки:**
 
@@ -256,6 +264,7 @@ curl -X GET "https://api.301.st/tds/rules/1" \
 | `rule_name` | string | да | Название (1-255 символов) |
 | `tds_type` | string | да | `"smartlink"` или `"traffic_shield"` |
 | `logic_json` | object | да | Условия + действие (см. [LogicJson](#13-logicjson-schema)) |
+| `site_id` | number | да | ID сайта (FK на `sites`) |
 | `priority` | number | нет | 0-1000 (default: 100) |
 
 **Пример запроса:**
@@ -267,6 +276,7 @@ curl -X POST "https://api.301.st/tds/rules" \
   -d '{
     "rule_name": "Geo Redirect RU",
     "tds_type": "traffic_shield",
+    "site_id": 5,
     "logic_json": {
       "conditions": { "geo": ["RU", "BY"] },
       "action": "redirect",
@@ -288,7 +298,9 @@ curl -X POST "https://api.301.st/tds/rules" \
     "tds_type": "traffic_shield",
     "logic_json": { "..." },
     "priority": 50,
-    "status": "draft",
+    "status": "active",
+    "site_id": 5,
+    "sync_status": "pending",
     "preset_id": null,
     "created_at": "2026-01-15T12:00:00Z",
     "updated_at": "2026-01-15T12:00:00Z"
@@ -296,7 +308,7 @@ curl -X POST "https://api.301.st/tds/rules" \
 }
 ```
 
-> **Начальный статус:** всегда `"draft"`. Привяжите домены, чтобы активировать.
+> **Автоматическая активация:** правило сразу получает `status: "active"` и `sync_status: "pending"`, т.к. привязка к сайту задаётся при создании (см. [ADR-001](decisions/ADR-001-tds-site-scoped-rules.md)).
 
 **Ошибки:**
 
@@ -311,7 +323,7 @@ curl -X POST "https://api.301.st/tds/rules" \
 
 ## 6. POST /tds/rules/from-preset
 
-Создать правило из пресета (с опциональной привязкой доменов).
+Создать правило из пресета с привязкой к сайту.
 
 **Требует:** `Authorization: Bearer <access_token>` (editor или owner)
 
@@ -321,7 +333,7 @@ curl -X POST "https://api.301.st/tds/rules" \
 |------|-----|-------------|----------|
 | `preset_id` | string | да | ID пресета (S1-S5, L1-L3) |
 | `params` | object | да | Параметры пресета |
-| `domain_ids` | number[] | нет | Домены для привязки (max 100) |
+| `site_id` | number | да | ID сайта (FK на `sites`) |
 | `rule_name` | string | нет | Название (auto-generated если пусто) |
 
 **Пример запроса (S2 — Geo Filter):**
@@ -336,7 +348,7 @@ curl -X POST "https://api.301.st/tds/rules/from-preset" \
       "geo": ["RU", "BY", "KZ"],
       "action_url": "https://local.example.com"
     },
-    "domain_ids": [7, 8],
+    "site_id": 5,
     "rule_name": "CIS Geo Filter"
   }'
 ```
@@ -359,15 +371,16 @@ curl -X POST "https://api.301.st/tds/rules/from-preset" \
     },
     "priority": 50,
     "status": "active",
+    "site_id": 5,
+    "sync_status": "pending",
     "preset_id": "S2",
     "created_at": "2026-01-15T12:00:00Z",
     "updated_at": "2026-01-15T12:00:00Z"
-  },
-  "bound_domains": [7, 8]
+  }
 }
 ```
 
-> **Автоматическая активация:** если `domain_ids` указаны и успешно привязаны, статус → `"active"`.
+> **Автоматическая активация:** правило сразу `status: "active"`, т.к. `site_id` задаётся при создании.
 
 **Ошибки:**
 
@@ -395,6 +408,7 @@ curl -X POST "https://api.301.st/tds/rules/from-preset" \
 | `logic_json` | object | Новые условия/действие |
 | `priority` | number | 0-1000 |
 | `status` | string | `"draft"`, `"active"`, `"disabled"` |
+| `site_id` | number | Переназначить правило на другой сайт |
 
 **Пример запроса:**
 
@@ -421,7 +435,7 @@ curl -X PATCH "https://api.301.st/tds/rules/1" \
 }
 ```
 
-> **Re-sync:** после обновления все привязки с `binding_status = "applied"` переводятся в `"pending"` для повторной синхронизации.
+> **Re-sync:** после обновления `sync_status` правила переводится в `"pending"` для повторной синхронизации.
 
 **Ошибки:**
 
@@ -497,7 +511,7 @@ curl -X DELETE "https://api.301.st/tds/rules/1" \
 }
 ```
 
-> **Каскад:** все привязки доменов помечаются `binding_status = "removed"` (soft delete).
+> **Каскад:** правило удаляется из `tds_rules`. При следующем sync Client Worker перестанет получать это правило.
 
 **Ошибки:**
 
@@ -507,126 +521,29 @@ curl -X DELETE "https://api.301.st/tds/rules/1" \
 
 ---
 
-## 10. POST /tds/rules/:id/domains
+## 10-12. Endpoints привязки доменов (УДАЛЕНЫ)
 
-Привязать домены к правилу.
+> **Удалены в [ADR-001](decisions/ADR-001-tds-site-scoped-rules.md).** Таблица `rule_domain_map` больше не существует.
+>
+> Привязка правила к домену теперь неявная через `site_id`:
+> - Правило привязано к сайту (`tds_rules.site_id`)
+> - Целевой домен определяется как `domains(site_id, role='acceptor')`
+>
+> **Удалённые endpoints:**
+> - ~~`POST /tds/rules/:id/domains`~~ -- привязка через `site_id` при создании/обновлении правила
+> - ~~`GET /tds/rules/:id/domains`~~ -- информация о домене доступна в `GET /tds/rules/:id` (поле `acceptor_domain`)
+> - ~~`DELETE /tds/rules/:id/domains/:domainId`~~ -- для переназначения используйте `PATCH /tds/rules/:id` с новым `site_id`
 
-**Требует:** `Authorization: Bearer <access_token>` (editor или owner)
+### Sync Status (вместо Binding Status)
 
-**Параметры запроса:**
+Статус синхронизации хранится в `tds_rules.sync_status`:
 
-| Поле | Тип | Обязательно | Описание |
-|------|-----|-------------|----------|
-| `domain_ids` | number[] | да | ID доменов (1-100) |
-
-**Пример запроса:**
-
-```bash
-curl -X POST "https://api.301.st/tds/rules/42/domains" \
-  -H "Authorization: Bearer <access_token>" \
-  -H "Content-Type: application/json" \
-  -d '{ "domain_ids": [7, 8, 9] }'
-```
-
-**Успешный ответ (201):**
-
-```json
-{
-  "ok": true,
-  "bound": [7, 8, 9],
-  "errors": []
-}
-```
-
-**Partial success (некоторые домены не привязаны):**
-
-```json
-{
-  "ok": true,
-  "bound": [7, 8],
-  "errors": [
-    { "domain_id": 10, "error": "domain_not_found" }
-  ]
-}
-```
-
-> **Автоматическая активация:** если правило было `"draft"` и хотя бы один домен привязан, статус → `"active"`.
-
-**Возможные ошибки в `errors[]`:**
-- `domain_not_found` — домен не принадлежит аккаунту
-- `already_bound` — привязка уже существует
-
----
-
-## 11. GET /tds/rules/:id/domains
-
-Список привязанных доменов правила.
-
-**Требует:** `Authorization: Bearer <access_token>`
-
-**Пример запроса:**
-
-```bash
-curl -X GET "https://api.301.st/tds/rules/42/domains" \
-  -H "Authorization: Bearer <access_token>"
-```
-
-**Успешный ответ:**
-
-```json
-{
-  "ok": true,
-  "rule_id": 42,
-  "domains": [
-    {
-      "binding_id": 100,
-      "domain_id": 7,
-      "domain_name": "example.com",
-      "enabled": true,
-      "binding_status": "applied",
-      "schedule_start": null,
-      "schedule_end": null,
-      "last_synced_at": "2026-01-15T11:00:00Z",
-      "last_error": null,
-      "created_at": "2026-01-15T10:30:00Z"
-    }
-  ],
-  "total": 1
-}
-```
-
-**Binding Status:**
-
-| Статус | Описание | UI Badge |
-|--------|----------|----------|
-| `pending` | Ожидает синхронизации | ⏳ Pending |
-| `applied` | Синхронизировано | ✅ Applied |
-| `removed` | Удалено (не показывается) | — |
-
----
-
-## 12. DELETE /tds/rules/:id/domains/:domainId
-
-Отвязать домен от правила.
-
-**Требует:** `Authorization: Bearer <access_token>` (editor или owner)
-
-**Пример запроса:**
-
-```bash
-curl -X DELETE "https://api.301.st/tds/rules/42/domains/7" \
-  -H "Authorization: Bearer <access_token>"
-```
-
-**Успешный ответ:**
-
-```json
-{
-  "ok": true,
-  "rule_id": 42,
-  "domain_id": 7
-}
-```
+| Статус | Описание |
+|--------|----------|
+| `pending` | Ожидает синхронизации |
+| `applying` | В процессе применения |
+| `applied` | Синхронизировано |
+| `failed` | Ошибка синхронизации (см. `last_error`) |
 
 ---
 
@@ -891,16 +808,16 @@ UNIQUE(account_id, domain_name, rule_id, hour, country, device)
 |----------|-------|------|----------|
 | `/tds/presets` | GET | JWT | Список пресетов |
 | `/tds/params` | GET | JWT | Справочник параметров |
-| `/tds/rules` | GET | JWT | Список правил аккаунта |
-| `/tds/rules/:id` | GET | JWT | Детали правила + домены |
-| `/tds/rules` | POST | editor | Создать правило |
-| `/tds/rules/from-preset` | POST | editor | Создать из пресета |
-| `/tds/rules/:id` | PATCH | editor | Обновить правило |
+| `/tds/rules` | GET | JWT | Список правил аккаунта (фильтр `?site_id=X`) |
+| `/tds/rules/:id` | GET | JWT | Детали правила (site_name, acceptor_domain, sync_status) |
+| `/tds/rules` | POST | editor | Создать правило (обязательный `site_id`) |
+| `/tds/rules/from-preset` | POST | editor | Создать из пресета (обязательный `site_id`) |
+| `/tds/rules/:id` | PATCH | editor | Обновить правило (можно изменить `site_id`) |
 | `/tds/rules/reorder` | PATCH | editor | Массовое обновление приоритетов |
 | `/tds/rules/:id` | DELETE | editor | Удалить правило |
-| `/tds/rules/:id/domains` | POST | editor | Привязать домены |
-| `/tds/rules/:id/domains` | GET | JWT | Список привязок |
-| `/tds/rules/:id/domains/:domainId` | DELETE | editor | Отвязать домен |
+| ~~`/tds/rules/:id/domains`~~ | ~~POST~~ | — | ~~Удалён ([ADR-001](decisions/ADR-001-tds-site-scoped-rules.md))~~ |
+| ~~`/tds/rules/:id/domains`~~ | ~~GET~~ | — | ~~Удалён ([ADR-001](decisions/ADR-001-tds-site-scoped-rules.md))~~ |
+| ~~`/tds/rules/:id/domains/:domainId`~~ | ~~DELETE~~ | — | ~~Удалён ([ADR-001](decisions/ADR-001-tds-site-scoped-rules.md))~~ |
 | `/tds/sync` | GET | API key | Sync для Client Worker |
 | `/tds/postback` | POST | public | MAB конверсии |
 | `webhook.301.st/tds` | POST | API key | Webhook: приём статистики от Client Worker |
@@ -911,8 +828,8 @@ UNIQUE(account_id, domain_name, rule_id, hour, country, device)
 
 | Статус | Описание | UI Badge |
 |--------|----------|----------|
-| `draft` | Создано, нет привязок | Draft |
-| `active` | Активно, привязаны домены | Active |
+| `draft` | Создано без `site_id` (осиротевшее правило) | Draft |
+| `active` | Активно, привязано к сайту | Active |
 | `disabled` | Отключено вручную | Disabled |
 
 ---
@@ -924,17 +841,18 @@ UNIQUE(account_id, domain_name, rule_id, hour, country, device)
 ```
 1. GET /tds/presets                        → показать список пресетов
 2. Пользователь выбирает пресет, заполняет params
-3. POST /tds/rules/from-preset             → создать правило + привязать домены
-   { preset_id, params, domain_ids }
-4. Правило создано со статусом "active"
+3. POST /tds/rules/from-preset             → создать правило с site_id
+   { preset_id, params, site_id }
+4. Правило создано: status="active", sync_status="pending"
 5. Client Worker подтянет правило при следующем sync
 ```
 
 ### Создание правила вручную
 
 ```
-1. POST /tds/rules                         → создать правило (status = "draft")
-2. POST /tds/rules/:id/domains             → привязать домены (status → "active")
+1. POST /tds/rules                         → создать правило с site_id
+   { rule_name, tds_type, logic_json, site_id }
+2. Правило сразу active (привязка к сайту задана при создании)
 3. Client Worker подтянет правило при следующем sync
 ```
 
@@ -942,12 +860,19 @@ UNIQUE(account_id, domain_name, rule_id, hour, country, device)
 
 ```
 1. POST /tds/rules
-   { action: "mab_redirect", algorithm: "thompson_sampling", variants: [...] }
-2. POST /tds/rules/:id/domains             → привязать домены
-3. Edge worker выбирает вариант по алгоритму
-4. Postback URL отправляет конверсии:
+   { action: "mab_redirect", algorithm: "thompson_sampling", variants: [...], site_id: N }
+2. Edge worker выбирает вариант по алгоритму
+3. Postback URL отправляет конверсии:
    POST /tds/postback?rule_id=X&variant_url=Y&converted=1
-5. Alpha/beta обновляются, алгоритм адаптируется
+4. Alpha/beta обновляются, алгоритм адаптируется
+```
+
+### Переназначение правила на другой сайт
+
+```
+1. PATCH /tds/rules/:id
+   { site_id: <new_site_id> }
+2. sync_status → "pending", правило будет синхронизировано для нового домена
 ```
 
 ### Обновление приоритетов (drag & drop)

@@ -88,6 +88,7 @@ export const createRuleSchema = z.object({
   rule_name: z.string().min(1).max(255),
   tds_type: tdsTypeSchema,
   logic_json: logicJsonSchema,
+  site_id: z.number().int().positive(),
   priority: z.number().int().min(0).max(1000).optional().default(100),
 });
 
@@ -97,21 +98,12 @@ export const updateRuleSchema = z.object({
   rule_name: z.string().min(1).max(255).optional(),
   tds_type: tdsTypeSchema.optional(),
   logic_json: logicJsonSchema.optional(),
+  site_id: z.number().int().positive().optional(),
   priority: z.number().int().min(0).max(1000).optional(),
   status: z.enum(["draft", "active", "disabled"]).optional(),
 });
 
 export type UpdateRuleInput = z.infer<typeof updateRuleSchema>;
-
-// ============================================================
-// DOMAIN BINDING INPUT
-// ============================================================
-
-export const bindDomainsSchema = z.object({
-  domain_ids: z.array(z.number().int().positive()).min(1).max(100),
-});
-
-export type BindDomainsInput = z.infer<typeof bindDomainsSchema>;
 
 // ============================================================
 // REORDER INPUT
@@ -133,7 +125,7 @@ export type ReorderInput = z.infer<typeof reorderSchema>;
 export const createFromPresetSchema = z.object({
   preset_id: z.string().min(1).max(4),
   params: z.record(z.unknown()),
-  domain_ids: z.array(z.number().int().positive()).max(100).optional(),
+  site_id: z.number().int().positive(),
   rule_name: z.string().min(1).max(255).optional(),
 });
 

@@ -126,9 +126,6 @@ import {
   handleUpdateTdsRule,
   handleReorderTdsRules,
   handleDeleteTdsRule,
-  handleBindDomains,
-  handleUnbindDomain,
-  handleListRuleDomains,
   handleApplyTdsRules,
 } from "./tds/tds";
 import { handleTdsSync, handleTdsPostback } from "./tds/sync";
@@ -272,11 +269,6 @@ app.patch("/tds/rules/reorder", handleReorderTdsRules);
 app.get("/tds/rules/:id", handleGetTdsRule);
 app.patch("/tds/rules/:id", handleUpdateTdsRule);
 app.delete("/tds/rules/:id", handleDeleteTdsRule);
-
-// Domain bindings
-app.post("/tds/rules/:id/domains", handleBindDomains);
-app.get("/tds/rules/:id/domains", handleListRuleDomains);
-app.delete("/tds/rules/:id/domains/:domainId", handleUnbindDomain);
 
 // TDS Apply (push to client D1)
 app.post("/tds/apply", handleApplyTdsRules);

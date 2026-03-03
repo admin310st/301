@@ -54,9 +54,8 @@ TDS — модуль распределения трафика по правил
 │                                                       │
 │  DB301 (D1)                                           │
 │  ┌───────────────┐                                    │
-│  │ tds_rules      │  ← CRUD через API                │
+│  │ tds_rules      │  ← CRUD через API (site_id FK)   │
 │  │ tds_params     │  ← справочник параметров          │
-│  │ rule_domain_map│  ← привязка правил к доменам      │
 │  │ tds_stats      │  ← агрегаты с клиентов            │
 │  └───────┬───────┘                                    │
 │          │                                            │
@@ -98,31 +97,49 @@ TDS — модуль распределения трафика по правил
 
 ## 4. Жизненный цикл правила
 
+> Модель данных изменена в [ADR-001](decisions/ADR-001-tds-site-scoped-rules.md): правила привязаны к сайтам через `site_id` FK, таблица `rule_domain_map` удалена.
+
 ### Статусы правила (tds_rules.status)
 
 | Статус | Значение |
 |--------|----------|
-| `draft` | Создано, не привязано к доменам |
-| `active` | Привязано, доступно для sync |
+| `draft` | Создано без `site_id` (осиротевшее правило) |
+| `active` | Привязано к сайту, доступно для sync |
 | `disabled` | Отключено владельцем |
 
-### Статусы привязки (rule_domain_map.binding_status)
+### Статусы синхронизации (tds_rules.sync_status)
 
 | Статус | Значение |
 |--------|----------|
-| `pending` | Привязка создана, ждёт sync |
+| `pending` | Правило создано/изменено, ждёт sync |
+| `applying` | В процессе применения |
 | `applied` | Worker забрал правило |
-| `failed` | Ошибка sync |
-| `removed` | Отвязано |
+| `failed` | Ошибка sync (подробности в `last_error`) |
+
+### Дополнительные поля синхронизации
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `last_synced_at` | TEXT | Время последней успешной синхронизации |
+| `last_error` | TEXT | Текст последней ошибки |
 
 ### Поток
 
 ```
-POST /tds/rules          →  tds_rules (status: draft)
-POST /tds/rules/:id/domains  →  rule_domain_map (binding_status: pending)
-                                  tds_rules (status: active)
-Client Worker GET /tds/sync   →  rule_domain_map (binding_status: applied)
+POST /tds/rules { site_id }  →  tds_rules (status: active, sync_status: pending)
+Client Worker GET /tds/sync   →  tds_rules (sync_status: applied)
 Visitor → Worker → matchRule()  →  action (redirect/block/pass)
+```
+
+### Определение целевого домена
+
+Домен определяется неявно через site:
+```sql
+SELECT d.domain_name
+FROM sites s
+JOIN domains d ON d.site_id = s.id AND d.role = 'acceptor' AND d.blocked = 0
+WHERE s.id = tds_rules.site_id
+LIMIT 1
 ```
 
 ---
@@ -153,21 +170,22 @@ src/api/tds/
 
 | Endpoint | Метод | Auth | Описание |
 |----------|-------|------|----------|
-| `/tds/rules` | GET | JWT | Список правил аккаунта |
-| `/tds/rules/:id` | GET | JWT | Одно правило + привязки |
-| `/tds/rules` | POST | editor | Создать правило вручную |
-| `/tds/rules/from-preset` | POST | editor | Создать из пресета |
-| `/tds/rules/:id` | PATCH | editor | Обновить |
-| `/tds/rules/:id` | DELETE | editor | Удалить (каскад rule_domain_map) |
+| `/tds/rules` | GET | JWT | Список правил аккаунта (фильтр `?site_id=X`) |
+| `/tds/rules/:id` | GET | JWT | Одно правило (site_name, acceptor_domain, sync_status) |
+| `/tds/rules` | POST | editor | Создать правило (обязательный `site_id`) |
+| `/tds/rules/from-preset` | POST | editor | Создать из пресета (обязательный `site_id`) |
+| `/tds/rules/:id` | PATCH | editor | Обновить (можно изменить `site_id`) |
+| `/tds/rules/:id` | DELETE | editor | Удалить правило |
 | `/tds/rules/reorder` | PATCH | editor | Изменить приоритеты |
 
-### Привязка к доменам
+### ~~Привязка к доменам~~ (УДАЛЕНО — [ADR-001](decisions/ADR-001-tds-site-scoped-rules.md))
 
-| Endpoint | Метод | Auth | Описание |
-|----------|-------|------|----------|
-| `/tds/rules/:id/domains` | POST | editor | Привязать к доменам |
-| `/tds/rules/:id/domains` | GET | JWT | Список привязок |
-| `/tds/rules/:id/domains/:domainId` | DELETE | editor | Отвязать |
+Таблица `rule_domain_map` удалена. Привязка правила к домену неявная через `site_id → sites → domains(role='acceptor')`.
+
+Удалённые endpoints:
+- ~~`POST /tds/rules/:id/domains`~~
+- ~~`GET /tds/rules/:id/domains`~~
+- ~~`DELETE /tds/rules/:id/domains/:domainId`~~
 
 ### Синхронизация и постбэк
 
@@ -210,7 +228,7 @@ POST /tds/rules/from-preset
     "geo": ["RU", "KZ", "UA"],
     "action_url": "https://m.offer.example.com/cis"
   },
-  "domain_ids": [45, 46],
+  "site_id": 5,
   "rule_name": "CIS Mobile Offer"
 }
 ```
@@ -585,8 +603,7 @@ Postback идёт на **301.st API** (не на клиентский Worker):
 | Сценарий | CF API calls |
 |----------|-------------|
 | Изменение logic_json/conditions | **0** — Worker заберёт при sync |
-| Добавление домена к правилу | 1-2 (re-seed + route) |
-| Удаление домена | 1-2 (re-seed + delete route) |
+| Переназначение site_id | **0** — Worker заберёт при sync |
 | Включение/отключение правила | **0** |
 
 ---
@@ -626,6 +643,20 @@ CREATE TABLE tds_stats_link (
     collected_at TEXT DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(account_id, domain_name, rule_id, hour, country, device)
 );
+
+-- 0018_rule_domain_map.sql (ADR-001: site-scoped rules)
+-- Добавление site_id FK + полей синхронизации в tds_rules
+ALTER TABLE tds_rules ADD COLUMN site_id INTEGER REFERENCES sites(id) ON DELETE SET NULL;
+ALTER TABLE tds_rules ADD COLUMN sync_status TEXT
+  CHECK(sync_status IN ('pending','applying','applied','failed')) DEFAULT 'pending';
+ALTER TABLE tds_rules ADD COLUMN last_synced_at TEXT;
+ALTER TABLE tds_rules ADD COLUMN last_error TEXT;
+
+-- Backfill site_id из rule_domain_map → domains → sites
+-- Backfill sync_status из rule_domain_map.binding_status
+
+-- Удаление rule_domain_map
+DROP TABLE IF EXISTS rule_domain_map;
 ```
 
 ### Client D1 (client.sql)
@@ -644,8 +675,8 @@ CREATE TABLE tds_stats_link (
 ## 14. Связь с другими модулями
 
 - **Redirects** — нативные CF Redirect Rules (push-модель). TDS дополняет: сложная логика (geo/device/UTM) через Worker (pull-модель)
-- **Domains** — правила привязываются к доменам через `rule_domain_map`
-- **Sites** — группировка доменов в UI
+- **Sites** — правила привязаны к сайтам через `site_id` FK ([ADR-001](decisions/ADR-001-tds-site-scoped-rules.md)). Целевой домен определяется как `domains(site_id, role='acceptor')`
+- **Domains** — целевой домен правила неявный: `sites → domains(role='acceptor')`. Прямой связи `tds_rules → domains` нет
 - **Client Environment** — setup D1/KV/Workers/Secrets на CF аккаунте клиента (`src/api/client-env/`)
 - **Integrations** — CF-токен клиента для деплоя Worker
 - **Webhook Worker** — приём статистики: `POST /tds` (shield + link + mab) → DB301

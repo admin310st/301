@@ -55,22 +55,20 @@ export async function handleTdsSync(c: Context<{ Bindings: Env }>) {
     return new Response(null, { status: 304 });
   }
 
-  // Fetch rules with domain bindings
+  // Fetch rules with domain bindings (site-scoped)
   const rules = await env.DB301.prepare(`
     SELECT
       tr.id,
       d.domain_name,
       tr.priority,
       tr.logic_json,
-      tr.tds_type,
-      rdm.enabled
+      tr.tds_type
     FROM tds_rules tr
-    JOIN rule_domain_map rdm ON rdm.tds_rule_id = tr.id
-    JOIN domains d ON rdm.domain_id = d.id
+    JOIN sites s ON tr.site_id = s.id
+    JOIN domains d ON d.site_id = s.id AND d.role = 'acceptor' AND d.blocked = 0
     WHERE tr.account_id = ?
       AND tr.status = 'active'
-      AND rdm.binding_status NOT IN ('removed')
-      AND rdm.enabled = 1
+      AND tr.site_id IS NOT NULL
     ORDER BY d.domain_name, tr.priority DESC
   `)
     .bind(accountId)
@@ -80,7 +78,6 @@ export async function handleTdsSync(c: Context<{ Bindings: Env }>) {
       priority: number;
       logic_json: string;
       tds_type: string;
-      enabled: number;
     }>();
 
   // Parse logic_json and flatten into Client Worker format
@@ -114,14 +111,14 @@ export async function handleTdsSync(c: Context<{ Bindings: Env }>) {
     bot_redirect_url: null,
   }));
 
-  // Update binding_status to applied
+  // Update sync_status to applied on tds_rules
   if (rules.results.length > 0) {
     const ruleIds = [...new Set(rules.results.map((r) => r.id))];
     for (const ruleId of ruleIds) {
       await env.DB301.prepare(
-        `UPDATE rule_domain_map
-         SET binding_status = 'applied', last_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-         WHERE tds_rule_id = ? AND account_id = ? AND binding_status = 'pending'`,
+        `UPDATE tds_rules
+         SET sync_status = 'applied', last_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND account_id = ? AND sync_status = 'pending'`,
       )
         .bind(ruleId, accountId)
         .run();
@@ -141,19 +138,18 @@ export async function handleTdsSync(c: Context<{ Bindings: Env }>) {
  */
 async function computeVersionHash(env: Env, accountId: number): Promise<string> {
   const rows = await env.DB301.prepare(
-    `SELECT tr.id, tr.updated_at, rdm.updated_at as binding_updated
+    `SELECT tr.id, tr.updated_at
      FROM tds_rules tr
-     JOIN rule_domain_map rdm ON rdm.tds_rule_id = tr.id
-     WHERE tr.account_id = ? AND tr.status = 'active' AND rdm.binding_status NOT IN ('removed')
+     WHERE tr.account_id = ? AND tr.status = 'active' AND tr.site_id IS NOT NULL
      ORDER BY tr.id`,
   )
     .bind(accountId)
-    .all<{ id: number; updated_at: string; binding_updated: string }>();
+    .all<{ id: number; updated_at: string }>();
 
   if (rows.results.length === 0) return "empty";
 
   const payload = rows.results
-    .map((r) => `${r.id}:${r.updated_at}:${r.binding_updated}`)
+    .map((r) => `${r.id}:${r.updated_at}`)
     .join("|");
 
   // Simple hash using Web Crypto

@@ -101,8 +101,8 @@ httpRequestsAdaptiveGroups(
 
 ### Очистка при удалении домена
 
-- [ ] handleDeleteDomain: очищать rule_domain_map перед удалением
 - [ ] handleDeleteDomain: очищать redirect_rules перед удалением
+- ~~handleDeleteDomain: очищать rule_domain_map~~ → убирается в ADR-001
 
 ### Fix GET /domains?project_id filter (Issue #13)
 
@@ -139,6 +139,19 @@ httpRequestsAdaptiveGroups(
 
 ## TDS
 
+### ADR-001: Site-scoped rules + удаление rule_domain_map
+
+**ADR:** `wiki/decisions/ADR-001-tds-site-scoped-rules.md` | **Статус:** Accepted
+
+- [ ] Migration: `site_id`, `sync_status`, `last_synced_at`, `last_error` в tds_rules
+- [ ] Migration: backfill site_id из rule_domain_map → domains → sites
+- [ ] Migration: DROP TABLE rule_domain_map
+- [ ] API: переписать tds.ts — site_id обязательный, убрать binding endpoints
+- [ ] API: переписать sync.ts — JOIN через sites вместо rule_domain_map
+- [ ] API: убрать DELETE FROM rule_domain_map в domains.ts:1145
+- [ ] API: убрать routes `/tds/rules/:id/domains` из index.ts
+- [ ] Docs: обновить wiki/API_TDS.md, wiki/TDS.md
+
 ### MAB — оставшиеся задачи
 
 - [ ] Postback auth hardening (rate limit, account isolation)
@@ -148,7 +161,7 @@ httpRequestsAdaptiveGroups(
 
 ### Побочные задачи TDS
 
-- [ ] При откреплении домена от сайта — деактивировать TDS (binding_status = 'retired')
+- [ ] При откреплении домена от сайта — деактивировать TDS (sync_status = 'pending', status = 'paused')
 - [ ] При смене роли acceptor → другая — деактивировать TDS
 
 ### Client Worker: убрать pull-механизм

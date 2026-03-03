@@ -4,7 +4,7 @@
  * TDS Rules API
  *
  * CRUD operations for TDS rules.
- * Rules are stored in DB301.tds_rules and mapped to domains via rule_domain_map.
+ * Rules are stored in DB301.tds_rules with site_id FK (site-scoped).
  * Client Workers pull rules via /tds/sync endpoint (see sync.ts).
  */
 
@@ -14,7 +14,6 @@ import { requireAuth, requireEditor } from "../lib/auth";
 import {
   createRuleSchema,
   updateRuleSchema,
-  bindDomainsSchema,
   reorderSchema,
   createFromPresetSchema,
 } from "./conditions";
@@ -37,11 +36,15 @@ import {
 interface TdsRuleRecord {
   id: number;
   account_id: number;
+  site_id: number | null;
   rule_name: string;
   tds_type: string;
   logic_json: string;
   priority: number;
   status: string;
+  sync_status: string;
+  last_synced_at: string | null;
+  last_error: string | null;
   preset_id: string | null;
   created_at: string;
   updated_at: string;
@@ -66,29 +69,18 @@ async function verifyRuleOwnership(
   return { ok: true, rule };
 }
 
-async function verifyDomainOwnership(
-  env: Env,
-  domainId: number,
-  accountId: number,
-): Promise<{ ok: true; domain: { id: number; domain_name: string; zone_id: number } } | { ok: false; error: string }> {
-  const domain = await env.DB301.prepare(
-    "SELECT id, domain_name, zone_id FROM domains WHERE id = ? AND account_id = ?",
-  )
-    .bind(domainId, accountId)
-    .first<{ id: number; domain_name: string; zone_id: number }>();
-
-  if (!domain) return { ok: false, error: "domain_not_found" };
-  return { ok: true, domain };
-}
-
 function formatRule(r: TdsRuleRecord) {
   return {
     id: r.id,
+    site_id: r.site_id,
     rule_name: r.rule_name,
     tds_type: r.tds_type,
     logic_json: JSON.parse(r.logic_json),
     priority: r.priority,
     status: r.status,
+    sync_status: r.sync_status,
+    last_synced_at: r.last_synced_at,
+    last_error: r.last_error,
     preset_id: r.preset_id,
     created_at: r.created_at,
     updated_at: r.updated_at,
@@ -133,40 +125,40 @@ export async function handleListTdsParams(c: Context<{ Bindings: Env }>) {
 /**
  * GET /tds/rules
  * List all TDS rules for account.
+ * Optional query param: site_id — filter by site.
  */
 export async function handleListTdsRules(c: Context<{ Bindings: Env }>) {
   const auth = await requireAuth(c, c.env);
   if (!auth) return c.json({ ok: false, error: "unauthorized" }, 401);
 
-  const rules = await c.env.DB301.prepare(
-    "SELECT * FROM tds_rules WHERE account_id = ? ORDER BY priority DESC, id",
-  )
-    .bind(auth.account_id)
-    .all<TdsRuleRecord>();
+  const siteIdParam = c.req.query("site_id");
 
-  // Get domain bindings count for each rule
-  const ruleIds = rules.results.map((r) => r.id);
-  let bindingCounts: Record<number, number> = {};
-  if (ruleIds.length > 0) {
-    const bindings = await c.env.DB301.prepare(
-      `SELECT tds_rule_id, COUNT(*) as count FROM rule_domain_map
-       WHERE tds_rule_id IN (${ruleIds.map(() => "?").join(",")})
-       AND binding_status != 'removed'
-       GROUP BY tds_rule_id`,
-    )
-      .bind(...ruleIds)
-      .all<{ tds_rule_id: number; count: number }>();
+  let sql = `SELECT tr.*,
+    s.site_name,
+    (SELECT d.domain_name FROM domains d WHERE d.site_id = tr.site_id AND d.role = 'acceptor' AND d.blocked = 0 LIMIT 1) as acceptor_domain
+  FROM tds_rules tr
+  LEFT JOIN sites s ON tr.site_id = s.id
+  WHERE tr.account_id = ?`;
 
-    for (const b of bindings.results) {
-      bindingCounts[b.tds_rule_id] = b.count;
-    }
+  const binds: (string | number)[] = [auth.account_id];
+
+  if (siteIdParam) {
+    sql += " AND tr.site_id = ?";
+    binds.push(parseInt(siteIdParam));
   }
+
+  sql += " ORDER BY tr.priority DESC, tr.id";
+
+  const rules = await c.env.DB301.prepare(sql)
+    .bind(...binds)
+    .all<TdsRuleRecord & { site_name: string | null; acceptor_domain: string | null }>();
 
   return c.json({
     ok: true,
     rules: rules.results.map((r) => ({
       ...formatRule(r),
-      domain_count: bindingCounts[r.id] || 0,
+      site_name: r.site_name,
+      acceptor_domain: r.acceptor_domain,
     })),
     total: rules.results.length,
   });
@@ -174,51 +166,33 @@ export async function handleListTdsRules(c: Context<{ Bindings: Env }>) {
 
 /**
  * GET /tds/rules/:id
- * Get single TDS rule with domain bindings.
+ * Get single TDS rule with site info.
  */
 export async function handleGetTdsRule(c: Context<{ Bindings: Env }>) {
   const ruleId = parseInt(c.req.param("id"));
   const auth = await requireAuth(c, c.env);
   if (!auth) return c.json({ ok: false, error: "unauthorized" }, 401);
 
-  const check = await verifyRuleOwnership(c.env, ruleId, auth.account_id);
-  if (!check.ok) return c.json({ ok: false, error: check.error }, 404);
-
-  // Get domain bindings
-  const bindings = await c.env.DB301.prepare(
-    `SELECT rdm.id, rdm.domain_id, rdm.enabled, rdm.binding_status,
-            rdm.last_synced_at, rdm.last_error, rdm.created_at,
-            d.domain_name
-     FROM rule_domain_map rdm
-     JOIN domains d ON rdm.domain_id = d.id
-     WHERE rdm.tds_rule_id = ? AND rdm.account_id = ? AND rdm.binding_status != 'removed'
-     ORDER BY d.domain_name`,
+  const row = await c.env.DB301.prepare(
+    `SELECT tr.*,
+      s.site_name,
+      (SELECT d.domain_name FROM domains d WHERE d.site_id = tr.site_id AND d.role = 'acceptor' AND d.blocked = 0 LIMIT 1) as acceptor_domain
+    FROM tds_rules tr
+    LEFT JOIN sites s ON tr.site_id = s.id
+    WHERE tr.id = ? AND tr.account_id = ?`,
   )
     .bind(ruleId, auth.account_id)
-    .all<{
-      id: number;
-      domain_id: number;
-      enabled: number;
-      binding_status: string;
-      last_synced_at: string | null;
-      last_error: string | null;
-      created_at: string;
-      domain_name: string;
-    }>();
+    .first<TdsRuleRecord & { site_name: string | null; acceptor_domain: string | null }>();
+
+  if (!row) return c.json({ ok: false, error: "rule_not_found" }, 404);
 
   return c.json({
     ok: true,
-    rule: formatRule(check.rule),
-    domains: bindings.results.map((b) => ({
-      binding_id: b.id,
-      domain_id: b.domain_id,
-      domain_name: b.domain_name,
-      enabled: b.enabled === 1,
-      binding_status: b.binding_status,
-      last_synced_at: b.last_synced_at,
-      last_error: b.last_error,
-      created_at: b.created_at,
-    })),
+    rule: {
+      ...formatRule(row),
+      site_name: row.site_name,
+      acceptor_domain: row.acceptor_domain,
+    },
   });
 }
 
@@ -250,15 +224,16 @@ export async function handleCreateTdsRule(c: Context<{ Bindings: Env }>) {
     }, 400);
   }
 
-  const { rule_name, tds_type, logic_json, priority } = parsed.data;
+  const { rule_name, tds_type, logic_json, site_id, priority } = parsed.data;
 
   const result = await c.env.DB301.prepare(
-    `INSERT INTO tds_rules (account_id, rule_name, tds_type, logic_json, priority, status)
-     VALUES (?, ?, ?, ?, ?, 'draft')
+    `INSERT INTO tds_rules (account_id, site_id, rule_name, tds_type, logic_json, priority, status, sync_status)
+     VALUES (?, ?, ?, ?, ?, ?, 'active', 'pending')
      RETURNING id, created_at, updated_at`,
   )
     .bind(
       auth.account_id,
+      site_id,
       rule_name,
       tds_type,
       JSON.stringify(logic_json),
@@ -272,11 +247,13 @@ export async function handleCreateTdsRule(c: Context<{ Bindings: Env }>) {
     ok: true,
     rule: {
       id: result.id,
+      site_id,
       rule_name,
       tds_type,
       logic_json,
       priority,
-      status: "draft",
+      status: "active",
+      sync_status: "pending",
       preset_id: null,
       created_at: result.created_at,
       updated_at: result.updated_at,
@@ -302,7 +279,7 @@ export async function handleCreateFromPreset(c: Context<{ Bindings: Env }>) {
     }, 400);
   }
 
-  const { preset_id, params, domain_ids, rule_name } = parsed.data;
+  const { preset_id, params, site_id, rule_name } = parsed.data;
 
   // Expand preset
   const expanded = expandTdsPreset(preset_id, {
@@ -313,14 +290,15 @@ export async function handleCreateFromPreset(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: false, error: expanded.error }, 400);
   }
 
-  // Insert rule
+  // Insert rule with site_id, auto-activate
   const result = await c.env.DB301.prepare(
-    `INSERT INTO tds_rules (account_id, rule_name, tds_type, logic_json, priority, status, preset_id)
-     VALUES (?, ?, ?, ?, ?, 'draft', ?)
+    `INSERT INTO tds_rules (account_id, site_id, rule_name, tds_type, logic_json, priority, status, sync_status, preset_id)
+     VALUES (?, ?, ?, ?, ?, ?, 'active', 'pending', ?)
      RETURNING id, created_at, updated_at`,
   )
     .bind(
       auth.account_id,
+      site_id,
       expanded.rule_name,
       expanded.tds_type,
       JSON.stringify(expanded.logic_json),
@@ -331,47 +309,21 @@ export async function handleCreateFromPreset(c: Context<{ Bindings: Env }>) {
 
   if (!result) return c.json({ ok: false, error: "create_failed" }, 500);
 
-  // Bind domains if provided
-  let boundDomains: number[] = [];
-  if (domain_ids && domain_ids.length > 0) {
-    for (const domainId of domain_ids) {
-      const domainCheck = await verifyDomainOwnership(c.env, domainId, auth.account_id);
-      if (!domainCheck.ok) continue;
-
-      await c.env.DB301.prepare(
-        `INSERT INTO rule_domain_map (account_id, tds_rule_id, domain_id, enabled, binding_status)
-         VALUES (?, ?, ?, 1, 'pending')`,
-      )
-        .bind(auth.account_id, result.id, domainId)
-        .run();
-
-      boundDomains.push(domainId);
-    }
-
-    // Update status to active if domains bound
-    if (boundDomains.length > 0) {
-      await c.env.DB301.prepare(
-        "UPDATE tds_rules SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-      )
-        .bind(result.id)
-        .run();
-    }
-  }
-
   return c.json({
     ok: true,
     rule: {
       id: result.id,
+      site_id,
       rule_name: expanded.rule_name,
       tds_type: expanded.tds_type,
       logic_json: expanded.logic_json,
       priority: expanded.priority,
-      status: boundDomains.length > 0 ? "active" : "draft",
+      status: "active",
+      sync_status: "pending",
       preset_id: expanded.preset_id,
       created_at: result.created_at,
       updated_at: result.updated_at,
     },
-    bound_domains: boundDomains,
   }, 201);
 }
 
@@ -403,6 +355,7 @@ export async function handleUpdateTdsRule(c: Context<{ Bindings: Env }>) {
 
   const updates: string[] = [];
   const bindings: (string | number)[] = [];
+  let needsResync = false;
 
   if (parsed.data.rule_name !== undefined) {
     updates.push("rule_name = ?");
@@ -415,10 +368,17 @@ export async function handleUpdateTdsRule(c: Context<{ Bindings: Env }>) {
   if (parsed.data.logic_json !== undefined) {
     updates.push("logic_json = ?");
     bindings.push(JSON.stringify(parsed.data.logic_json));
+    needsResync = true;
+  }
+  if (parsed.data.site_id !== undefined) {
+    updates.push("site_id = ?");
+    bindings.push(parsed.data.site_id);
+    needsResync = true;
   }
   if (parsed.data.priority !== undefined) {
     updates.push("priority = ?");
     bindings.push(parsed.data.priority);
+    needsResync = true;
   }
   if (parsed.data.status !== undefined) {
     updates.push("status = ?");
@@ -429,6 +389,11 @@ export async function handleUpdateTdsRule(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: false, error: "no_updates" }, 400);
   }
 
+  // Mark rule as pending re-sync if logic/priority/site changed
+  if (needsResync) {
+    updates.push("sync_status = 'pending'");
+  }
+
   updates.push("updated_at = CURRENT_TIMESTAMP");
   bindings.push(ruleId);
 
@@ -436,14 +401,6 @@ export async function handleUpdateTdsRule(c: Context<{ Bindings: Env }>) {
     `UPDATE tds_rules SET ${updates.join(", ")} WHERE id = ?`,
   )
     .bind(...bindings)
-    .run();
-
-  // Mark bindings as pending re-sync
-  await c.env.DB301.prepare(
-    `UPDATE rule_domain_map SET binding_status = 'pending', updated_at = CURRENT_TIMESTAMP
-     WHERE tds_rule_id = ? AND binding_status = 'applied'`,
-  )
-    .bind(ruleId)
     .run();
 
   return c.json({ ok: true, rule_id: ruleId });
@@ -469,7 +426,7 @@ export async function handleReorderTdsRules(c: Context<{ Bindings: Env }>) {
 
   const stmts = parsed.data.rules.map((r) =>
     c.env.DB301.prepare(
-      "UPDATE tds_rules SET priority = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND account_id = ?",
+      "UPDATE tds_rules SET priority = ?, sync_status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND account_id = ?",
     ).bind(r.priority, r.id, auth.account_id),
   );
 
@@ -484,7 +441,7 @@ export async function handleReorderTdsRules(c: Context<{ Bindings: Env }>) {
 
 /**
  * DELETE /tds/rules/:id
- * Delete TDS rule and cascade rule_domain_map.
+ * Delete TDS rule.
  */
 export async function handleDeleteTdsRule(c: Context<{ Bindings: Env }>) {
   const ruleId = parseInt(c.req.param("id"));
@@ -494,13 +451,6 @@ export async function handleDeleteTdsRule(c: Context<{ Bindings: Env }>) {
   const check = await verifyRuleOwnership(c.env, ruleId, auth.account_id);
   if (!check.ok) return c.json({ ok: false, error: check.error }, 404);
 
-  // Mark bindings as removed (FK cascade will also handle, but explicit is better)
-  await c.env.DB301.prepare(
-    "UPDATE rule_domain_map SET binding_status = 'removed', updated_at = CURRENT_TIMESTAMP WHERE tds_rule_id = ?",
-  )
-    .bind(ruleId)
-    .run();
-
   // Delete rule
   await c.env.DB301.prepare(
     "DELETE FROM tds_rules WHERE id = ? AND account_id = ?",
@@ -509,159 +459,6 @@ export async function handleDeleteTdsRule(c: Context<{ Bindings: Env }>) {
     .run();
 
   return c.json({ ok: true, deleted_id: ruleId });
-}
-
-// ============================================================
-// HANDLERS: DOMAIN BINDINGS
-// ============================================================
-
-/**
- * POST /tds/rules/:id/domains
- * Bind rule to domains.
- */
-export async function handleBindDomains(c: Context<{ Bindings: Env }>) {
-  const ruleId = parseInt(c.req.param("id"));
-  const auth = await requireEditor(c, c.env);
-  if (!auth) return c.json({ ok: false, error: "forbidden" }, 403);
-
-  const check = await verifyRuleOwnership(c.env, ruleId, auth.account_id);
-  if (!check.ok) return c.json({ ok: false, error: check.error }, 404);
-
-  const body = await c.req.json();
-  const parsed = bindDomainsSchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({
-      ok: false,
-      error: "validation_error",
-      details: parsed.error.issues.map((i) => i.message),
-    }, 400);
-  }
-
-  const bound: number[] = [];
-  const errors: Array<{ domain_id: number; error: string }> = [];
-
-  for (const domainId of parsed.data.domain_ids) {
-    const domainCheck = await verifyDomainOwnership(c.env, domainId, auth.account_id);
-    if (!domainCheck.ok) {
-      errors.push({ domain_id: domainId, error: domainCheck.error });
-      continue;
-    }
-
-    // Check if binding already exists
-    const existing = await c.env.DB301.prepare(
-      `SELECT id FROM rule_domain_map
-       WHERE tds_rule_id = ? AND domain_id = ? AND binding_status != 'removed'`,
-    )
-      .bind(ruleId, domainId)
-      .first();
-
-    if (existing) {
-      errors.push({ domain_id: domainId, error: "already_bound" });
-      continue;
-    }
-
-    await c.env.DB301.prepare(
-      `INSERT INTO rule_domain_map (account_id, tds_rule_id, domain_id, enabled, binding_status)
-       VALUES (?, ?, ?, 1, 'pending')`,
-    )
-      .bind(auth.account_id, ruleId, domainId)
-      .run();
-
-    bound.push(domainId);
-  }
-
-  // Activate rule if it was draft and now has bindings
-  if (bound.length > 0 && check.rule.status === "draft") {
-    await c.env.DB301.prepare(
-      "UPDATE tds_rules SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-    )
-      .bind(ruleId)
-      .run();
-  }
-
-  return c.json({
-    ok: true,
-    bound: bound,
-    errors: errors.length > 0 ? errors : undefined,
-  }, 201);
-}
-
-/**
- * DELETE /tds/rules/:id/domains/:domainId
- * Unbind rule from domain.
- */
-export async function handleUnbindDomain(c: Context<{ Bindings: Env }>) {
-  const ruleId = parseInt(c.req.param("id"));
-  const domainId = parseInt(c.req.param("domainId"));
-  const auth = await requireEditor(c, c.env);
-  if (!auth) return c.json({ ok: false, error: "forbidden" }, 403);
-
-  const check = await verifyRuleOwnership(c.env, ruleId, auth.account_id);
-  if (!check.ok) return c.json({ ok: false, error: check.error }, 404);
-
-  await c.env.DB301.prepare(
-    `UPDATE rule_domain_map SET binding_status = 'removed', updated_at = CURRENT_TIMESTAMP
-     WHERE tds_rule_id = ? AND domain_id = ? AND account_id = ?`,
-  )
-    .bind(ruleId, domainId, auth.account_id)
-    .run();
-
-  return c.json({ ok: true, rule_id: ruleId, domain_id: domainId });
-}
-
-/**
- * GET /tds/rules/:id/domains
- * List domain bindings for a rule.
- */
-export async function handleListRuleDomains(c: Context<{ Bindings: Env }>) {
-  const ruleId = parseInt(c.req.param("id"));
-  const auth = await requireAuth(c, c.env);
-  if (!auth) return c.json({ ok: false, error: "unauthorized" }, 401);
-
-  const check = await verifyRuleOwnership(c.env, ruleId, auth.account_id);
-  if (!check.ok) return c.json({ ok: false, error: check.error }, 404);
-
-  const bindings = await c.env.DB301.prepare(
-    `SELECT rdm.id, rdm.domain_id, rdm.enabled, rdm.binding_status,
-            rdm.schedule_start, rdm.schedule_end,
-            rdm.last_synced_at, rdm.last_error, rdm.created_at,
-            d.domain_name
-     FROM rule_domain_map rdm
-     JOIN domains d ON rdm.domain_id = d.id
-     WHERE rdm.tds_rule_id = ? AND rdm.account_id = ? AND rdm.binding_status != 'removed'
-     ORDER BY d.domain_name`,
-  )
-    .bind(ruleId, auth.account_id)
-    .all<{
-      id: number;
-      domain_id: number;
-      enabled: number;
-      binding_status: string;
-      schedule_start: string | null;
-      schedule_end: string | null;
-      last_synced_at: string | null;
-      last_error: string | null;
-      created_at: string;
-      domain_name: string;
-    }>();
-
-  return c.json({
-    ok: true,
-    rule_id: ruleId,
-    domains: bindings.results.map((b) => ({
-      binding_id: b.id,
-      domain_id: b.domain_id,
-      domain_name: b.domain_name,
-      enabled: b.enabled === 1,
-      binding_status: b.binding_status,
-      schedule_start: b.schedule_start,
-      schedule_end: b.schedule_end,
-      last_synced_at: b.last_synced_at,
-      last_error: b.last_error,
-      created_at: b.created_at,
-    })),
-    total: bindings.results.length,
-  });
 }
 
 // ============================================================
@@ -691,26 +488,25 @@ export async function handleApplyTdsRules(c: Context<{ Bindings: Env }>) {
   }
   const { cfAccountId, cfToken, clientD1Id } = syncInfo.info;
 
-  // 4. SELECT active rules + bound domains
+  // 4. SELECT active rules that need sync + acceptor domain via site
   const rows = await c.env.DB301.prepare(`
     SELECT tr.id, tr.tds_type, tr.logic_json, tr.priority,
-           d.domain_name, rdm.id as binding_id
+           d.domain_name
     FROM tds_rules tr
-    JOIN rule_domain_map rdm ON rdm.tds_rule_id = tr.id
-    JOIN domains d ON rdm.domain_id = d.id
+    JOIN sites s ON tr.site_id = s.id
+    JOIN domains d ON d.site_id = s.id AND d.role = 'acceptor' AND d.blocked = 0
     WHERE tr.account_id = ? AND tr.status = 'active'
-      AND rdm.binding_status != 'removed' AND rdm.enabled = 1
+      AND tr.sync_status != 'applied'
   `).bind(auth.account_id).all<{
     id: number;
     tds_type: string;
     logic_json: string;
     priority: number;
     domain_name: string;
-    binding_id: number;
   }>();
 
   if (!rows.results || rows.results.length === 0) {
-    return c.json({ ok: true, rules_synced: 0, domains_synced: 0, message: "no_active_bindings" });
+    return c.json({ ok: true, rules_synced: 0, domains_synced: 0, message: "no_pending_rules" });
   }
 
   // 5. Transform → TDSRule[] (parse logic_json)
@@ -722,7 +518,7 @@ export async function handleApplyTdsRules(c: Context<{ Bindings: Env }>) {
       status_code?: number;
     };
     return {
-      id: r.binding_id,
+      id: r.id,
       domain_name: r.domain_name,
       priority: r.priority,
       conditions: logic.conditions,
@@ -751,12 +547,12 @@ export async function handleApplyTdsRules(c: Context<{ Bindings: Env }>) {
 
   const configResult = await syncDomainConfig(cfAccountId, clientD1Id, cfToken, domainConfigs);
 
-  // 8. UPDATE rule_domain_map → binding_status='applied'
-  const bindingIds = rows.results.map(r => r.binding_id);
-  if (bindingIds.length > 0) {
-    const stmts = bindingIds.map(id =>
+  // 8. UPDATE tds_rules → sync_status='applied'
+  const ruleIds = [...new Set(rows.results.map(r => r.id))];
+  if (ruleIds.length > 0) {
+    const stmts = ruleIds.map(id =>
       c.env.DB301.prepare(
-        `UPDATE rule_domain_map SET binding_status = 'applied', last_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+        `UPDATE tds_rules SET sync_status = 'applied', last_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
       ).bind(id)
     );
     await c.env.DB301.batch(stmts);

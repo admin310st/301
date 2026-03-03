@@ -321,6 +321,7 @@ INSERT INTO tds_params (param_key, category, description) VALUES
 CREATE TABLE IF NOT EXISTS tds_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
+    site_id INTEGER,
     rule_name TEXT NOT NULL,
     tds_type TEXT CHECK(tds_type IN (
         'smartlink',
@@ -328,40 +329,20 @@ CREATE TABLE IF NOT EXISTS tds_rules (
     )) DEFAULT 'smartlink',
     logic_json TEXT NOT NULL,
     priority INTEGER DEFAULT 100,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_tds_rules_account ON tds_rules(account_id, priority);
-CREATE INDEX IF NOT EXISTS idx_tds_rules_name ON tds_rules(rule_name);
-
-CREATE TABLE IF NOT EXISTS rule_domain_map (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id INTEGER NOT NULL,
-    redirect_rule_id INTEGER,
-    tds_rule_id INTEGER,
-    domain_id INTEGER NOT NULL,
-    enabled INTEGER DEFAULT 1,
-    binding_status TEXT CHECK(binding_status IN (
-        'pending','applying','applied','failed','retired','removed'
-    )) DEFAULT 'pending',
-    schedule_start TEXT,
-    schedule_end TEXT,
+    status TEXT CHECK(status IN ('draft', 'active', 'disabled')) DEFAULT 'draft',
+    preset_id TEXT,
+    sync_status TEXT CHECK(sync_status IN ('pending','applying','applied','failed')) DEFAULT 'pending',
     last_synced_at TEXT,
     last_error TEXT,
-    replaced_by INTEGER,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
-    FOREIGN KEY (redirect_rule_id) REFERENCES redirect_rules(id) ON DELETE CASCADE,
-    FOREIGN KEY (tds_rule_id) REFERENCES tds_rules(id) ON DELETE CASCADE,
-    FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE,
-    FOREIGN KEY (replaced_by) REFERENCES rule_domain_map(id) ON DELETE SET NULL
+    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE SET NULL
 );
-CREATE INDEX IF NOT EXISTS idx_rdm_account_status ON rule_domain_map(account_id, binding_status);
-CREATE INDEX IF NOT EXISTS idx_rdm_domain_enabled ON rule_domain_map(domain_id, enabled);
-CREATE INDEX IF NOT EXISTS idx_rdm_redirect ON rule_domain_map(redirect_rule_id);
-CREATE INDEX IF NOT EXISTS idx_rdm_tds ON rule_domain_map(tds_rule_id);
+CREATE INDEX IF NOT EXISTS idx_tds_rules_account ON tds_rules(account_id, priority);
+CREATE INDEX IF NOT EXISTS idx_tds_rules_name ON tds_rules(rule_name);
+CREATE INDEX IF NOT EXISTS idx_tds_rules_status ON tds_rules(account_id, status);
+CREATE INDEX IF NOT EXISTS idx_tds_rules_site ON tds_rules(site_id, priority);
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
