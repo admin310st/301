@@ -1,6 +1,6 @@
 # Integration Test Results
 
-**Date:** 2026-02-24
+**Date:** 2026-02-24 (updated 2026-03-03)
 **Environment:** Production (api.301.st, CF Client account click@clx.cx)
 **Test Site:** site_id=4, project_id=2, account_id=19
 
@@ -40,7 +40,12 @@
 | 49 | Domain→Domain: debloat.click | T1 | 301.st | 301 | synced |
 | 50 | www→non-www: debloat.click | T4 | — | 301 | synced |
 
-### TDS Rules: **0** (none exist)
+### TDS Rules (Test Site, site_id=4)
+
+| rule_id | rule_name | tds_type | site_id | status | sync_status |
+|---------|-----------|----------|---------|--------|-------------|
+| 5 | (existing) | smartlink | 4 | active | applied |
+
 ### Client Workers: **0** (not deployed, client_worker_configs empty)
 
 ---
@@ -125,6 +130,23 @@
 
 ---
 
+## Phase 2e: TDS Site-Scoped CRUD (T1–T8) — 2026-03-03
+
+**Context:** ADR-001 — `tds_rules` now has `site_id` FK, `rule_domain_map` dropped, binding endpoints removed.
+
+| # | Test | Request | Expected | Actual | Status |
+|---|------|---------|----------|--------|--------|
+| T1 | List rules — new fields | GET /tds/rules | site_name, acceptor_domain, sync_status | 200, 15 fields, all present | **PASS** |
+| T2 | Filter by site_id | GET /tds/rules?site_id=4 | filtered list | 200, 2 rules | **PASS** |
+| T3 | Create with site_id | POST /tds/rules {site_id:4, ...} | 201, auto-active | 201, status=active, sync_status=pending | **PASS** |
+| T4 | Create without site_id | POST /tds/rules (no site_id) | 400, validation_error | 400, validation_error | **PASS** |
+| T5 | Get by ID — site info | GET /tds/rules/:id | site_name, acceptor_domain | 200, site_name="Test Site", acceptor_domain="landing.fit" | **PASS** |
+| T6 | Update rule | PATCH /tds/rules/:id | 200 | 200, ok | **PASS** |
+| T7 | Binding endpoints removed | POST+GET /tds/rules/:id/domains | 404 | 404, 404 | **PASS** |
+| T8 | Delete + verify | DELETE /tds/rules/:id → GET | 200 → 404 | 200 → 404 | **PASS** |
+
+---
+
 ## BLOCKED Tests
 
 ### Phase 1a: Health Worker — RESOLVED (2026-03-03)
@@ -134,9 +156,9 @@ Health worker deployed, VT checks running, all H1-H8 tests pass.
 **Reason:** No TDS rules exist, no client workers deployed.
 Tests T1-T5 cannot be executed.
 
-### Phase 1c: TDS Postback (with real rules) — BLOCKED
-**Reason:** No TDS rules exist (need to create via Phase 2b first).
-Tests P1-P2 with real rules deferred.
+### Phase 1c: TDS Postback (with real rules) — UNBLOCKED
+**Status:** TDS rules exist (site_id=4). Can now test postback with real rule_id.
+Deferred to next test run.
 
 ### Phase 1d: D1 Verification — BLOCKED
 **Reason:** No client D1 databases exist (workers not deployed).
@@ -164,12 +186,13 @@ curl cannot work (IP/UA mismatch). Need browser context via MCP Playwright.
 | 2: R (Redirects) | 7 | **7** | 0 | 0 |
 | 2: T (TDS) | 10 | **10** | 0 | 0 |
 | 2d: H (Health) | 8 | **8** | 0 | 0 |
-| 1b: TDS Edge | 5 | — | — | **5** (no workers/rules) |
-| 1c: Postback (real) | 2 | — | — | **2** (no TDS rules) |
+| 2e: TDS Site-Scoped | 8 | **8** | 0 | 0 |
+| 1b: TDS Edge | 5 | — | — | **5** (no workers) |
+| 1c: Postback (real) | 2 | — | — | **2** (unblocked, deferred) |
 | 1d: D1 Verify | 4 | — | — | **4** (no client D1) |
 | 2c: MAB | 6 | — | — | **6** (need Playwright) |
 | 2d: Cleanup | 4 | — | — | **4** (need Playwright) |
-| **Total** | **72** | **51** | **0** | **21** |
+| **Total** | **80** | **59** | **0** | **21** |
 
 ---
 
